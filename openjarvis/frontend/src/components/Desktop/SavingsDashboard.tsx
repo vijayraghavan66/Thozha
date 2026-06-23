@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type React from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { SUPABASE_ANON_KEY, SUPABASE_URL } from '../../lib/supabase';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -279,9 +280,6 @@ function getOrCreateAnonId(): string {
   return id;
 }
 
-const SUPABASE_URL = 'https://mtbtgpwzrbostweaanpr.supabase.co';
-const SUPABASE_KEY = 'REDACTED_JWT_FIXTURE';
-
 const REFRESH_INTERVAL_MS = 5000;
 
 export function SavingsDashboard({ apiUrl }: { apiUrl: string }) {
@@ -326,7 +324,7 @@ export function SavingsDashboard({ apiUrl }: { apiUrl: string }) {
     const flopsSaved = data.per_provider.reduce((s, p) => s + (p.flops || 0), 0);
     invoke('submit_savings', {
       supabaseUrl: SUPABASE_URL,
-      supabaseKey: SUPABASE_KEY,
+      supabaseKey: SUPABASE_ANON_KEY,
       payload: {
         anon_id: anonId,
         display_name: displayName,
