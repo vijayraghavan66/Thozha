@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import threading
 import time
 from pathlib import Path
@@ -22,10 +23,26 @@ class ResponseReplayConflict(RuntimeError):
 
 class HostResponseOutbox:
     def __init__(self, path: str | Path = ":memory:") -> None:
-        self.path = str(path)
-        if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(Path(self.path).parent, 0o700)
+        requested_path = str(path)
+        self.path = requested_path
+        if requested_path != ":memory:":
+            database_path = Path(requested_path).expanduser().absolute()
+            if any(component.is_symlink() for component in (database_path, *database_path.parents)):
+                raise ValueError("response outbox path must not traverse symbolic links")
+            parent = database_path.parent
+            parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if parent.is_symlink() or not parent.is_dir():
+                raise ValueError("response outbox directory must be a private real directory")
+            parent_metadata = parent.stat()
+            if parent_metadata.st_uid != os.getuid() or stat.S_IMODE(parent_metadata.st_mode) & 0o077:
+                raise PermissionError("response outbox directory must be owner-only; refusing to change its permissions")
+            if database_path.is_symlink():
+                raise ValueError("response outbox database must not be a symbolic link")
+            if database_path.exists() and not database_path.is_file():
+                raise ValueError("response outbox database path must be a regular file")
+            if database_path.exists() and database_path.stat().st_uid != os.getuid():
+                raise PermissionError("response outbox database must be owned by the current user")
+            self.path = str(database_path)
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")

@@ -9,7 +9,10 @@ const MAX_TTL_MS = 24 * 60 * 60 * 1000;
 const REQUEST_SKEW_MS = 60_000;
 const NONCE_TTL_MS = 2 * 60 * 1000;
 const RATE_LIMIT_PER_MINUTE = 120;
+const RATE_WINDOW_MS = 60_000;
 const MAX_INBOX_MESSAGES = 1000;
+// Keep only a bounded delivery tombstone after the encrypted envelope expires.
+const MESSAGE_AUDIT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export class TenantSessionCore {
   constructor(state, env) {
@@ -97,6 +100,7 @@ export class TenantSessionCore {
         secret_hash: await sha256Hex(secret), expires_at_unix_ms: expiresAt,
         created_by: auth.device.id, status: "open",
       });
+      await this.scheduleEarlierAlarm(expiresAt);
     });
     return ok({ invitation_id: invitationId, invitation_secret_b64url: b64url(secret), expires_at_unix_ms: expiresAt });
   }
@@ -134,6 +138,7 @@ export class TenantSessionCore {
       invite.status = "challenged";
       invite.challenge_id = challengeId;
       await this.put(`invite:${invitationId}`, invite);
+      await this.scheduleEarlierAlarm(expires);
     });
     return ok({ challenge_id: challengeId, challenge_b64url: b64url(challenge), device_id: deviceId, expires_at_unix_ms: expires });
   }
@@ -332,6 +337,9 @@ export class TenantSessionCore {
         if (!record || record.status === "ACKED" || record.status === "UNDELIVERABLE" || record.status === "EXPIRED") continue;
         if (record.envelope.expires_at_unix_ms <= Date.now()) {
           record.status = "EXPIRED";
+          record.envelope = null;
+          record.expired_at_unix_ms = Date.now();
+          record.purge_at_unix_ms = record.expired_at_unix_ms + MESSAGE_AUDIT_RETENTION_MS;
           await this.put(`message:${id}`, record);
           continue;
         }
@@ -395,15 +403,36 @@ export class TenantSessionCore {
   async alarm() {
     await this.atomic(async () => {
       const entries = await this.state.storage.list({ prefix: "message:" });
+      const now = Date.now();
       for (const [key, record] of entries) {
-        if (record.envelope.expires_at_unix_ms <= Date.now() && record.status !== "ACKED") {
-          record.status = "EXPIRED";
+        if (Number.isSafeInteger(record.purge_at_unix_ms) && record.purge_at_unix_ms <= now) {
+          await this.state.storage.delete(key);
+          const recipientId = record.to_device_id || record.envelope?.to_device_id;
+          if (recipientId) await this.removeInboxReference(recipientId, key.slice("message:".length));
+          continue;
+        }
+        if (record.envelope?.expires_at_unix_ms <= now) {
+          if (record.status !== "ACKED") record.status = "EXPIRED";
+          const recipientId = record.to_device_id || record.envelope.to_device_id;
           record.envelope = null;
+          record.expired_at_unix_ms = now;
+          record.purge_at_unix_ms = now + MESSAGE_AUDIT_RETENTION_MS;
           await this.put(key, record);
+          if (recipientId) await this.removeInboxReference(recipientId, key.slice("message:".length));
         }
       }
       await this.scheduleExpiry();
     });
+  }
+
+  async removeInboxReference(deviceId, messageId) {
+    const key = `inbox:${deviceId}`;
+    const queue = await this.get(key) || [];
+    const remaining = queue.filter((id) => id !== messageId);
+    if (remaining.length !== queue.length) {
+      if (remaining.length) await this.put(key, remaining);
+      else await this.state.storage.delete(key);
+    }
   }
 
   async authenticate(request, bodyBytes) {
@@ -427,13 +456,16 @@ export class TenantSessionCore {
     if (!verified) throw new RelayError("INVALID_SIGNATURE", 401, "Device request signature rejected");
     await this.atomic(async () => {
       const nonceKey = `nonce:${deviceId}:${nonce}`;
-      if (await this.get(nonceKey)) throw new RelayError("NONCE_REPLAY", 409, "Request nonce was already used");
-      const windowKey = Math.floor(now / 60_000);
+      const nonceExpiry = await this.get(nonceKey);
+      if (Number.isSafeInteger(nonceExpiry) && nonceExpiry > now) throw new RelayError("NONCE_REPLAY", 409, "Request nonce was already used");
+      if (nonceExpiry !== undefined) await this.state.storage.delete(nonceKey);
+      const windowKey = Math.floor(now / RATE_WINDOW_MS);
       const rateKey = `rate:${deviceId}:${windowKey}`;
       const rate = Number(await this.get(rateKey) || 0);
       if (rate >= RATE_LIMIT_PER_MINUTE) throw new RelayError("RATE_LIMITED", 429, "Device request rate limit exceeded");
       await this.put(nonceKey, now + NONCE_TTL_MS);
       await this.put(rateKey, rate + 1);
+      await this.scheduleEarlierAlarm(Math.min(now + NONCE_TTL_MS, (windowKey + 1) * RATE_WINDOW_MS));
     });
     return { device, bodyBytes: bytes };
   }
@@ -488,9 +520,55 @@ export class TenantSessionCore {
   async scheduleExpiry() {
     const items = await this.state.storage.list({ prefix: "message:" });
     let earliest = Infinity;
-    for (const item of items.values()) if (item.status !== "ACKED" && item.status !== "EXPIRED" && item.envelope?.expires_at_unix_ms) earliest = Math.min(earliest, item.envelope.expires_at_unix_ms);
+    const now = Date.now();
+    for (const [key, item] of items) {
+      // Migrate tombstones created by the previous cleanup path, which cleared
+      // an expired envelope but did not assign a bounded purge deadline.
+      if (!item.envelope && !Number.isSafeInteger(item.purge_at_unix_ms)
+          && ["ACKED", "EXPIRED", "UNDELIVERABLE"].includes(item.status)) {
+        item.expired_at_unix_ms ||= now;
+        item.purge_at_unix_ms = now + MESSAGE_AUDIT_RETENTION_MS;
+        await this.put(key, item);
+        const recipientId = item.to_device_id;
+        if (recipientId) await this.removeInboxReference(recipientId, key.slice("message:".length));
+      }
+      if (Number.isSafeInteger(item.envelope?.expires_at_unix_ms)) earliest = Math.min(earliest, item.envelope.expires_at_unix_ms);
+      if (Number.isSafeInteger(item.purge_at_unix_ms)) earliest = Math.min(earliest, item.purge_at_unix_ms);
+    }
+
+    const nonces = await this.state.storage.list({ prefix: "nonce:" });
+    for (const [key, expiresAt] of nonces) {
+      if (!Number.isSafeInteger(expiresAt) || expiresAt <= now) await this.state.storage.delete(key);
+      else earliest = Math.min(earliest, expiresAt);
+    }
+
+    const rates = await this.state.storage.list({ prefix: "rate:" });
+    for (const [key] of rates) {
+      const match = key.match(/^rate:[0-9a-f]{32}:(\d+)$/);
+      if (!match) {
+        await this.state.storage.delete(key);
+        continue;
+      }
+      const expiresAt = (Number(match[1]) + 1) * RATE_WINDOW_MS;
+      if (!Number.isSafeInteger(expiresAt) || expiresAt <= now) await this.state.storage.delete(key);
+      else earliest = Math.min(earliest, expiresAt);
+    }
+
+    for (const prefix of ["invite:", "enroll:"]) {
+      const records = await this.state.storage.list({ prefix });
+      for (const [key, record] of records) {
+        const expiresAt = record.expires_at_unix_ms;
+        if (!Number.isSafeInteger(expiresAt) || expiresAt <= now) await this.state.storage.delete(key);
+        else earliest = Math.min(earliest, expiresAt);
+      }
+    }
     if (earliest !== Infinity) await this.state.storage.setAlarm(earliest);
     else await this.state.storage.deleteAlarm();
+  }
+
+  async scheduleEarlierAlarm(expiresAt) {
+    const current = await this.state.storage.getAlarm();
+    if (current === null || current > expiresAt) await this.state.storage.setAlarm(expiresAt);
   }
 
   get(key) { return this.state.storage.get(key); }
