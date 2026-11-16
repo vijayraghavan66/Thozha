@@ -36,6 +36,10 @@ export class TenantSessionCore {
 
     const certificateMatch = path.match(/^\/v1\/devices\/([0-9a-f]{32})\/certificate$/);
     if (certificateMatch && request.method === "GET") return await this.deviceCertificate(request, certificateMatch[1]);
+    const pushMatch = path.match(/^\/v1\/devices\/([0-9a-f]{32})\/push-token$/);
+    if (pushMatch && request.method === "PUT") return await this.setPushToken(request, pushMatch[1]);
+    if (pushMatch && request.method === "DELETE") return await this.clearPushToken(request, pushMatch[1]);
+    if (pushMatch && request.method === "GET") return await this.readPushToken(request, pushMatch[1]);
     const revokeMatch = path.match(/^\/v1\/devices\/([0-9a-f]{32})\/revoke$/);
     if (revokeMatch && request.method === "POST") return await this.revokeDevice(request, revokeMatch[1]);
     const inboxMatch = path.match(/^\/v1\/devices\/([0-9a-f]{32})\/inbox$/);
@@ -205,6 +209,46 @@ export class TenantSessionCore {
       if (invite) { invite.status = "consumed"; await this.put(`invite:${candidate.invitation_id}`, invite); }
     });
     return ok({ tenant_id: this.tenantId, device_id: candidate.device_id, status: "active", certificate });
+  }
+
+  /**
+   * A device may register or clear ONLY its own push token; the signature identifies the device, so a caller
+   * cannot register a token for someone else's device. The token is a delivery address, not a credential.
+   */
+  async setPushToken(request, deviceId) {
+    const auth = await this.authenticate(request);
+    if (auth.device.id !== deviceId) return fail("NOT_RECIPIENT", 403, "A device can only register its own push token");
+    const body = await readJson(request, 4 * 1024);
+    if (Object.keys(body).some((key) => key !== "token")) return fail("INVALID_ENVELOPE", 422, "Unexpected push-token field");
+    if (typeof body.token !== "string" || !/^[A-Za-z0-9:_-]{100,4096}$/.test(body.token)) return fail("INVALID_ENVELOPE", 422, "Push token format is invalid");
+    return this.atomic(async () => {
+      const device = await this.get(`device:${deviceId}`);
+      device.push_token = body.token;
+      device.push_token_updated_at_unix_ms = Date.now();
+      await this.put(`device:${deviceId}`, device);
+      return ok({ device_id: deviceId, status: "registered" });
+    });
+  }
+
+  async clearPushToken(request, deviceId) {
+    const auth = await this.authenticate(request);
+    if (auth.device.id !== deviceId) return fail("NOT_RECIPIENT", 403, "A device can only clear its own push token");
+    return this.atomic(async () => {
+      const device = await this.get(`device:${deviceId}`);
+      delete device.push_token;
+      delete device.push_token_updated_at_unix_ms;
+      await this.put(`device:${deviceId}`, device);
+      return ok({ device_id: deviceId, status: "cleared" });
+    });
+  }
+
+  /** Only the tenant host may read a companion's push token, and only to send a wake-up. */
+  async readPushToken(request, deviceId) {
+    const auth = await this.authenticate(request);
+    if (auth.device.device_role !== "host") return fail("UNAUTHORIZED", 403, "Only the host can read push tokens");
+    const device = await this.get(`device:${deviceId}`);
+    if (!device?.active || device.revoked_at || device.tenant_id !== auth.device.tenant_id || !device.push_token) return fail("NOT_FOUND", 404, "No push token for this device");
+    return ok({ device_id: deviceId, token: device.push_token });
   }
 
   async deviceCertificate(request, deviceId) {

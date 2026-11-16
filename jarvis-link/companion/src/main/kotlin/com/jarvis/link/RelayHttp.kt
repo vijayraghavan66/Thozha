@@ -65,6 +65,15 @@ class HttpJarvisLinkRelay(
     override fun enrollmentComplete(bodyJson: String): Map<String, Any> =
         call("POST", "/v1/enrollment/complete", bodyJson.toByteArray(UTF_8), emptyMap())
 
+    /** Device-signed push-token registration. The body is the exact signed bytes. */
+    fun setPushToken(deviceId: String, tokenJson: String, headers: Map<String, String>) {
+        call("PUT", "/v1/devices/$deviceId/push-token", tokenJson.toByteArray(UTF_8), headers)
+    }
+
+    fun clearPushToken(deviceId: String, headers: Map<String, String>) {
+        call("DELETE", "/v1/devices/$deviceId/push-token", ByteArray(0), headers)
+    }
+
     private fun call(method: String, pathAndQuery: String, body: ByteArray, signed: Map<String, String>): Map<String, Any> {
         require(pathAndQuery.startsWith("/") && '\n' !in pathAndQuery && '\r' !in pathAndQuery)
         val connection = (URI(base + pathAndQuery).toURL().openConnection() as HttpURLConnection).apply {
@@ -76,7 +85,7 @@ class HttpJarvisLinkRelay(
             setRequestProperty("Accept", "application/json")
             setRequestProperty("X-Jarvis-Link-Tenant", tenantId)
             signed.forEach { (name, value) -> setRequestProperty(name, value) }
-            if (method == "POST") {
+            if (method == "POST" || method == "PUT") {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
                 // Buffered output, not fixed-length streaming: HttpURLConnection cannot retry a POST after a
@@ -84,7 +93,7 @@ class HttpJarvisLinkRelay(
             }
         }
         try {
-            if (method == "POST") connection.outputStream.use { it.write(body) }
+            if (method == "POST" || method == "PUT") connection.outputStream.use { it.write(body) }
             val status = connection.responseCode
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             val text = stream?.use { it.readBytes().toString(UTF_8) }.orEmpty()

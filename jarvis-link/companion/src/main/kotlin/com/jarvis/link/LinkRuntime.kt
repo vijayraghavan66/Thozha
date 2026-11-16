@@ -283,6 +283,27 @@ class LinkRuntime(
         )
     }
 
+    /**
+     * Registers this device's FCM token with the relay. Signed by the enrolled device identity, so only this
+     * device can set its own token. Returns false when the device is not enrolled yet (nothing is sent).
+     */
+    fun registerPushToken(relayUrl: String, token: String): Boolean {
+        val values = load()
+        if (values["enrollment_pending"] == true || values["companion_certificate"] == null) return false
+        val (signing, _) = keys.identities()
+        val tenant = values.string("tenant_id")
+        val body = LinkJson.encode(mapOf("token" to token))
+        val path = "/v1/devices/${signing.deviceId}/push-token"
+        val proof = LinkCrypto.signRequest(tenant, signing, now(), LinkCrypto.newNonce(), "PUT", path, body.toByteArray(Charsets.UTF_8))
+        relay(relayUrl, tenant).setPushToken(signing.deviceId, body, mapOf(
+            "X-Jarvis-Link-Device" to proof.deviceId,
+            "X-Jarvis-Link-Timestamp" to proof.timestampUnixMs.toString(),
+            "X-Jarvis-Link-Nonce" to proof.nonceBase64Url,
+            "X-Jarvis-Link-Signature" to proof.signatureBase64Url,
+        ))
+        return true
+    }
+
     /** Deletes persisted companion state. The Keystore key is removed separately by the caller. */
     fun forgetLocalState() {
         state.write("{}")
