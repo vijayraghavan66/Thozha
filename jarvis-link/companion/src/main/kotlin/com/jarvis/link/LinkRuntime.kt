@@ -132,7 +132,79 @@ class LinkRuntime(
     fun submit(relayUrl: String, submission: TaskSubmission, ttlMs: Long?): DeliveryResult =
         companion(relayUrl).submitTask(submission, ttlMs)
 
-    fun poll(relayUrl: String, limit: Int = 20): PollResult = companion(relayUrl).pollInbox(limit)
+    /** Polls the relay and keeps approval requests and task updates in local (non-secret) state until decided. */
+    fun poll(relayUrl: String, limit: Int = 20): PollResult {
+        val page = companion(relayUrl).pollInbox(limit)
+        recordEvents(page.events)
+        return page
+    }
+
+    /** Approval requests not yet decided and not expired, exactly as the Mac sent them. */
+    fun pendingApprovals(): List<ApprovalReview> {
+        val nowMs = now()
+        return storedApprovals().filter { it.expiresAtUnixMs > nowMs }
+    }
+
+    /** Recent task updates from the Mac (task.result payloads), newest last. */
+    fun recentUpdates(): List<Map<String, Any>> =
+        (load()["updates"] as? List<Map<String, Any>>) ?: emptyList()
+
+    /**
+     * Sends an approve or reject decision for one pending request. The companion checks expiry and the
+     * exact digest locally; the Mac supervisor checks them again and enforces single use.
+     */
+    fun decideApproval(relayUrl: String, approvalId: String, decision: String): Map<String, Any> {
+        require(decision == "approve" || decision == "reject") { "decision must be approve or reject" }
+        val review = pendingApprovals().firstOrNull { it.approvalId == approvalId }
+            ?: throw IllegalStateException("approval is not pending on this phone (expired or already decided)")
+        val result = companion(relayUrl).decideApproval(review, decision, review.canonicalArgumentsDigest)
+        save(mapOf("approvals" to storedApprovals().filter { it.approvalId != approvalId }.map(::approvalMap)))
+        return linkedMapOf("decision" to decision, "approval_id" to approvalId, "queued_offline" to result.queuedOffline)
+    }
+
+    private fun storedApprovals(): List<ApprovalReview> =
+        (load()["approvals"] as? List<Map<String, Any>>)?.map { m ->
+            ApprovalReview(
+                approvalId = m.string("approval_id"),
+                taskId = m.string("task_id"),
+                operation = m.string("operation"),
+                target = m.string("target"),
+                canonicalArgumentsDigest = m.string("canonical_arguments_digest"),
+                expiresAtUnixMs = m.long("expires_at_unix_ms"),
+                redactedSummary = m.string("redacted_summary"),
+            )
+        } ?: emptyList()
+
+    private fun approvalMap(review: ApprovalReview): Map<String, Any> = linkedMapOf(
+        "approval_id" to review.approvalId,
+        "task_id" to review.taskId,
+        "operation" to review.operation,
+        "target" to review.target,
+        "canonical_arguments_digest" to review.canonicalArgumentsDigest,
+        "expires_at_unix_ms" to review.expiresAtUnixMs,
+        "redacted_summary" to review.redactedSummary,
+    )
+
+    private fun recordEvents(events: List<CompanionEvent>) {
+        var approvals = storedApprovals().toMutableList()
+        val updates = ((load()["updates"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
+        for (event in events) {
+            when (event) {
+                is CompanionEvent.ApprovalPending -> {
+                    approvals = approvals.filter { it.approvalId != event.review.approvalId }.toMutableList()
+                    approvals.add(event.review)
+                }
+                is CompanionEvent.TaskUpdate -> updates.add(linkedMapOf(
+                    "task_id" to event.taskId, "state" to event.state, "summary" to event.summary, "received_at_unix_ms" to now(),
+                ))
+                else -> Unit
+            }
+        }
+        save(mapOf(
+            "approvals" to approvals.map(::approvalMap),
+            "updates" to updates.takeLast(20),
+        ))
+    }
 
     fun flush(relayUrl: String): Map<String, Any> {
         val companion = companion(relayUrl)

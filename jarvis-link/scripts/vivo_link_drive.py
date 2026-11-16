@@ -22,6 +22,7 @@ TEST_DIR = Path.home() / ".jarvis-link-test"
 ACTIONS = {
     "selftest": "SELFTEST", "status": "STATUS", "enroll": "ENROLL", "sync": "SYNC",
     "submit": "SUBMIT", "poll": "POLL", "flush": "FLUSH", "forget": "FORGET",
+    "approvals": "APPROVALS", "approve": "APPROVE", "reject": "REJECT",
 }
 
 
@@ -56,6 +57,7 @@ def main() -> int:
     parser.add_argument("--relay", default="http://127.0.0.1:8787")
     parser.add_argument("--objective", default="Harmless status check")
     parser.add_argument("--ttl-ms")
+    parser.add_argument("--approval-id")
     args = parser.parse_args()
     action = ACTIONS[args.command]
     extras = ["--es", "relay", args.relay]
@@ -75,6 +77,8 @@ def main() -> int:
         extras += ["--es", "objective", args.objective, "--es", "scope", "read_only"]
         if args.ttl_ms:
             extras += ["--el", "ttl_ms", args.ttl_ms]
+    if args.command in {"approve", "reject"}:
+        extras += ["--es", "approval_id", args.approval_id]
     adb(args.serial, "logcat", "-c")
     broadcast(args.serial, action, extras)
     print(json.dumps(read_result(args.serial, action), indent=2, sort_keys=True))

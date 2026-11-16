@@ -59,6 +59,14 @@ object CompanionCli {
                     mapOf("events" to page.events.map { it.toMap() }, "cursor" to (page.cursor ?: ""))
                 }
                 "flush" -> runtime.flush(need(options, "relay"))
+                "approvals" -> mapOf("approvals" to runtime.pendingApprovals().map { review ->
+                    mapOf(
+                        "approval_id" to review.approvalId, "task_id" to review.taskId, "operation" to review.operation,
+                        "target" to review.target, "digest" to review.canonicalArgumentsDigest,
+                        "expires_at_unix_ms" to review.expiresAtUnixMs, "summary" to review.redactedSummary,
+                    )
+                })
+                "approve", "reject" -> runtime.decideApproval(need(options, "relay"), need(options, "approval-id"), command)
                 "status" -> runtime.status().let {
                     mapOf(
                         "device_id" to (it.deviceId ?: ""),

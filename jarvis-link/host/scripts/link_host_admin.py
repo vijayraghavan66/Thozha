@@ -13,6 +13,8 @@ Commands:
   certify    --relay URL --device-id ID --approve-local          sign a certificate for ONE device
   poll       --relay URL                                         process companion messages once
   revoke     --relay URL --device-id ID --approve-local          revoke ONE companion device
+  request-approval --relay URL --device-id ID [--message M]     harmless approval request (real supervisor)
+  resume     --relay URL                                         run approved simulated operations
 
 certify refuses to run without --approve-local: the operator must choose each device explicitly.
 """
@@ -24,6 +26,7 @@ import json
 import os
 import stat
 import sys
+import uuid
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -33,7 +36,11 @@ from jarvis_link_host.client import RelayClient  # noqa: E402
 from jarvis_link_host.crypto import DeviceCertificate, DeviceIdentity, device_id_for_signing_key, issue_device_certificate  # noqa: E402
 from jarvis_link_host.host import JarvisLinkHost  # noqa: E402
 from jarvis_link_host.runtime import HostRelayRuntime  # noqa: E402
-from jarvis_link_host.supervisor import MockSupervisor  # noqa: E402
+from jarvis_link_host.openjarvis_adapter import OpenJarvisSupervisorAdapter  # noqa: E402
+from jarvis_link_host.simulated_operations import SIMULATED_OPERATION, SIMULATED_TARGET, resume_approved, simulated_arguments  # noqa: E402
+
+OPENJARVIS_SRC = Path(os.environ.get("OPENJARVIS_SRC", Path.home() / ".openjarvis" / "src" / "src"))
+TEST_DIR = Path(os.environ.get("JARVIS_LINK_TEST_DIR", Path.home() / ".jarvis-link-test"))
 
 DEFAULT_STATE = Path(os.environ.get("JARVIS_LINK_TEST_STATE", Path.home() / ".jarvis-link-test" / "host.json"))
 
@@ -61,10 +68,19 @@ def _identity(state: dict) -> DeviceIdentity:
     return DeviceIdentity(sign, enc)
 
 
-def _host(state: dict, identity: DeviceIdentity) -> JarvisLinkHost:
+def _open_supervisor():
+    """The real OpenJarvis SupervisorStore, imported read-only from its checkout, behind the narrow adapter."""
+    sys.path.insert(0, str(OPENJARVIS_SRC))
+    from openjarvis.tasks.supervisor import SupervisorStore
+    TEST_DIR.mkdir(parents=True, exist_ok=True)
+    store = SupervisorStore(db_path=str(TEST_DIR / "supervisor.db"))
+    return store, OpenJarvisSupervisorAdapter(store, TEST_DIR / "link-adapter.db")
+
+
+def _host(state: dict, identity: DeviceIdentity, supervisor) -> JarvisLinkHost:
     return JarvisLinkHost(
         tenant_id=state["tenant_id"], device_id=state["host_device_id"], identity=identity,
-        host_certificate=DeviceCertificate.from_dict(state["host_certificate"]), supervisor=MockSupervisor(),
+        host_certificate=DeviceCertificate.from_dict(state["host_certificate"]), supervisor=supervisor,
     )
 
 
@@ -129,16 +145,98 @@ def cmd_certify(args, path: Path) -> dict:
     matches = [p for p in client.pending_enrollments() if p["device_id"] == args.device_id]
     if len(matches) != 1:
         raise SystemExit("no single pending enrollment with that device ID")
-    cert = _host(state, identity).certify_companion(
+    store, adapter = _open_supervisor()
+    cert = _host(state, identity, adapter).certify_companion(
         signing_public_b64u=matches[0]["signing_public_key_b64url"],
         encryption_public_b64u=matches[0]["encryption_public_key_b64url"],
     )
     return {"device_id": args.device_id, "status": client.certify_device(cert.to_dict())["status"]}
 
 
+def _companion_certificate(client: RelayClient, device_id: str) -> dict:
+    return client.signed_request("GET", f"/v1/devices/{device_id}/certificate").json()["certificate"]
+
+
+def _pending_records() -> list[dict]:
+    path = TEST_DIR / "approvals.json"
+    return json.loads(path.read_text()) if path.is_file() else []
+
+
+def _save_records(records: list[dict]) -> None:
+    _save(TEST_DIR / "approvals.json", records)
+
+
+def cmd_request_approval(args, path: Path) -> dict:
+    """Creates a harmless simulated approval in the real supervisor and sends it encrypted to one companion."""
+    state, client, identity = _relay(args, path)
+    store, adapter = _open_supervisor()
+    try:
+        task_id = adapter.submit_task(objective=f"Simulated echo: {args.message}", capability_scope=["read_only"],
+                                      idempotency_key=uuid.uuid4().hex)["task_id"]
+        approval_id, digest = store.create_approval(
+            task_id, SIMULATED_OPERATION, SIMULATED_TARGET, simulated_arguments(args.message),
+            "Harmless simulated echo for the Jarvis Link approval test. No file or network effect.",
+            ttl_seconds=args.approval_ttl,
+        )
+        record = adapter.get_approval(approval_id)
+        runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client)
+        runtime.send_approval_request(
+            companion_certificate=_companion_certificate(client, args.device_id), companion_id=args.device_id,
+            request={"approval_id": approval_id, "task_id": task_id, "operation": SIMULATED_OPERATION,
+                     "target": SIMULATED_TARGET, "canonical_arguments_digest": digest,
+                     "expires_at_unix_ms": record.expires_at_unix_ms,
+                     "redacted_summary": f"Simulated echo of '{args.message}'. Harmless: no file or network effect."},
+        )
+        records = _pending_records()
+        records.append({"approval_id": approval_id, "task_id": task_id, "message": args.message,
+                        "companion_id": args.device_id, "digest": digest, "done": False})
+        _save_records(records)
+        return {"approval_id": approval_id, "task_id": task_id, "digest": digest,
+                "expires_at_unix_ms": record.expires_at_unix_ms, "task_state": store.get_task(task_id)["state"]}
+    finally:
+        store.close()
+
+
+def cmd_resume(args, path: Path) -> dict:
+    """Runs the harmless simulated operation only for approvals the supervisor has accepted."""
+    state, client, identity = _relay(args, path)
+    store, adapter = _open_supervisor()
+    report = []
+    try:
+        records = _pending_records()
+        runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client)
+        for record in records:
+            if record["done"]:
+                continue
+            status = store.approval(record["approval_id"])["status"]
+            if status == "APPROVED":
+                outcome = resume_approved(store, task_id=record["task_id"], approval_id=record["approval_id"], message=record["message"])
+                if outcome["outcome"] == "COMPLETED":
+                    runtime.send_task_update(
+                        companion_certificate=_companion_certificate(client, record["companion_id"]),
+                        companion_id=record["companion_id"], task_id=record["task_id"], state="COMPLETED",
+                        summary=f"Simulated echo complete: {outcome['result']}")
+                record["done"] = True
+            elif status in {"REJECTED", "EXPIRED", "CONSUMED"}:
+                record["done"] = True
+            report.append({"approval_id": record["approval_id"], "approval_status": status,
+                           "outcome": outcome["outcome"] if status == "APPROVED" else status,
+                           "task_state": store.get_task(record["task_id"])["state"]})
+        _save_records(records)
+        return {"resumed": report}
+    finally:
+        store.close()
+
+
 def cmd_poll(args, path: Path) -> dict:
     state, client, identity = _relay(args, path)
-    return HostRelayRuntime(host=_host(state, identity), relay=client).poll_once()
+    store, adapter = _open_supervisor()
+    try:
+        counts = HostRelayRuntime(host=_host(state, identity, adapter), relay=client).poll_once()
+    finally:
+        store.close()
+    resumed = cmd_resume(args, path)["resumed"]
+    return {**counts, "resumed": resumed}
 
 
 def cmd_revoke(args, path: Path) -> dict:
@@ -149,7 +247,8 @@ def cmd_revoke(args, path: Path) -> dict:
 
 
 COMMANDS = {"bootstrap": cmd_bootstrap, "root": cmd_root, "invite": cmd_invite,
-            "pending": cmd_pending, "certify": cmd_certify, "poll": cmd_poll, "revoke": cmd_revoke}
+            "pending": cmd_pending, "certify": cmd_certify, "poll": cmd_poll, "revoke": cmd_revoke,
+            "request-approval": cmd_request_approval, "resume": cmd_resume}
 
 
 def main(argv: list[str]) -> int:
@@ -161,6 +260,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--device-id")
     parser.add_argument("--approve-local", action="store_true")
     parser.add_argument("--expires", type=int, default=600)
+    parser.add_argument("--message", default="JARVIS_SIMULATED_APPROVAL_1")
+    parser.add_argument("--approval-ttl", type=int, default=300)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     args = parser.parse_args(argv)
     print(json.dumps(COMMANDS[args.command](args, args.state), indent=2, sort_keys=True))
