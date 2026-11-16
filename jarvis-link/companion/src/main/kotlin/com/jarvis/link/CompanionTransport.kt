@@ -275,7 +275,8 @@ data class ApprovalReview(
 
 sealed interface CompanionEvent {
     data class ApprovalPending(val review: ApprovalReview) : CompanionEvent
-    data class TaskUpdate(val taskId: String, val state: String, val summary: String) : CompanionEvent
+    /** [inReplyTo] is the envelope message ID of the request this update answers (empty if none). */
+    data class TaskUpdate(val taskId: String, val state: String, val summary: String, val inReplyTo: String = "") : CompanionEvent
     data class Unknown(val kind: String) : CompanionEvent
 
     /** Plain map for the CLI/JSON output. Contains only decrypted, already-authenticated fields. */
@@ -285,7 +286,7 @@ sealed interface CompanionEvent {
             "operation" to review.operation, "target" to review.target,
             "canonical_arguments_digest" to review.canonicalArgumentsDigest, "expires_at_unix_ms" to review.expiresAtUnixMs,
         )
-        is TaskUpdate -> linkedMapOf("type" to "task_update", "task_id" to taskId, "state" to state, "summary" to summary)
+        is TaskUpdate -> linkedMapOf("type" to "task_update", "task_id" to taskId, "state" to state, "summary" to summary, "in_reply_to" to inReplyTo)
         is Unknown -> linkedMapOf("type" to "unknown", "kind" to kind)
     }
 }
@@ -474,7 +475,9 @@ class JarvisLinkCompanion(
         val fields = FlatJson.decode(payload)
         return when (kind) {
             "approval.request" -> CompanionEvent.ApprovalPending(ApprovalReview.parse(payload))
-            "task.progress", "task.result" -> CompanionEvent.TaskUpdate(fields.string("task_id"), fields.string("state"), fields.string("summary"))
+            "task.progress", "task.result" -> CompanionEvent.TaskUpdate(
+                fields.string("task_id"), fields.string("state"), fields.string("summary"), (fields["in_reply_to"] as? String).orEmpty(),
+            )
             else -> CompanionEvent.Unknown(kind)
         }
     }

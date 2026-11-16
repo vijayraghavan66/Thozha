@@ -150,3 +150,14 @@ def test_unsupported_capability_is_rejected_by_host_not_executed(tenant_with_com
     proc = cli(state, "submit", "--objective", OBJECTIVE, "--scope", "shell.exec", relay=world.url, expect_ok=False)
     assert proc.returncode != 0
     assert world.supervisor.tasks == {}
+
+
+def test_typed_request_is_sent_and_its_reply_updates_the_conversation(tenant_with_companion):
+    world, state, _ = tenant_with_companion
+    sent = json.loads(cli(state, "send", "--text", "Check the disk space", relay=world.url).stdout)
+    assert sent["queued_offline"] is False
+    assert world.runtime.poll_once()["replied"] == 1
+    assert json.loads(cli(state, "poll", relay=world.url).stdout)["events"][0]["in_reply_to"] == sent["message_id"]
+    (entry,) = json.loads(cli(state, "conversation").stdout)["messages"]
+    assert entry["text"] == "Check the disk space" and entry["message_id"] == sent["message_id"]
+    assert entry["state"] == "RUNNING" and entry["task_id"] == list(world.supervisor.tasks)[0]

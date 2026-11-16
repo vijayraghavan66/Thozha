@@ -175,6 +175,7 @@ class LinkRuntime(
         } catch (failure: Exception) {
             error = errorCode(failure)
         }
+        save(mapOf("last_sync_ms" to now(), "last_sync_error" to error))
         return SyncReport(newlyPending, recentUpdates(), flushed, error)
     }
 
@@ -239,6 +240,43 @@ class LinkRuntime(
         "redacted_summary" to review.redactedSummary,
     )
 
+    /** Messages the user sent from Home, newest last. Replies from the Mac update them by in_reply_to. */
+    fun conversation(): List<Map<String, Any>> =
+        (load()["conversation"] as? List<Map<String, Any>>) ?: emptyList()
+
+    /** Sends a typed request to the Mac supervisor. Queued locally if the relay is unreachable. */
+    fun sendRequest(relayUrl: String, text: String): Map<String, Any> {
+        val cleaned = text.trim()
+        require(cleaned.isNotEmpty() && cleaned.toByteArray(Charsets.UTF_8).size <= 4096) { "message must be 1–4096 bytes" }
+        val result = submit(relayUrl, TaskSubmission(cleaned, setOf(SafeCapability.READ_ONLY)), null)
+        val entries = conversation().toMutableList()
+        entries.add(linkedMapOf(
+            "message_id" to result.messageId,
+            "text" to cleaned,
+            "created_at_unix_ms" to now(),
+            "state" to if (result.queuedOffline) "QUEUED" else "SENT",
+            "summary" to "",
+            "updated_at_unix_ms" to now(),
+        ))
+        save(mapOf("conversation" to entries.takeLast(100)))
+        return linkedMapOf("message_id" to result.messageId, "queued_offline" to result.queuedOffline)
+    }
+
+    private fun applyToConversation(messageId: String, taskId: String, state: String, summary: String) {
+        val entries = conversation().map { entry ->
+            if (entry["message_id"] == messageId) LinkedHashMap(entry).apply {
+                put("state", state); put("summary", summary); put("task_id", taskId); put("updated_at_unix_ms", now())
+            } else entry
+        }
+        save(mapOf("conversation" to entries))
+    }
+
+    /** Result of the last sync attempt: time in Unix ms (0 = never) and an error code ("" = none). */
+    fun lastSync(): Pair<Long, String> {
+        val values = load()
+        return ((values["last_sync_ms"] as? Long) ?: 0L) to ((values["last_sync_error"] as? String) ?: "")
+    }
+
     private fun recordEvents(events: List<CompanionEvent>) {
         var approvals = storedApprovals().toMutableList()
         val updates = ((load()["updates"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
@@ -248,9 +286,12 @@ class LinkRuntime(
                     approvals = approvals.filter { it.approvalId != event.review.approvalId }.toMutableList()
                     approvals.add(event.review)
                 }
-                is CompanionEvent.TaskUpdate -> updates.add(linkedMapOf(
-                    "task_id" to event.taskId, "state" to event.state, "summary" to event.summary, "received_at_unix_ms" to now(),
-                ))
+                is CompanionEvent.TaskUpdate -> {
+                    updates.add(linkedMapOf(
+                        "task_id" to event.taskId, "state" to event.state, "summary" to event.summary, "received_at_unix_ms" to now(),
+                    ))
+                    if (event.inReplyTo.isNotBlank()) applyToConversation(event.inReplyTo, event.taskId, event.state, event.summary)
+                }
                 else -> Unit
             }
         }
