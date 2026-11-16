@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -70,7 +71,7 @@ def test_request_is_shown_exactly_and_approve_resumes_the_task(flow):
     assert shown["operation"] == SIMULATED_OPERATION and shown["target"] == SIMULATED_TARGET
     assert shown["digest"] == digest and shown["expires_at_unix_ms"] == expires
     decided = json.loads(cli(flow.state, "approve", "--approval-id", approval_id, relay=flow.world.url).stdout)
-    assert decided == {"decision": "approve", "approval_id": approval_id, "queued_offline": False}
+    assert decided == {"decision": "approve", "approval_id": approval_id, "queued_offline": False, "relay_status": "queued"}
     assert flow.world.runtime.poll_once() == {"received": 1, "rejected": 0, "replied": 1}
     assert flow.store.approval(approval_id)["status"] == "APPROVED"
     outcome = resume_approved(flow.store, task_id=task_id, approval_id=approval_id, message=MESSAGE)
@@ -143,3 +144,49 @@ def test_decision_made_during_network_loss_is_delivered_once(flow):
     assert flow.world.runtime.poll_once()["received"] == 0
     assert flow.store.approval(approval_id)["status"] == "APPROVED"
     assert resume_approved(flow.store, task_id=task_id, approval_id=approval_id, message=MESSAGE)["outcome"] == "COMPLETED"
+
+
+def _admin():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("link_host_admin", Path(__file__).resolve().parents[1] / "scripts" / "link_host_admin.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_approval_survives_supervisor_restart_and_continues_via_explicit_resume(flow):
+    task_id, approval_id, digest, _ = flow.request()
+    flow.phone_poll()
+    flow.store.recover_after_restart()  # what a supervisor restart does: in-flight task -> PAUSED
+    assert flow.store.get_task(task_id)["state"] == "PAUSED"
+    cli(flow.state, "approve", "--approval-id", approval_id, relay=flow.world.url)
+    flow.world.runtime.poll_once()
+    assert flow.store.approval(approval_id)["status"] == "APPROVED"
+    assert resume_approved(flow.store, task_id=task_id, approval_id=approval_id, message=MESSAGE)["outcome"] == "COMPLETED"
+    kinds = [e["event_type"] for e in flow.store.events(task_id)]
+    assert "task.explicit_resume" in kinds and "approval.consumed" in kinds
+
+
+def test_serve_cycle_creates_receives_resumes_and_publishes(flow, tmp_path, monkeypatch):
+    admin = _admin()
+    monkeypatch.setattr(admin, "TEST_DIR", tmp_path / "admin")
+    host_state = {"tenant_id": flow.world.tenant, "host_device_id": flow.world.host_id,
+                  "host_certificate": flow.world.host.host_certificate.to_dict()}
+    client, identity = flow.world.relay, flow.world.identity
+    admin._save(admin.TEST_DIR / "requests" / "r1.json", {"id": "r1", "device_id": flow.companion_id,
+                                                          "message": MESSAGE, "approval_ttl": 300})
+    created = admin._process_requests(host_state, client, identity, flow.store, flow.adapter)
+    assert len(created) == 1
+    flow.phone_poll()
+    shown = flow.phone_approvals()
+    assert shown[0]["approval_id"] == created[0]["approval_id"] and shown[0]["digest"] == flow.store.approval(created[0]["approval_id"])["args_digest"]
+    cli(flow.state, "approve", "--approval-id", created[0]["approval_id"], relay=flow.world.url)
+    report = admin._cycle(host_state, client, identity, flow.store, flow.adapter)
+    assert report["resumed"][0]["outcome"] == "COMPLETED"
+    assert flow.store.get_task(created[0]["task_id"])["state"] == "COMPLETED"
+    states = [u["state"] for u in flow.phone_poll() if u["type"] == "task_update"]
+    assert "COMPLETED" in states
+    # a second cycle must not re-run the operation or publish again
+    report2 = admin._cycle(host_state, client, identity, flow.store, flow.adapter)
+    assert report2["resumed"] == []
+    assert [e["event_type"] for e in flow.store.events(created[0]["task_id"])].count("simulated.result") == 1

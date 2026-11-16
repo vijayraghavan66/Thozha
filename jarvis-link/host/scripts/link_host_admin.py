@@ -11,16 +11,18 @@ Commands:
   invite     --relay URL                                         print a one-use companion invitation
   pending    --relay URL                                         list companions awaiting certification
   certify    --relay URL --device-id ID --approve-local          sign a certificate for ONE device
-  poll       --relay URL                                         process companion messages once
   revoke     --relay URL --device-id ID --approve-local          revoke ONE companion device
-  request-approval --relay URL --device-id ID [--message M]     harmless approval request (real supervisor)
-  resume     --relay URL                                         run approved simulated operations
+  revoke     --relay URL --device-id ID --approve-local          revoke ONE companion device
+  request-approval --device-id ID [--message M]                queue a harmless approval; serve sends it
+  serve      --relay URL [--interval S]                          supervisor loop: create, receive, resume, publish
 
 certify refuses to run without --approve-local: the operator must choose each device explicitly.
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
+import time
 import base64
 import json
 import os
@@ -167,76 +169,126 @@ def _save_records(records: list[dict]) -> None:
 
 
 def cmd_request_approval(args, path: Path) -> dict:
-    """Creates a harmless simulated approval in the real supervisor and sends it encrypted to one companion."""
-    state, client, identity = _relay(args, path)
-    store, adapter = _open_supervisor()
-    try:
-        task_id = adapter.submit_task(objective=f"Simulated echo: {args.message}", capability_scope=["read_only"],
-                                      idempotency_key=uuid.uuid4().hex)["task_id"]
-        approval_id, digest = store.create_approval(
-            task_id, SIMULATED_OPERATION, SIMULATED_TARGET, simulated_arguments(args.message),
-            "Harmless simulated echo for the Jarvis Link approval test. No file or network effect.",
-            ttl_seconds=args.approval_ttl,
-        )
-        record = adapter.get_approval(approval_id)
-        runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client)
-        runtime.send_approval_request(
-            companion_certificate=_companion_certificate(client, args.device_id), companion_id=args.device_id,
-            request={"approval_id": approval_id, "task_id": task_id, "operation": SIMULATED_OPERATION,
-                     "target": SIMULATED_TARGET, "canonical_arguments_digest": digest,
-                     "expires_at_unix_ms": record.expires_at_unix_ms,
-                     "redacted_summary": f"Simulated echo of '{args.message}'. Harmless: no file or network effect."},
-        )
-        records = _pending_records()
-        records.append({"approval_id": approval_id, "task_id": task_id, "message": args.message,
-                        "companion_id": args.device_id, "digest": digest, "done": False})
-        _save_records(records)
-        return {"approval_id": approval_id, "task_id": task_id, "digest": digest,
-                "expires_at_unix_ms": record.expires_at_unix_ms, "task_state": store.get_task(task_id)["state"]}
-    finally:
-        store.close()
+    """Queues a harmless approval request. The running `serve` loop creates it in the supervisor and sends it.
+    Opening the supervisor store runs its restart recovery, which pauses in-flight tasks, so one-off commands
+    never open it."""
+    queue = TEST_DIR / "requests"
+    item = {"id": uuid.uuid4().hex, "device_id": args.device_id, "message": args.message, "approval_ttl": args.approval_ttl}
+    _save(queue / f"{item['id']}.json", item)
+    return {"queued": item["id"], "note": "serve creates and sends it on its next cycle"}
 
 
-def cmd_resume(args, path: Path) -> dict:
-    """Runs the harmless simulated operation only for approvals the supervisor has accepted."""
-    state, client, identity = _relay(args, path)
-    store, adapter = _open_supervisor()
+def _create_and_send(state, client, identity, store, adapter, item: dict) -> dict:
+    message = item["message"]
+    task_id = adapter.submit_task(objective=f"Simulated echo: {message}", capability_scope=["read_only"],
+                                  idempotency_key=uuid.uuid4().hex)["task_id"]
+    approval_id, digest = store.create_approval(
+        task_id, SIMULATED_OPERATION, SIMULATED_TARGET, simulated_arguments(message),
+        "Harmless simulated echo for the Jarvis Link approval test. No file or network effect.",
+        ttl_seconds=item["approval_ttl"],
+    )
+    record = adapter.get_approval(approval_id)
+    runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client)
+    runtime.send_approval_request(
+        companion_certificate=_companion_certificate(client, item["device_id"]), companion_id=item["device_id"],
+        request={"approval_id": approval_id, "task_id": task_id, "operation": SIMULATED_OPERATION,
+                 "target": SIMULATED_TARGET, "canonical_arguments_digest": digest,
+                 "expires_at_unix_ms": record.expires_at_unix_ms,
+                 "redacted_summary": f"Simulated echo of '{message}'. Harmless: no file or network effect."},
+    )
+    records = _pending_records()
+    records.append({"approval_id": approval_id, "task_id": task_id, "message": message,
+                    "companion_id": item["device_id"], "digest": digest, "done": False})
+    _save_records(records)
+    return {"approval_id": approval_id, "task_id": task_id, "expires_at_unix_ms": record.expires_at_unix_ms}
+
+
+def _process_requests(state, client, identity, store, adapter) -> list[dict]:
+    queue = TEST_DIR / "requests"
+    if not queue.is_dir():
+        return []
+    created = []
+    for item_path in sorted(queue.glob("*.json")):
+        item = json.loads(item_path.read_text())
+        created.append(_create_and_send(state, client, identity, store, adapter, item))
+        item_path.unlink()
+    return created
+
+
+def _cycle(state, client, identity, store, adapter) -> dict:
+    """One supervisor cycle: create queued requests, receive relay messages, resume approved tasks, publish results."""
+    created = _process_requests(state, client, identity, store, adapter)
+    runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client)
+    counts = runtime.poll_once()
     report = []
-    try:
-        records = _pending_records()
-        runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client)
-        for record in records:
-            if record["done"]:
-                continue
-            status = store.approval(record["approval_id"])["status"]
-            if status == "APPROVED":
-                outcome = resume_approved(store, task_id=record["task_id"], approval_id=record["approval_id"], message=record["message"])
-                if outcome["outcome"] == "COMPLETED":
-                    runtime.send_task_update(
-                        companion_certificate=_companion_certificate(client, record["companion_id"]),
-                        companion_id=record["companion_id"], task_id=record["task_id"], state="COMPLETED",
-                        summary=f"Simulated echo complete: {outcome['result']}")
-                record["done"] = True
-            elif status in {"REJECTED", "EXPIRED", "CONSUMED"}:
-                record["done"] = True
-            report.append({"approval_id": record["approval_id"], "approval_status": status,
-                           "outcome": outcome["outcome"] if status == "APPROVED" else status,
-                           "task_state": store.get_task(record["task_id"])["state"]})
-        _save_records(records)
-        return {"resumed": report}
-    finally:
-        store.close()
+    for record in _pending_records():
+        if record["done"]:
+            continue
+        status = store.approval(record["approval_id"])["status"]
+        outcome = status
+        if status == "APPROVED":
+            outcome_info = resume_approved(store, task_id=record["task_id"], approval_id=record["approval_id"], message=record["message"])
+            outcome = outcome_info["outcome"]
+            if outcome == "COMPLETED":
+                runtime.send_task_update(
+                    companion_certificate=_companion_certificate(client, record["companion_id"]),
+                    companion_id=record["companion_id"], task_id=record["task_id"], state="COMPLETED",
+                    summary=f"Simulated echo complete: {outcome_info['result']}")
+            record["done"] = True
+        elif status in {"REJECTED", "EXPIRED", "CONSUMED"}:
+            record["done"] = True
+        report.append({"approval_id": record["approval_id"], "approval_status": status, "outcome": outcome,
+                       "task_state": store.get_task(record["task_id"])["state"]})
+    _save_records(_merge_done(report))
+    return {**counts, "created": created, "resumed": report}
 
 
-def cmd_poll(args, path: Path) -> dict:
+def _merge_done(report: list[dict]) -> list[dict]:
+    done_ids = {r["approval_id"] for r in report if r["approval_status"] in {"APPROVED", "REJECTED", "EXPIRED", "CONSUMED"}}
+    return [dict(r, done=True) if r["approval_id"] in done_ids else r for r in _pending_records()]
+
+
+def cmd_serve(args, path: Path) -> dict:
+    """Mac supervisor loop. Opens the supervisor store once (its restart recovery runs once, at start).
+    Outbound connections only. Wakes on relay stream hints and on a slow fallback timer. Stop with Ctrl-C."""
+    asyncio.run(_serve(args, path))
+    return {"stopped": True}
+
+
+async def _serve(args, path: Path) -> None:
+    import websockets
+
     state, client, identity = _relay(args, path)
+    host_id = state["host_device_id"]
     store, adapter = _open_supervisor()
+    ws_url = args.relay.replace("http", "ws", 1) + f"/v1/devices/{host_id}/stream"
+    backoff = 2.0
     try:
-        counts = HostRelayRuntime(host=_host(state, identity, adapter), relay=client).poll_once()
+        while True:
+            try:
+                cycle = await asyncio.to_thread(_cycle, state, client, identity, store, adapter)
+                print(json.dumps({"event": "cycle", "at": time.strftime("%H:%M:%S"), **cycle}), flush=True)
+            except Exception as failure:  # keep the loop alive; report only the exception class
+                print(json.dumps({"event": "cycle_error", "error": type(failure).__name__}), flush=True)
+            ts, nonce = str(int(time.time() * 1000)), _b64(os.urandom(32))
+            signature = identity.sign_request(tenant_id=state["tenant_id"], device_id=host_id, timestamp_ms=int(ts),
+                                              nonce_b64url=nonce, method="GET",
+                                              path_and_query=f"/v1/devices/{host_id}/stream", body=b"")
+            headers = {"X-Jarvis-Link-Tenant": state["tenant_id"], "X-Jarvis-Link-Device": host_id,
+                       "X-Jarvis-Link-Timestamp": ts, "X-Jarvis-Link-Nonce": nonce, "X-Jarvis-Link-Signature": signature}
+            try:
+                async with websockets.connect(ws_url, additional_headers=headers) as ws:
+                    backoff = 2.0
+                    try:
+                        await asyncio.wait_for(ws.recv(), timeout=args.interval)
+                    except asyncio.TimeoutError:
+                        pass
+            except Exception:  # relay down or restarting: back off, never spin
+                print(json.dumps({"event": "relay_unavailable", "at": time.strftime("%H:%M:%S"), "retry_s": backoff}), flush=True)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
     finally:
         store.close()
-    resumed = cmd_resume(args, path)["resumed"]
-    return {**counts, "resumed": resumed}
 
 
 def cmd_revoke(args, path: Path) -> dict:
@@ -246,9 +298,9 @@ def cmd_revoke(args, path: Path) -> dict:
     return client.revoke_device(args.device_id, reason_code="owner_revoked")
 
 
-COMMANDS = {"bootstrap": cmd_bootstrap, "root": cmd_root, "invite": cmd_invite,
-            "pending": cmd_pending, "certify": cmd_certify, "poll": cmd_poll, "revoke": cmd_revoke,
-            "request-approval": cmd_request_approval, "resume": cmd_resume}
+COMMANDS = {"serve": cmd_serve, "bootstrap": cmd_bootstrap, "root": cmd_root, "invite": cmd_invite,
+            "pending": cmd_pending, "certify": cmd_certify, "revoke": cmd_revoke,
+            "request-approval": cmd_request_approval}
 
 
 def main(argv: list[str]) -> int:
@@ -262,6 +314,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--expires", type=int, default=600)
     parser.add_argument("--message", default="JARVIS_SIMULATED_APPROVAL_1")
     parser.add_argument("--approval-ttl", type=int, default=300)
+    parser.add_argument("--interval", type=float, default=60.0, help="serve: fallback cycle interval (s)")
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     args = parser.parse_args(argv)
     print(json.dumps(COMMANDS[args.command](args, args.state), indent=2, sort_keys=True))

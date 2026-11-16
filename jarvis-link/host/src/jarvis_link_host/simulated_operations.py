@@ -24,6 +24,12 @@ def resume_approved(store: Any, *, task_id: str, approval_id: str, message: str)
     other status, digest, target, expiry, or task state, so a non-approved request cannot continue.
     """
     arguments = simulated_arguments(message)
+    # A restart pauses in-flight tasks (supervisor recovery). An APPROVED approval may then continue the
+    # task only through the supervisor's explicit resume, which requires the approval to be APPROVED.
+    task = store.get_task(task_id)
+    if task is not None and task["state"] == "PAUSED":
+        if not store.resume_approved_task(task_id, approval_id):
+            return {"outcome": "NOT_CONSUMED"}
     consumed = store.consume_approval(approval_id, task_id=task_id, operation=SIMULATED_OPERATION,
                                       target=SIMULATED_TARGET, arguments=arguments)
     if not consumed:

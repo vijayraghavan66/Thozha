@@ -63,6 +63,14 @@ data class LinkStatus(
  * Every companion operation the app and the CLI need. Relay access is always the real HTTP client, and
  * every message is verified and decrypted by the production Kotlin protocol code.
  */
+/** Result of one sync. [newApprovals] are requests not announced before; [error] is a code, never relay text. */
+data class SyncReport(
+    val newApprovals: List<ApprovalReview>,
+    val updates: List<Map<String, Any>>,
+    val flushed: Int,
+    val error: String,
+)
+
 class LinkRuntime(
     private val keys: LinkKeyProvider,
     private val state: LinkStateStore,
@@ -145,6 +153,47 @@ class LinkRuntime(
         return storedApprovals().filter { it.expiresAtUnixMs > nowMs }
     }
 
+    /**
+     * One background or foreground sync: retries queued sends, polls the relay, and returns approval
+     * requests that have not been announced yet. Announced IDs are stored so a request notifies once.
+     * Errors are reported as codes; queued messages stay queued for the next attempt.
+     */
+    fun syncNow(relayUrl: String): SyncReport {
+        var flushed = 0
+        var error = ""
+        try {
+            flushed = flush(relayUrl)["delivered"] as Int
+        } catch (failure: Exception) {
+            error = errorCode(failure)
+        }
+        val newlyPending = mutableListOf<ApprovalReview>()
+        try {
+            recordEvents(companion(relayUrl).pollInbox(20).events)
+            val announced = announcedIds()
+            pendingApprovals().filter { it.approvalId !in announced }.forEach { newlyPending.add(it) }
+            markAnnounced(newlyPending.map { it.approvalId })
+        } catch (failure: Exception) {
+            error = errorCode(failure)
+        }
+        return SyncReport(newlyPending, recentUpdates(), flushed, error)
+    }
+
+    private fun errorCode(failure: Exception): String = when (failure) {
+        is RelayHttpException -> failure.code
+        is SecurityException -> "AUTH_FAILED"
+        is java.io.IOException -> "NETWORK_UNAVAILABLE"
+        else -> "PROTOCOL_ERROR"
+    }
+
+    private fun announcedIds(): Set<String> =
+        ((load()["announced_approval_ids"] as? List<String>) ?: emptyList()).toSet()
+
+    private fun markAnnounced(ids: List<String>) {
+        if (ids.isEmpty()) return
+        val merged = (announcedIds() + ids).toList().takeLast(200)
+        save(mapOf("announced_approval_ids" to merged))
+    }
+
     /** Recent task updates from the Mac (task.result payloads), newest last. */
     fun recentUpdates(): List<Map<String, Any>> =
         (load()["updates"] as? List<Map<String, Any>>) ?: emptyList()
@@ -159,7 +208,12 @@ class LinkRuntime(
             ?: throw IllegalStateException("approval is not pending on this phone (expired or already decided)")
         val result = companion(relayUrl).decideApproval(review, decision, review.canonicalArgumentsDigest)
         save(mapOf("approvals" to storedApprovals().filter { it.approvalId != approvalId }.map(::approvalMap)))
-        return linkedMapOf("decision" to decision, "approval_id" to approvalId, "queued_offline" to result.queuedOffline)
+        return linkedMapOf(
+            "decision" to decision,
+            "approval_id" to approvalId,
+            "queued_offline" to result.queuedOffline,
+            "relay_status" to (result.receipt?.status ?: "queued_locally"),
+        )
     }
 
     private fun storedApprovals(): List<ApprovalReview> =
