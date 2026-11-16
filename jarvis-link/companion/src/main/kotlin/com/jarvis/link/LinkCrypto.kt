@@ -25,8 +25,11 @@ data class SigningIdentity(val deviceId: String, val keyPair: KeyPair) {
     val publicKeyBase64: String get() = LinkCrypto.b64(keyPair.public.encoded)
 }
 
-/** P-256 ECDH key. Android production storage must be backed by Android Keystore. */
-data class EncryptionIdentity(val deviceId: String, val keyPair: KeyPair) {
+/**
+ * P-256 ECDH key. [agreementProvider] names the JCA provider that performs ECDH for this key; Android
+ * Keystore keys require "AndroidKeyStore" because their private key never leaves the secure hardware.
+ */
+data class EncryptionIdentity(val deviceId: String, val keyPair: KeyPair, val agreementProvider: String? = null) {
     val publicKeyBase64: String get() = LinkCrypto.b64(keyPair.public.encoded)
 }
 
@@ -233,7 +236,7 @@ object LinkCrypto {
         }
 
         val ephemeralKey = decodePublicKey(envelope.header.ephemeralPublicKeyBase64Url)
-        val shared = ecdh(recipient.keyPair.private, ephemeralKey)
+        val shared = ecdh(recipient.keyPair.private, ephemeralKey, recipient.agreementProvider)
         val info = "JarvisLink/v1\n${envelope.header.tenantId}\n${envelope.header.fromDeviceId}\n${envelope.header.toDeviceId}".toByteArray(UTF_8)
         val aesKey = hkdfSha256(shared, decodeHex(envelope.header.messageId), info, 32)
         val iv = decodeBase64Url(envelope.header.ivBase64Url)
@@ -318,8 +321,8 @@ object LinkCrypto {
     internal fun decodePublicKey(value: String): PublicKey =
         KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(decodeBase64Url(value)))
 
-    internal fun ecdh(privateKey: PrivateKey, publicKey: PublicKey): ByteArray {
-        val agreement = KeyAgreement.getInstance("ECDH")
+    internal fun ecdh(privateKey: PrivateKey, publicKey: PublicKey, provider: String? = null): ByteArray {
+        val agreement = if (provider == null) KeyAgreement.getInstance("ECDH") else KeyAgreement.getInstance("ECDH", provider)
         agreement.init(privateKey)
         agreement.doPhase(publicKey, true)
         return agreement.generateSecret()
