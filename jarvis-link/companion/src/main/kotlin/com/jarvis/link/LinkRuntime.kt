@@ -244,6 +244,29 @@ class LinkRuntime(
     fun conversation(): List<Map<String, Any>> =
         (load()["conversation"] as? List<Map<String, Any>>) ?: emptyList()
 
+    /** Stores a local USB task under its API idempotency key before the request can time out. */
+    fun recordLocalTaskRequest(idempotencyKey: String, text: String) {
+        require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid task idempotency key" }
+        val cleaned = text.trim()
+        require(cleaned.isNotEmpty() && cleaned.toByteArray(Charsets.UTF_8).size <= 4096) { "message must be 1–4096 bytes" }
+        val entries = conversation().filterNot { it["message_id"] == idempotencyKey }.toMutableList()
+        entries.add(linkedMapOf(
+            "message_id" to idempotencyKey,
+            "text" to cleaned,
+            "created_at_unix_ms" to now(),
+            "state" to "RUNNING",
+            "summary" to "",
+            "task_id" to "",
+            "updated_at_unix_ms" to now(),
+        ))
+        save(mapOf("conversation" to entries.takeLast(100)))
+    }
+
+    /** Records the Mac's actual supervisor result or the last known task state. */
+    fun recordLocalTaskResult(idempotencyKey: String, taskId: String, state: String, summary: String) {
+        applyToConversation(idempotencyKey, taskId, state.uppercase(), summary)
+    }
+
     /** Sends a typed request to the Mac supervisor. Queued locally if the relay is unreachable. */
     fun sendRequest(relayUrl: String, text: String): Map<String, Any> {
         val cleaned = text.trim()
