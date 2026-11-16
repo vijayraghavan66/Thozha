@@ -57,7 +57,7 @@ class MemoryMessageInbox : MessageInbox {
 }
 
 enum class SafeCapability(val wireName: String) {
-    READ_ONLY("read_only"), WEB_RESEARCH("web_research"), DESKTOP_OBSERVATION("desktop_observation")
+    READ_ONLY("read_only"), WEB_RESEARCH("web_research"), DESKTOP_OBSERVATION("desktop_observation"), ASSISTANT("assistant")
 }
 
 data class TaskSubmission(
@@ -241,6 +241,7 @@ data class ApprovalReview(
         expectedDigest: String,
         idempotencyKey: String,
         nowUnixMs: Long = System.currentTimeMillis(),
+        continuationObjective: String? = null,
     ): String {
         validateForDecision(expectedDigest, nowUnixMs)
         require(decision == "approve" || decision == "reject")
@@ -252,6 +253,10 @@ data class ApprovalReview(
             "operation_digest" to expectedDigest,
             "idempotency_key" to idempotencyKey,
         )
+        if (decision == "approve" && !continuationObjective.isNullOrBlank()) {
+            require(continuationObjective.toByteArray(UTF_8).size <= 4096) { "continuation objective is too large" }
+            fields["continuation_objective"] = continuationObjective.trim()
+        }
         return fields.entries.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) ->
             FlatJson.quote(key) + ":" + FlatJson.quote(value)
         }
@@ -341,8 +346,19 @@ class JarvisLinkCompanion(
 
     fun outboxSize(): Int = outbox.list().size
 
-    fun decideApproval(review: ApprovalReview, decision: String, expectedDigest: String): DeliveryResult {
-        val payload = review.toDecisionJson(decision, expectedDigest, UUID.randomUUID().toString(), now())
+    fun decideApproval(
+        review: ApprovalReview,
+        decision: String,
+        expectedDigest: String,
+        continuationObjective: String? = null,
+    ): DeliveryResult {
+        val payload = review.toDecisionJson(
+            decision,
+            expectedDigest,
+            UUID.randomUUID().toString(),
+            now(),
+            continuationObjective,
+        )
         val envelope = LinkCrypto.createEnvelope(
             tenantId, signingIdentity, hostCertificate, hostRoot,
             "approval.decision", payload, nowUnixMs = now(),

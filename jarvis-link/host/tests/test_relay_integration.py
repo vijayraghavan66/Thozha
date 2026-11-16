@@ -6,6 +6,7 @@ deployed, no Cloudflare account is used, and no production key or Mac/Android cr
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -23,7 +24,7 @@ from sim_companion import SimCompanion  # noqa: E402
 
 from jarvis_link_host.client import RelayClient, RelayClientError  # noqa: E402
 from jarvis_link_host.crypto import (  # noqa: E402
-    DeviceIdentity, device_id_for_signing_key, issue_device_certificate,
+    DeviceIdentity, b64u, device_id_for_signing_key, issue_device_certificate,
 )
 from jarvis_link_host.host import JarvisLinkHost  # noqa: E402
 from jarvis_link_host.runtime import HostRelayRuntime  # noqa: E402
@@ -195,11 +196,31 @@ def test_unauthenticated_and_forged_requests_fail_closed(world):
     path = f"/v1/devices/{world.host_id}/inbox"
     assert httpx.get(world.url + path, headers=h, trust_env=False).status_code == 401
     # Bad signature from an unenrolled key claiming the companion's ID.
-    rogue = RelayClient(base_url=world.url, tenant_id=world.tenant, device_id=world.companion.device_id,
-                        identity=DeviceIdentity.generate())
-    with pytest.raises(RelayClientError) as exc:
-        rogue.inbox(device_id=world.companion.device_id)
-    assert "INVALID_SIGNATURE" in err_code(exc)
+    rogue = DeviceIdentity.generate()
+    timestamp_ms = int(time.time() * 1000)
+    nonce = b64u(secrets.token_bytes(32))
+    forged_path = f"/v1/devices/{world.companion.device_id}/inbox?limit=20"
+    forged_signature = rogue.sign_request(
+        tenant_id=world.tenant,
+        device_id=world.companion.device_id,
+        timestamp_ms=timestamp_ms,
+        nonce_b64url=nonce,
+        method="GET",
+        path_and_query=forged_path,
+        body=b"",
+    )
+    forged = httpx.get(
+        world.url + forged_path,
+        headers={
+            "X-Jarvis-Link-Tenant": world.tenant,
+            "X-Jarvis-Link-Device": world.companion.device_id,
+            "X-Jarvis-Link-Timestamp": str(timestamp_ms),
+            "X-Jarvis-Link-Nonce": nonce,
+            "X-Jarvis-Link-Signature": forged_signature,
+        },
+        trust_env=False,
+    )
+    assert forged.status_code == 401 and forged.json()["error"]["code"] == "INVALID_SIGNATURE"
     # Wrong bootstrap secret cannot create a tenant.
     r = httpx.post(world.url + "/v1/enrollment/bootstrap", json={"tenant_id": "it-" + uuid.uuid4().hex},
                    headers={"X-Jarvis-Link-Bootstrap-Key": "wrong"}, trust_env=False)

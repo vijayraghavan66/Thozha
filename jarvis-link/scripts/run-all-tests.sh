@@ -16,6 +16,17 @@ echo "== android: build Kotlin transport + CLI jar + JVM protocol checks (offlin
 (cd "$ANDROID" && ./gradlew --console=plain --offline :app:linkCompanionCliJar :app:verifyLinkProtocol)
 
 echo "== host: simulator, Python/Kotlin interop, and real-workerd integration =="
-(cd host && { [ -x .venv/bin/python ] || python3 -m venv .venv; } && .venv/bin/pip install -q -e '.[test]' && \
+if [ -n "${JARVIS_LINK_HOST_PYTHON:-}" ]; then
+  HOST_PYTHON="$JARVIS_LINK_HOST_PYTHON"
+else
+  (cd host && { [ -x .venv/bin/python ] || python3 -m venv .venv; } && .venv/bin/pip install -q -e '.[test]')
+  HOST_PYTHON="$ROOT/host/.venv/bin/python"
+fi
+if [ ! -x "$HOST_PYTHON" ]; then
+  echo "JARVIS_LINK_HOST_PYTHON is not an executable Python interpreter" >&2
+  exit 2
+fi
+(cd host && \
+  PYTHONPATH="$ROOT/host/src${PYTHONPATH:+:$PYTHONPATH}" \
   JARVIS_LINK_CLI_JAR="$ANDROID/app/build/libs/jarvis-link-cli.jar" JARVIS_LINK_JAVA="$JAVA_HOME/bin/java" \
-  .venv/bin/python -m pytest -q)
+  "$HOST_PYTHON" -m pytest -q)

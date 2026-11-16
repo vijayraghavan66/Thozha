@@ -207,7 +207,15 @@ class LinkRuntime(
         require(decision == "approve" || decision == "reject") { "decision must be approve or reject" }
         val review = pendingApprovals().firstOrNull { it.approvalId == approvalId }
             ?: throw IllegalStateException("approval is not pending on this phone (expired or already decided)")
-        val result = companion(relayUrl).decideApproval(review, decision, review.canonicalArgumentsDigest)
+        val continuationObjective = if (decision == "approve") {
+            conversation().firstOrNull { it["task_id"] == review.taskId }?.get("text") as? String
+        } else null
+        val result = companion(relayUrl).decideApproval(
+            review,
+            decision,
+            review.canonicalArgumentsDigest,
+            continuationObjective,
+        )
         save(mapOf("approvals" to storedApprovals().filter { it.approvalId != approvalId }.map(::approvalMap)))
         return linkedMapOf(
             "decision" to decision,
@@ -271,7 +279,7 @@ class LinkRuntime(
     fun sendRequest(relayUrl: String, text: String): Map<String, Any> {
         val cleaned = text.trim()
         require(cleaned.isNotEmpty() && cleaned.toByteArray(Charsets.UTF_8).size <= 4096) { "message must be 1–4096 bytes" }
-        val result = submit(relayUrl, TaskSubmission(cleaned, setOf(SafeCapability.READ_ONLY)), null)
+        val result = submit(relayUrl, TaskSubmission(cleaned, setOf(SafeCapability.ASSISTANT)), null)
         val entries = conversation().toMutableList()
         entries.add(linkedMapOf(
             "message_id" to result.messageId,
@@ -289,6 +297,16 @@ class LinkRuntime(
         val entries = conversation().map { entry ->
             if (entry["message_id"] == messageId) LinkedHashMap(entry).apply {
                 put("state", state); put("summary", summary); put("task_id", taskId); put("updated_at_unix_ms", now())
+            } else entry
+        }
+        save(mapOf("conversation" to entries))
+    }
+
+    /** Approval/continuation replies may reference the decision envelope; task ID is the stable fallback. */
+    private fun applyToConversationTask(taskId: String, state: String, summary: String) {
+        val entries = conversation().map { entry ->
+            if (entry["task_id"] == taskId) LinkedHashMap(entry).apply {
+                put("state", state); put("summary", summary); put("updated_at_unix_ms", now())
             } else entry
         }
         save(mapOf("conversation" to entries))
@@ -313,7 +331,11 @@ class LinkRuntime(
                     updates.add(linkedMapOf(
                         "task_id" to event.taskId, "state" to event.state, "summary" to event.summary, "received_at_unix_ms" to now(),
                     ))
-                    if (event.inReplyTo.isNotBlank()) applyToConversation(event.inReplyTo, event.taskId, event.state, event.summary)
+                    if (event.inReplyTo.isNotBlank()) {
+                        applyToConversation(event.inReplyTo, event.taskId, event.state, event.summary)
+                    } else if (event.taskId.isNotBlank()) {
+                        applyToConversationTask(event.taskId, event.state, event.summary)
+                    }
                 }
                 else -> Unit
             }

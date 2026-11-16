@@ -23,9 +23,11 @@ class ApprovalRecord:
 class SupervisorPort(Protocol):
     def submit_task(self, *, objective: str, capability_scope: list[str], idempotency_key: str) -> dict[str, Any]: ...
     def get_approval(self, approval_id: str) -> ApprovalRecord | None: ...
+    def list_pending_approvals(self, task_id: str) -> list[dict[str, Any]]: ...
     def decide_approval(
         self, *, task_id: str, approval_id: str, decision: str,
         expected_arguments_digest: str, idempotency_key: str,
+        continuation_objective: str | None = None,
     ) -> dict[str, Any]: ...
     def cancel_task(self, task_id: str, idempotency_key: str) -> dict[str, Any]: ...
     def report_progress(self, task_id: str, stage: str, result_digest: str = "") -> dict[str, Any]: ...
@@ -56,8 +58,24 @@ class MockSupervisor:
     def get_approval(self, approval_id: str) -> ApprovalRecord | None:
         return self.approvals.get(approval_id)
 
+    def list_pending_approvals(self, task_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "approval_id": item.approval_id,
+                "task_id": item.task_id,
+                "operation": item.operation,
+                "target": item.target,
+                "canonical_arguments_digest": item.arguments_digest,
+                "expires_at_unix_ms": item.expires_at_unix_ms,
+                "redacted_summary": "Exact operation requires your approval.",
+            }
+            for item in self.approvals.values()
+            if item.task_id == task_id and item.status == "PENDING"
+        ]
+
     def decide_approval(self, *, task_id: str, approval_id: str, decision: str,
-                        expected_arguments_digest: str, idempotency_key: str) -> dict[str, Any]:
+                        expected_arguments_digest: str, idempotency_key: str,
+                        continuation_objective: str | None = None) -> dict[str, Any]:
         if idempotency_key in self.decisions:
             return self.decisions[idempotency_key]
         record = self.approvals.get(approval_id)
@@ -66,7 +84,13 @@ class MockSupervisor:
         if record.status != "PENDING":
             raise ValueError("supervisor approval is not pending")
         status = "APPROVED" if decision == "approve" else "REJECTED"
-        result = {"task_id": task_id, "approval_id": approval_id, "status": status, "simulated": True}
+        result = {
+            "task_id": task_id,
+            "approval_id": approval_id,
+            "status": status,
+            "continuation_objective": continuation_objective,
+            "simulated": True,
+        }
         self.calls.append(("decide_approval", dict(result)))
         if decision == "approve":
             self.tasks.setdefault(task_id, {})["state"] = "RUNNING"

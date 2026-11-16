@@ -63,6 +63,22 @@ def test_encrypted_safe_task_uses_supervisor_port():
     assert "command" not in supervisor.calls[0][1]
 
 
+def test_assistant_scope_is_forwarded_to_supervisor_without_executable_fields():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(
+        host,
+        phone,
+        host_id,
+        phone_id,
+        host_cert,
+        {"objective": "Open TextEdit only after approval", "capability_scope": ["assistant"]},
+    )
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert result["result"]["kind"] == "task.accepted"
+    assert supervisor.tasks[result["result"]["task_id"]]["capability_scope"] == ["assistant"]
+    assert "command" not in supervisor.calls[0][1]
+
+
 def test_arbitrary_shell_field_is_rejected_before_supervisor():
     hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
     env = task_envelope(host, phone, host_id, phone_id, host_cert,
@@ -122,6 +138,46 @@ def test_valid_approval_decision_is_revalidated_and_forwarded():
     result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
     assert result["result"]["status"] == "APPROVED"
     assert supervisor.calls[-1][0] == "decide_approval"
+
+
+def test_approval_decision_binds_continuation_objective_to_encrypted_payload():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "mcp:jarvis_mac:open_app", "TextEdit", digest, now + 60_000))
+    objective = "Open TextEdit after I approve, then tell me it is open."
+    payload = {
+        "task_id": task_id,
+        "approval_id": approval_id,
+        "decision": "approve",
+        "operation_digest": digest,
+        "idempotency_key": "decision-continuation-1",
+        "continuation_objective": objective,
+    }
+    env = task_envelope(host, phone, host_id, phone_id, host_cert, payload, kind="approval.decision", now=now)
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
+    assert result["result"]["kind"] == "approval.decision_result"
+    assert result["result"]["continuation_objective"] == objective
+    assert supervisor.calls[-1][1]["continuation_objective"] == objective
+
+
+def test_approval_continuation_objective_is_bounded():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "mcp:jarvis_mac:open_app", "TextEdit", digest, now + 60_000))
+    payload = {
+        "task_id": task_id,
+        "approval_id": approval_id,
+        "decision": "approve",
+        "operation_digest": digest,
+        "idempotency_key": "decision-continuation-2",
+        "continuation_objective": "x" * 4097,
+    }
+    env = task_envelope(host, phone, host_id, phone_id, host_cert, payload, kind="approval.decision", now=now)
+    with pytest.raises(TaskEnvelopeError, match="continuation"):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
+    assert supervisor.calls == []
 
 
 def test_envelope_to_key_id_uses_verified_recipient_certificate():

@@ -31,6 +31,7 @@ object CompanionProtocolTest {
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
         localTaskHistoryIsRestartSafe()
+        relayClientRequiresHttpsAndCanonicalTenantIds()
         sharedFixtureInterop(args.firstOrNull() ?: System.getProperty("jarvis.fixture", "../fixtures/envelope-v1.test.json"))
         println("Jarvis Link Companion protocol checks passed.")
     }
@@ -293,6 +294,15 @@ object CompanionProtocolTest {
         check(entry["state"] == "COMPLETED")
         check(entry["summary"] == "Java is a programming language.")
         directory.deleteRecursively()
+    }
+
+    private fun relayClientRequiresHttpsAndCanonicalTenantIds() {
+        HttpJarvisLinkRelay("https://relay.example", "tenant_sim")
+        HttpJarvisLinkRelay("http://127.0.0.1:8787", "tenant_sim")
+        check(runCatching { HttpJarvisLinkRelay("http://relay.example", "tenant_sim") }.isFailure)
+        check(runCatching { HttpJarvisLinkRelay("https://relay.example", "short") }.isFailure)
+        check(runCatching { HttpJarvisLinkRelay("https://relay.example", "tenant.with.dots") }.isFailure)
+        check(runCatching { HttpJarvisLinkRelay("https://relay.example", "x".repeat(65)) }.isFailure)
     }
 
     private fun assertEquals(expected: Any?, actual: Any?) { if (expected != actual) error("Expected <$expected>, got <$actual>") }

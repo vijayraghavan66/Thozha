@@ -21,13 +21,17 @@ from .crypto import (
 from .replay import ReplayCache
 from .supervisor import SupervisorPort
 
-_CAPABILITIES = {"read_only", "web_research", "desktop_observation"}
+_CAPABILITIES = {"read_only", "web_research", "desktop_observation", "assistant"}
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _FORBIDDEN_KEYS = {"command", "cmd", "shell", "shell_command", "script", "executable", "exec"}
 
 
 class TaskEnvelopeError(EnvelopeError):
     pass
+
+
+class ReplayDetected(EnvelopeError):
+    """A valid envelope was already processed by this host process."""
 
 
 def _reject_executable_fields(value: Any) -> None:
@@ -48,7 +52,7 @@ def _task_submit_payload(payload: Mapping[str, Any]) -> tuple[str, list[str]]:
     _reject_executable_fields(payload)
     objective = payload.get("objective")
     scope = payload.get("capability_scope")
-    if not isinstance(objective, str) or not objective.strip() or len(objective) > 4096:
+    if not isinstance(objective, str) or not objective.strip() or len(objective.encode("utf-8")) > 4096:
         raise TaskEnvelopeError("task objective must be 1–4096 characters")
     if not isinstance(scope, list) or not scope or any(not isinstance(item, str) for item in scope):
         raise TaskEnvelopeError("capability_scope must be a non-empty string array")
@@ -85,8 +89,15 @@ class JarvisLinkHost:
         self.supervisor = supervisor
         self.replay_cache = replay_cache or ReplayCache()
 
-    def receive(self, raw_envelope: Mapping[str, Any], *, sender_certificate: DeviceCertificate | Mapping[str, Any],
-                expected_sender_id: str, now_ms: int | None = None) -> dict[str, Any]:
+    def receive(
+        self,
+        raw_envelope: Mapping[str, Any],
+        *,
+        sender_certificate: DeviceCertificate | Mapping[str, Any],
+        expected_sender_id: str,
+        now_ms: int | None = None,
+        allow_duplicate: bool = False,
+    ) -> dict[str, Any]:
         envelope = LinkEnvelope.from_dict(raw_envelope)
         if envelope.from_device_id != expected_sender_id:
             raise EnvelopeError("sender ID does not match the authenticated device")
@@ -105,8 +116,8 @@ class JarvisLinkHost:
             now_ms=now_ms,
         )
         current = int(time.time() * 1000) if now_ms is None else now_ms
-        if not self.replay_cache.claim(envelope.message_id, envelope.expires_at_unix_ms, now_ms=current):
-            raise EnvelopeError("message is expired or was already processed")
+        if not self.replay_cache.claim(envelope.message_id, envelope.expires_at_unix_ms, now_ms=current) and not allow_duplicate:
+            raise ReplayDetected("message was already processed")
         result = self._dispatch(envelope, payload, now_ms=current)
         result_message_id = hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         return {
@@ -178,10 +189,12 @@ class JarvisLinkHost:
 
         if envelope.kind == "approval.decision":
             required = {"task_id", "approval_id", "decision", "operation_digest", "idempotency_key"}
-            if set(payload) != required:
+            optional = {"continuation_objective"}
+            if not required.issubset(payload) or set(payload) - (required | optional):
                 raise TaskEnvelopeError("approval.decision payload has invalid fields")
             task_id, approval_id = payload["task_id"], payload["approval_id"]
             decision, digest, idem = payload["decision"], payload["operation_digest"], payload["idempotency_key"]
+            continuation_objective = payload.get("continuation_objective")
             for label, value in (("task_id", task_id), ("approval_id", approval_id)):
                 if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value):
                     raise TaskEnvelopeError(f"approval.decision has invalid {label}")
@@ -191,6 +204,12 @@ class JarvisLinkHost:
                 raise TaskEnvelopeError("approval decision digest is invalid")
             if not isinstance(idem, str) or not 1 <= len(idem) <= 128 or "\n" in idem:
                 raise TaskEnvelopeError("approval decision idempotency key is invalid")
+            if continuation_objective is not None and (
+                not isinstance(continuation_objective, str)
+                or not continuation_objective.strip()
+                or len(continuation_objective.encode("utf-8")) > 4096
+            ):
+                raise TaskEnvelopeError("approval continuation objective is invalid")
             approval = self.supervisor.get_approval(approval_id)
             if approval is None or approval.task_id != task_id:
                 raise TaskEnvelopeError("approval does not match task")
@@ -204,6 +223,7 @@ class JarvisLinkHost:
                 decision=decision,
                 expected_arguments_digest=digest,
                 idempotency_key=idem,
+                continuation_objective=continuation_objective,
             )
             return {"kind": "approval.decision_result", **result}
 

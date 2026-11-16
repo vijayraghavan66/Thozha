@@ -10,11 +10,14 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 
-from .crypto import DeviceIdentity, b64u
+from .crypto import DeviceIdentity, b64u, device_id_for_signing_key
 
 
 class RelayClientError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None, code: str = "relay_error") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
 
 
 def compact_json(body: Mapping[str, Any] | None) -> bytes:
@@ -31,12 +34,18 @@ class RelayClient:
         local_http = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
         if (parsed.scheme != "https" and not local_http) or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
             raise ValueError("relay URL must be HTTPS (HTTP is allowed only for local simulation)")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", tenant_id):
+            raise ValueError("tenant ID must use 8–64 relay-compatible characters")
+        if not re.fullmatch(r"[0-9a-f]{32}", device_id) or device_id_for_signing_key(identity.signing_public_der) != device_id:
+            raise ValueError("device ID does not match its signing identity")
         self.base_url = base_url.rstrip("/")
         self.tenant_id = tenant_id
         self.device_id = device_id
         self.identity = identity
         self._owned_client = http_client is None
-        self.http = http_client or httpx.Client(timeout=10.0, follow_redirects=False, trust_env=False)
+        # Honor managed-system HTTP(S)_PROXY settings for remote HTTPS relay
+        # traffic. Loopback simulation remains direct and never enters a proxy.
+        self.http = http_client or httpx.Client(timeout=10.0, follow_redirects=False, trust_env=not local_http)
 
     def signed_request(self, method: str, path_and_query: str, body: Mapping[str, Any] | None = None) -> httpx.Response:
         if not path_and_query.startswith("/") or "\r" in path_and_query or "\n" in path_and_query:
@@ -71,7 +80,7 @@ class RelayClient:
                 code = response.json().get("error", {}).get("code", code)
             except Exception:
                 pass
-            raise RelayClientError(f"relay returned HTTP {response.status_code} ({code})")
+            raise RelayClientError(f"relay returned HTTP {response.status_code} ({code})", status_code=response.status_code, code=str(code))
         return response
 
     @staticmethod
@@ -115,6 +124,16 @@ class RelayClient:
 
     def certify_device(self, certificate: Mapping[str, Any]) -> dict[str, Any]:
         return self._json(self.signed_request("POST", "/v1/enrollment/certify", {"certificate": dict(certificate)}))
+
+    def device_certificate(self, device_id: str) -> dict[str, Any]:
+        """Fetch the current active certificate for a tenant device."""
+        if not re.fullmatch(r"[0-9a-f]{32}", device_id):
+            raise ValueError("invalid device ID")
+        value = self._json(self.signed_request("GET", f"/v1/devices/{device_id}/certificate"))
+        certificate = value.get("certificate")
+        if not isinstance(certificate, dict):
+            raise RelayClientError("relay returned an invalid device certificate")
+        return certificate
 
     def revoke_device(self, device_id: str, reason_code: str = "owner_revoked") -> dict[str, Any]:
         if not re.fullmatch(r"[0-9a-f]{32}", device_id):
