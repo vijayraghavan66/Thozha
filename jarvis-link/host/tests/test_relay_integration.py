@@ -79,7 +79,7 @@ def relay_url():
 class World:
     """One isolated tenant: bootstrapped host, certified companion, mock supervisor."""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, sim_companion: bool = True) -> None:
         self.url = url
         self.tenant = "it-" + uuid.uuid4().hex
         self.identity = DeviceIdentity.generate()
@@ -95,9 +95,10 @@ class World:
         self.host = JarvisLinkHost(tenant_id=self.tenant, device_id=self.host_id, identity=self.identity,
                                    host_certificate=cert, supervisor=self.supervisor)
         self.runtime = HostRelayRuntime(host=self.host, relay=self.relay)
-        self.companion = self.enroll_companion()
-        self.host_cert = self.companion.client._json(
-            self.companion.client.signed_request("GET", f"/v1/devices/{self.host_id}/certificate"))["certificate"]
+        self.companion = self.enroll_companion() if sim_companion else None
+        # The host reads its own certificate (it is active in its tenant), so no companion is required.
+        self.host_cert = self.relay._json(
+            self.relay.signed_request("GET", f"/v1/devices/{self.host_id}/certificate"))["certificate"]
 
     def enroll_companion(self) -> SimCompanion:
         comp = SimCompanion(self.tenant, self.url, self.identity.signing_public_der, self.host_id)

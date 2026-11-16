@@ -14,8 +14,13 @@ data class InboxPage(val messages: List<InboxItem>, val nextCursor: String?)
 /** HTTP implementation is injected so this protocol layer stays testable and Android-ready. */
 interface JarvisLinkRelayApi {
     fun postMessage(envelopeJson: String, headers: Map<String, String>): RelayReceipt
-    fun inbox(deviceId: String, limit: Int, cursor: String?, headers: Map<String, String>): InboxPage
-    fun acknowledge(messageId: String, status: AckStatus, resultDigest: String, headers: Map<String, String>)
+    /** [pathAndQuery] is the exact path that was signed, so the signed and sent targets cannot diverge. */
+    fun inbox(pathAndQuery: String, headers: Map<String, String>): InboxPage
+    /** [bodyJson] is the exact body bytes that were signed. */
+    fun acknowledge(messageId: String, bodyJson: String, headers: Map<String, String>)
+    fun deviceCertificate(deviceId: String, headers: Map<String, String>): DeviceCertificate
+    fun enrollmentChallenge(bodyJson: String): Map<String, Any>
+    fun enrollmentComplete(bodyJson: String): Map<String, Any>
 }
 
 /** Android implementation should back this with an encrypted local queue. */
@@ -67,8 +72,9 @@ data class TaskSubmission(
     }
 
     fun toJson(): String {
+        // Exactly the two fields the host accepts. Idempotency is the envelope message_id, not a payload field.
         val capabilities = capabilityScope.map { it.wireName }.sorted().joinToString(prefix = "[", postfix = "]") { FlatJson.quote(it) }
-        return "{\"objective\":${FlatJson.quote(objective)},\"capability_scope\":$capabilities,\"client_request_id\":${FlatJson.quote(clientRequestId)}}"
+        return "{\"objective\":${FlatJson.quote(objective)},\"capability_scope\":$capabilities}"
     }
 }
 
@@ -109,6 +115,8 @@ data class EnrollmentRequest(
 }
 
 data class EnrollmentCompletion(
+    val tenantId: String,
+    val deviceId: String,
     val invitationId: String,
     val challengeId: String,
     val deviceName: String,
@@ -120,6 +128,9 @@ data class EnrollmentCompletion(
     val signatureBase64Url: String,
 ) {
     fun toJson(): String = FlatJson.encode(linkedMapOf(
+        // The relay requires the tenant and the derived device ID in the body; both are signed by the proof.
+        "tenant_id" to tenantId,
+        "device_id" to deviceId,
         "invitation_id" to invitationId,
         "challenge_id" to challengeId,
         "device_name" to deviceName,
@@ -179,6 +190,8 @@ class CompanionEnrollment(
             challenge.challengeBase64Url,
         ).joinToString("\n").toByteArray(UTF_8)
         return EnrollmentCompletion(
+            tenantId = tenantId,
+            deviceId = signingIdentity.deviceId,
             invitationId = invitation.invitationId,
             challengeId = challenge.challengeId,
             deviceName = safeDeviceName,
@@ -236,7 +249,7 @@ data class ApprovalReview(
             "approval_id" to approvalId,
             "task_id" to taskId,
             "decision" to decision,
-            "expected_operation_digest" to expectedDigest,
+            "operation_digest" to expectedDigest,
             "idempotency_key" to idempotencyKey,
         )
         return fields.entries.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) ->
@@ -264,6 +277,17 @@ sealed interface CompanionEvent {
     data class ApprovalPending(val review: ApprovalReview) : CompanionEvent
     data class TaskUpdate(val taskId: String, val state: String, val summary: String) : CompanionEvent
     data class Unknown(val kind: String) : CompanionEvent
+
+    /** Plain map for the CLI/JSON output. Contains only decrypted, already-authenticated fields. */
+    fun toMap(): Map<String, Any> = when (this) {
+        is ApprovalPending -> linkedMapOf(
+            "type" to "approval_pending", "approval_id" to review.approvalId, "task_id" to review.taskId,
+            "operation" to review.operation, "target" to review.target,
+            "canonical_arguments_digest" to review.canonicalArgumentsDigest, "expires_at_unix_ms" to review.expiresAtUnixMs,
+        )
+        is TaskUpdate -> linkedMapOf("type" to "task_update", "task_id" to taskId, "state" to state, "summary" to summary)
+        is Unknown -> linkedMapOf("type" to "unknown", "kind" to kind)
+    }
 }
 
 data class DeliveryResult(val messageId: String, val queuedOffline: Boolean, val receipt: RelayReceipt?)
@@ -305,13 +329,16 @@ class JarvisLinkCompanion(
         if (online) lastErrorCode = null
     }
 
-    fun submitTask(submission: TaskSubmission): DeliveryResult {
+    fun submitTask(submission: TaskSubmission, ttlMs: Long? = null): DeliveryResult {
         val envelope = LinkCrypto.createEnvelope(
             tenantId, signingIdentity, hostCertificate, hostRoot,
             "task.submit", submission.toJson(), nowUnixMs = now(),
+            ttlMs = ttlMs ?: (15 * 60 * 1000L),
         )
         return sendOrQueue(envelope)
     }
+
+    fun outboxSize(): Int = outbox.list().size
 
     fun decideApproval(review: ApprovalReview, decision: String, expectedDigest: String): DeliveryResult {
         val payload = review.toDecisionJson(decision, expectedDigest, UUID.randomUUID().toString(), now())
@@ -352,7 +379,7 @@ class JarvisLinkCompanion(
         try {
             inbox.forgetExpired(now())
             val path = "/v1/devices/${signingIdentity.deviceId}/inbox?limit=$limit" + (cursor?.let { "&cursor=$it" } ?: "")
-            val page = relay.inbox(signingIdentity.deviceId, limit, cursor, signedHeaders("GET", path, ByteArray(0)))
+            val page = relay.inbox(path, signedHeaders("GET", path, ByteArray(0)))
             val events = mutableListOf<CompanionEvent>()
             for (item in page.messages) {
                 val envelope = item.envelope
@@ -383,7 +410,7 @@ class JarvisLinkCompanion(
             lastErrorCode = null
             return PollResult(events, cursor)
         } catch (failure: Exception) {
-            connectionState = if (failure is SecurityException) LinkConnectionState.REAUTH_REQUIRED else LinkConnectionState.OFFLINE
+            connectionState = if (failure is SecurityException || (failure is RelayHttpException && failure.status == 401)) LinkConnectionState.REAUTH_REQUIRED else LinkConnectionState.OFFLINE
             lastErrorCode = classify(failure)
             throw failure
         }
@@ -399,7 +426,13 @@ class JarvisLinkCompanion(
             val receipt = postEnvelope(raw, envelope)
             DeliveryResult(envelope.header.messageId, queuedOffline = false, receipt = receipt)
         } catch (failure: Exception) {
-            if (failure is SecurityException) {
+            if (failure is RelayHttpException && failure.isPermanent()) {
+                // The relay understood and refused the message (revoked, not recipient, expired, bad signature).
+                // Queuing it would retry a permanent failure forever, so surface it instead.
+                lastErrorCode = failure.code
+                throw failure
+            }
+            if (failure is SecurityException || (failure is RelayHttpException && failure.status == 401)) {
                 connectionState = LinkConnectionState.REAUTH_REQUIRED
                 lastErrorCode = "AUTH_FAILED"
                 throw failure
@@ -433,7 +466,7 @@ class JarvisLinkCompanion(
         runCatching {
             val path = "/v1/messages/$messageId/ack"
             val body = "{\"status\":${FlatJson.quote(status.name.lowercase())},\"result_digest\":${FlatJson.quote(resultDigest)}}"
-            relay.acknowledge(messageId, status, resultDigest, signedHeaders("POST", path, body.toByteArray(UTF_8)))
+            relay.acknowledge(messageId, body, signedHeaders("POST", path, body.toByteArray(UTF_8)))
         }
     }
 
@@ -446,8 +479,12 @@ class JarvisLinkCompanion(
         }
     }
 
+    private fun RelayHttpException.isPermanent(): Boolean =
+        status in 400..499 && status != 401 && status != 408 && status != 429
+
     private fun classify(failure: Exception): String = when (failure) {
         is SecurityException -> "AUTH_FAILED"
+        is RelayHttpException -> if (failure.status == 429) "RATE_LIMITED" else "RELAY_ERROR"
         is IOException -> "NETWORK_UNAVAILABLE"
         else -> "PROTOCOL_ERROR"
     }

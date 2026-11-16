@@ -39,11 +39,16 @@ class HostRelayRuntime:
                     expected_sender_id=str(envelope.get("from_device_id", "")),
                     now_ms=now_ms,
                 )
+                body = result["result"]
                 payload = {
                     "in_reply_to": message_id,
                     "status": result["status"],
-                    "result": result["result"],
+                    "result": body,
                     "result_digest": result["result_digest"],
+                    # Flat fields the companion decodes as a TaskUpdate (protocol/v1.md, task.result).
+                    "task_id": str(body.get("task_id", "")),
+                    "state": str(body.get("state", body.get("kind", "accepted"))),
+                    "summary": str(body.get("summary", "Accepted for simulated execution")),
                 }
                 issued = int(time.time() * 1000) if now_ms is None else now_ms
                 response = self.host.encrypt_reply(

@@ -282,17 +282,25 @@ private class MemoryRelay(
         return RelayReceipt(envelope.header.messageId, "queued", envelope.header.expiresAtUnixMs)
     }
 
-    override fun inbox(deviceId: String, limit: Int, cursor: String?, headers: Map<String, String>): InboxPage {
-        val path = "/v1/devices/$deviceId/inbox?limit=$limit" + (cursor?.let { "&cursor=$it" } ?: "")
-        verifyRequest(headers, "GET", path, ByteArray(0), companion)
+    override fun inbox(pathAndQuery: String, headers: Map<String, String>): InboxPage {
+        verifyRequest(headers, "GET", pathAndQuery, ByteArray(0), companion)
         return InboxPage(incoming.toList(), null)
     }
 
-    override fun acknowledge(messageId: String, status: AckStatus, resultDigest: String, headers: Map<String, String>) {
-        val body = "{\"status\":${FlatJson.quote(status.name.lowercase())},\"result_digest\":${FlatJson.quote(resultDigest)}}".toByteArray(UTF_8)
+    override fun acknowledge(messageId: String, bodyJson: String, headers: Map<String, String>) {
+        val body = bodyJson.toByteArray(UTF_8)
         verifyRequest(headers, "POST", "/v1/messages/$messageId/ack", body, companion)
-        acks += messageId to status
+        acks += messageId to (if (bodyJson.contains("\"received\"")) AckStatus.RECEIVED else AckStatus.REJECTED)
     }
+
+    override fun deviceCertificate(deviceId: String, headers: Map<String, String>): DeviceCertificate =
+        throw UnsupportedOperationException("not used by the in-memory relay")
+
+    override fun enrollmentChallenge(bodyJson: String): Map<String, Any> =
+        throw UnsupportedOperationException("not used by the in-memory relay")
+
+    override fun enrollmentComplete(bodyJson: String): Map<String, Any> =
+        throw UnsupportedOperationException("not used by the in-memory relay")
 
     private fun verifyRequest(headers: Map<String, String>, method: String, path: String, body: ByteArray, identity: SigningIdentity) {
         if (headers["X-Jarvis-Link-Tenant"] != "tenant_sim") error("Wrong signed tenant")

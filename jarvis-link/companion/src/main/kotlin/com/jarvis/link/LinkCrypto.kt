@@ -369,99 +369,14 @@ object LinkCrypto {
 
 /** Strict flat JSON codec for the relay envelope. Payload JSON remains encrypted bytes. */
 internal object FlatJson {
-    fun encode(fields: Map<String, Any>): String = fields.entries.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) ->
-        val encodedValue = when (value) {
-            is Number -> value.toString()
-            is String -> "\"${escape(value)}\""
-            else -> error("Unsupported relay envelope field type")
-        }
-        "\"${escape(key)}\":$encodedValue"
-    }
+    /** Encodes flat primitives and nested maps/lists; null members are omitted. */
+    fun encode(fields: Map<String, Any>): String = LinkJson.encode(fields)
 
-    fun decode(input: String): Map<String, Any> {
-        require(input.length <= 128 * 1024) { "Envelope JSON too large" }
-        val parser = FlatJsonParser(input)
-        return parser.parse()
-    }
+    fun decode(input: String): Map<String, Any> = LinkJson.parseObject(input)
 
-    private fun escape(value: String): String = buildString {
-        value.forEach { char ->
-            when (char) {
-                '"' -> append("\\\"")
-                '\\' -> append("\\\\")
-                '\b' -> append("\\b")
-                '\u000C' -> append("\\f")
-                '\n' -> append("\\n")
-                '\r' -> append("\\r")
-                '\t' -> append("\\t")
-                else -> if (char.code < 0x20) append("\\u%04x".format(char.code)) else append(char)
-            }
-        }
-    }
-
-    fun quote(value: String): String = "\"${escape(value)}\""
-}
-
-private class FlatJsonParser(private val text: String) {
-    private var index = 0
-    fun parse(): Map<String, Any> {
-        whitespace(); expect('{'); whitespace()
-        val result = linkedMapOf<String, Any>()
-        if (take('}')) return result
-        while (true) {
-            whitespace(); val key = string(); whitespace(); expect(':'); whitespace()
-            val value: Any = if (peek() == '"') string() else number().toLong()
-            require(result.put(key, value) == null) { "Duplicate envelope field" }
-            whitespace()
-            if (take('}')) break
-            expect(',')
-        }
-        whitespace(); require(index == text.length) { "Trailing envelope data" }
-        return result
-    }
-
-    private fun string(): String {
-        expect('"'); val out = StringBuilder()
-        while (index < text.length) {
-            val char = text[index++]
-            when (char) {
-                '"' -> return out.toString()
-                '\\' -> {
-                    require(index < text.length)
-                    when (val escaped = text[index++]) {
-                        '"', '\\', '/' -> out.append(escaped)
-                        'b' -> out.append('\b')
-                        'f' -> out.append('\u000C')
-                        'n' -> out.append('\n')
-                        'r' -> out.append('\r')
-                        't' -> out.append('\t')
-                        'u' -> {
-                            require(index + 4 <= text.length)
-                            out.append(text.substring(index, index + 4).toInt(16).toChar())
-                            index += 4
-                        }
-                        else -> error("Invalid JSON escape")
-                    }
-                }
-                else -> { require(char.code >= 0x20); out.append(char) }
-            }
-        }
-        error("Unterminated JSON string")
-    }
-
-    private fun number(): String {
-        val start = index
-        if (peek() == '-') index++
-        while (index < text.length && text[index].isDigit()) index++
-        require(index > start) { "Expected JSON integer" }
-        return text.substring(start, index)
-    }
-
-    private fun whitespace() { while (index < text.length && text[index] in " \t\r\n") index++ }
-    private fun peek(): Char = text.getOrNull(index) ?: error("Unexpected end of JSON")
-    private fun take(char: Char): Boolean = if (text.getOrNull(index) == char) { index++; true } else false
-    private fun expect(char: Char) { require(take(char)) { "Expected '$char' at byte $index" } }
+    fun quote(value: String): String = "\"${LinkJson.escape(value)}\""
 }
 
 internal fun Map<String, Any>.string(key: String): String = this[key] as? String ?: error("Missing/invalid string field: $key")
 internal fun Map<String, Any>.long(key: String): Long = this[key] as? Long ?: error("Missing/invalid numeric field: $key")
+internal fun Map<String, Any>.optionalString(key: String): String? = this[key] as? String
