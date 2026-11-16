@@ -1,0 +1,76 @@
+{
+  "purpose": "Jarvis Link v1 cross-language test only; all private scalars are public test material and must never be reused.",
+  "tenant_id": "tenant-test-0001",
+  "host_device_id": "5cd252fb0ce8932436faf8ccd1040981",
+  "companion_device_id": "dc0ce633dbcc913dafafa4b89ac44d8c",
+  "host_root_signing_public_key_der_b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li_hp_m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q",
+  "host_certificate": {
+    "v": 1,
+    "tenant_id": "tenant-test-0001",
+    "device_id": "5cd252fb0ce8932436faf8ccd1040981",
+    "device_role": "host",
+    "signing_public_key_b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li_hp_m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q",
+    "encryption_public_key_b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4lNKNTLQj7ugLd5lnuYr0AMf4tt4VZbvUJMCRGsDCFLg8VdaTGM8xxnf7l_ahi12TvyWw_MO4AVcQsI_GE7Yxg",
+    "not_before_unix_ms": 1999999999000,
+    "expires_at_unix_ms": 2000000060000,
+    "certificate_id": "11111111111111111111111111111111",
+    "issuer_device_id": "5cd252fb0ce8932436faf8ccd1040981",
+    "signature_b64url": "MEUCIGeJILaZ34wdpnY8VQMJX0SHjMNsuY11Z6FT0VScYSCdAiEAwabf6YQX76GM8YS0q4oZKWLHCq73Fyizar25l6ywFUE"
+  },
+  "sender_certificate": {
+    "v": 1,
+    "tenant_id": "tenant-test-0001",
+    "device_id": "5cd252fb0ce8932436faf8ccd1040981",
+    "device_role": "host",
+    "signing_public_key_b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li_hp_m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q",
+    "encryption_public_key_b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4lNKNTLQj7ugLd5lnuYr0AMf4tt4VZbvUJMCRGsDCFLg8VdaTGM8xxnf7l_ahi12TvyWw_MO4AVcQsI_GE7Yxg",
+    "not_before_unix_ms": 1999999999000,
+    "expires_at_unix_ms": 2000000060000,
+    "certificate_id": "11111111111111111111111111111111",
+    "issuer_device_id": "5cd252fb0ce8932436faf8ccd1040981",
+    "signature_b64url": "MEUCIGeJILaZ34wdpnY8VQMJX0SHjMNsuY11Z6FT0VScYSCdAiEAwabf6YQX76GM8YS0q4oZKWLHCq73Fyizar25l6ywFUE"
+  },
+  "recipient_certificate": {
+    "v": 1,
+    "tenant_id": "tenant-test-0001",
+    "device_id": "dc0ce633dbcc913dafafa4b89ac44d8c",
+    "device_role": "companion",
+    "signing_public_key_b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEfPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXgHd1UQ247QQCk9msafdDDbun2t5jzpgimeBLedInhz0Q",
+    "encryption_public_key_b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEXsvk0aYzCkTI9--VHUvxZebGtyHvramF-0FmG8bn_WyHNGQMSZj_fjdLBs4aZKLs2CqwNjhPuD2aebEnon1QMg",
+    "not_before_unix_ms": 1999999999000,
+    "expires_at_unix_ms": 2000000060000,
+    "certificate_id": "22222222222222222222222222222222",
+    "issuer_device_id": "5cd252fb0ce8932436faf8ccd1040981",
+    "signature_b64url": "MEQCIA17F5_ACC8cAic8_nP-PQDmc3zCOWZ_JmA9rHKo-bpvAiAxVqCe9tBVPmG6kwqJtsd9WORJrhrZzWAFbGcF0awrwA"
+  },
+  "envelope": {
+    "v": 1,
+    "tenant_id": "tenant-test-0001",
+    "message_id": "33333333333333333333333333333333",
+    "from_device_id": "5cd252fb0ce8932436faf8ccd1040981",
+    "to_device_id": "dc0ce633dbcc913dafafa4b89ac44d8c",
+    "to_key_id": "22222222222222222222222222222222",
+    "kind": "approval.request",
+    "issued_at_unix_ms": 2000000000000,
+    "expires_at_unix_ms": 2000000060000,
+    "ephemeral_pubkey_b64url": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUVkLelFRQNLXhMhWCGaP3--Mgv0fW-UkIVVKDcPQM-3gwX2okEpyfYrhvza_inkmDQEvANTYCIjR0LtE_aFtpA",
+    "iv_b64url": "AAECAwQFBgcICQoL",
+    "ciphertext_b64url": "PsPp6IydlPRNjbW9mAwhKRcM89eTYTFKVWwxkfc54AKRvetsRtDLjaZk3NuBm14fthVzPTOQLMHmmw7_izxnehfBP9HY6PsO_od26a0nDpQxllfkaVgyqV6hvoidOtPv9sIZOycjS_Nmzy8aP3DqIzkDJrapmr6YhOr2zTATcS-UA0jlt1pE27wH3IS96Xt_hlMArPfXm5iM9Njos-kAR4izJ7JCYU4OYS0Dg-KBQQPOdYQPqOGxCCOc3c1-OyobEAn332G0BPjinCMBBXtbIL9vXqQLNlx8H60mDCi2fhAHowLX4lOTuhsywneelBqS4qNbcKL7FXKPdcaZWYTyfVBWXzxHvZrM5rrWdz0rgUJiCbm1nii4q-9SaXRGGtHOGpybzCEGWE87pTGxrWi9l3BtHKuCy-bY7MH5",
+    "sender_signature_b64url": "MEYCIQDemtHEwZtEEeL7DmBhtyYRsWpRJcMrX5AeS7JMgunJvwIhAI_vwfqw2sJFO5EvDGbHqTlhNE1UzudwX994wzSABu6B"
+  },
+  "expected_plaintext": {
+    "approval_id": "44444444444444444444444444444444",
+    "task_id": "55555555555555555555555555555555",
+    "operation": "shell_exec",
+    "target": "/tmp",
+    "operation_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expires_at_unix_ms": 2000000030000,
+    "reason": "Safe simulated approval marker"
+  },
+  "test_only_private_scalars": {
+    "host_signing": "1",
+    "host_encryption": "4",
+    "companion_signing": "2",
+    "companion_encryption": "3"
+  }
+}
