@@ -27,6 +27,7 @@ object CompanionProtocolTest {
         check(hostCertificate.verify(hostRoot, "tenant_sim", now))
         check(companionCertificate.verify(hostRoot, "tenant_sim", now))
         enrollmentProofBindsAllKeys(root, host, hostEnc, companion, companionEnc, now)
+        assistantTextJsonRoundTrip()
         endToEndEnvelopeRoundTrip(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
@@ -34,6 +35,20 @@ object CompanionProtocolTest {
         relayClientRequiresHttpsAndCanonicalTenantIds()
         sharedFixtureInterop(args.firstOrNull() ?: System.getProperty("jarvis.fixture", "../fixtures/envelope-v1.test.json"))
         println("Jarvis Link Companion protocol checks passed.")
+    }
+
+    private fun assistantTextJsonRoundTrip() {
+        val samples = listOf(
+            "I\napprove",
+            "Open the\nCalculator app",
+            "literal %n stays literal",
+            "**approve** and `df -h`",
+        )
+        for (sample in samples) {
+            val encoded = LinkJson.encode(linkedMapOf("text" to sample))
+            val decoded = LinkJson.parseObject(encoded)["text"]
+            check(decoded == sample) { "JSON changed assistant text or newline boundaries" }
+        }
     }
 
     /** Extracts the balanced `{...}` value of a top-level key (fixture has no braces inside strings). */
