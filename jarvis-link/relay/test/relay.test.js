@@ -14,6 +14,7 @@ class MemoryStorage {
   async list({ prefix = "" } = {}) { return new Map([...this.values.entries()].filter(([k]) => k.startsWith(prefix)).map(([k, v]) => [k, structuredClone(v)])); }
   async setAlarm(time) { this.alarm = time; }
   async deleteAlarm() { this.alarm = null; }
+  async getAlarm() { return this.alarm; }
 }
 
 class FakeState {
@@ -250,4 +251,127 @@ test("bootstrap secret, unauthenticated access, and route allowlist fail closed"
   }), ctx.env);
   assert.equal(shellPath.status, 404);
   assert.equal((await shellPath.json()).error.code, "NOT_FOUND");
+});
+
+test("expiry removes ACKed and pending ciphertext, keeps a bounded tombstone, then purges it", async () => {
+  const ctx = await setupTenant();
+  const companion = await enrollCompanion(ctx);
+  const target = { id: ctx.hostId, encryption_public_key_b64url: ctx.hostCert.encryption_public_key_b64url };
+  const send = async (messageId) => {
+    const envelope = await makeEnvelope({
+      tenant: TENANT, from: companion.companionId, to: target,
+      sender: companion.companionSign, toKeyId: ctx.hostCert.certificate_id,
+      messageId, text: `secret ${messageId}`,
+    });
+    const response = await relay.fetch(await postRequest({
+      path: "/v1/messages", tenant: TENANT, deviceId: companion.companionId,
+      pair: companion.companionSign, body: envelope,
+    }), ctx.env);
+    assert.equal(response.status, 200, await response.clone().text());
+    return envelope;
+  };
+
+  const ackedEnvelope = await send(crypto.randomUUID().replaceAll("-", ""));
+  const inbox = await relay.fetch(await postRequest({
+    path: `/v1/devices/${ctx.hostId}/inbox?limit=5`, method: "GET", tenant: TENANT,
+    deviceId: ctx.hostId, pair: ctx.hostSign,
+  }), ctx.env);
+  assert.equal(inbox.status, 200);
+  const ackedBody = { status: "received", result_digest: "a".repeat(64) };
+  const ack = await relay.fetch(await postRequest({
+    path: `/v1/messages/${ackedEnvelope.message_id}/ack`, tenant: TENANT,
+    deviceId: ctx.hostId, pair: ctx.hostSign, body: ackedBody,
+  }), ctx.env);
+  assert.equal(ack.status, 200);
+
+  const pendingEnvelope = await send(crypto.randomUUID().replaceAll("-", ""));
+  const tenantDo = ctx.env.SESSIONS.sessions.get(TENANT);
+  const expiryNow = Date.now() - 1;
+  for (const id of [ackedEnvelope.message_id, pendingEnvelope.message_id]) {
+    const record = await tenantDo.state.storage.get(`message:${id}`);
+    record.envelope.expires_at_unix_ms = expiryNow;
+    await tenantDo.state.storage.put(`message:${id}`, record);
+  }
+
+  await tenantDo.alarm();
+  const ackedTombstone = await tenantDo.state.storage.get(`message:${ackedEnvelope.message_id}`);
+  const expiredTombstone = await tenantDo.state.storage.get(`message:${pendingEnvelope.message_id}`);
+  assert.equal(ackedTombstone.status, "ACKED");
+  assert.equal(expiredTombstone.status, "EXPIRED");
+  assert.equal(ackedTombstone.envelope, null);
+  assert.equal(expiredTombstone.envelope, null);
+  assert.ok(ackedTombstone.purge_at_unix_ms > Date.now());
+  assert.ok(expiredTombstone.purge_at_unix_ms > Date.now());
+  assert.equal(await tenantDo.state.storage.get(`inbox:${ctx.hostId}`), undefined);
+
+  for (const id of [ackedEnvelope.message_id, pendingEnvelope.message_id]) {
+    const record = await tenantDo.state.storage.get(`message:${id}`);
+    record.purge_at_unix_ms = Date.now() - 1;
+    await tenantDo.state.storage.put(`message:${id}`, record);
+  }
+  await tenantDo.alarm();
+  assert.equal(await tenantDo.state.storage.get(`message:${ackedEnvelope.message_id}`), undefined);
+  assert.equal(await tenantDo.state.storage.get(`message:${pendingEnvelope.message_id}`), undefined);
+
+  // Older releases left already-cleared EXPIRED tombstones without a purge
+  // deadline. A later scheduling pass migrates them and cleans stale queue IDs.
+  const legacyId = "d".repeat(32);
+  await tenantDo.state.storage.put(`message:${legacyId}`, {
+    to_device_id: ctx.hostId, status: "EXPIRED", envelope: null,
+  });
+  await tenantDo.state.storage.put(`inbox:${ctx.hostId}`, [legacyId]);
+  await tenantDo.scheduleExpiry();
+  const migrated = await tenantDo.state.storage.get(`message:${legacyId}`);
+  assert.ok(migrated.purge_at_unix_ms > Date.now());
+  assert.equal(await tenantDo.state.storage.get(`inbox:${ctx.hostId}`), undefined);
+  migrated.purge_at_unix_ms = Date.now() - 1;
+  await tenantDo.state.storage.put(`message:${legacyId}`, migrated);
+  await tenantDo.alarm();
+  assert.equal(await tenantDo.state.storage.get(`message:${legacyId}`), undefined);
+});
+
+test("request nonce and rate-limit state are tenant-local and expire from storage", async () => {
+  const ctx = await setupTenant();
+  const response = await relay.fetch(await postRequest({
+    path: `/v1/devices/${ctx.hostId}/certificate`, method: "GET", tenant: TENANT,
+    deviceId: ctx.hostId, pair: ctx.hostSign,
+  }), ctx.env);
+  assert.equal(response.status, 200);
+
+  const tenantDo = ctx.env.SESSIONS.sessions.get(TENANT);
+  let nonceRows = await tenantDo.state.storage.list({ prefix: "nonce:" });
+  let rateRows = await tenantDo.state.storage.list({ prefix: "rate:" });
+  assert.equal(nonceRows.size, 1);
+  assert.equal(rateRows.size, 1);
+  assert.ok(tenantDo.state.storage.alarm > Date.now());
+
+  const [nonceKey] = nonceRows.keys();
+  await tenantDo.state.storage.put(nonceKey, Date.now() - 1);
+  const previousWindow = Math.floor(Date.now() / 60_000) - 2;
+  const oldRateKey = `rate:${ctx.hostId}:${previousWindow}`;
+  await tenantDo.state.storage.put(oldRateKey, 120);
+  await tenantDo.alarm();
+  assert.equal(await tenantDo.state.storage.get(nonceKey), undefined);
+  assert.equal(await tenantDo.state.storage.get(oldRateKey), undefined);
+  assert.equal((await tenantDo.state.storage.list({ prefix: "rate:" })).size, 1);
+});
+
+test("expired enrollment challenges and invitations are purged by the tenant alarm", async () => {
+  const ctx = await setupTenant();
+  await enrollCompanion(ctx);
+  const tenantDo = ctx.env.SESSIONS.sessions.get(TENANT);
+  const [challengeEntry] = [...(await tenantDo.state.storage.list({ prefix: "enroll:" })).entries()];
+  assert.ok(challengeEntry);
+  const [challengeKey, challenge] = challengeEntry;
+  const invitationKey = `invite:${challenge.invitation_id}`;
+  const invitation = await tenantDo.state.storage.get(invitationKey);
+  assert.ok(invitation);
+  challenge.expires_at_unix_ms = Date.now() - 1;
+  invitation.expires_at_unix_ms = Date.now() - 1;
+  await tenantDo.state.storage.put(challengeKey, challenge);
+  await tenantDo.state.storage.put(invitationKey, invitation);
+
+  await tenantDo.alarm();
+  assert.equal(await tenantDo.state.storage.get(challengeKey), undefined);
+  assert.equal(await tenantDo.state.storage.get(invitationKey), undefined);
 });

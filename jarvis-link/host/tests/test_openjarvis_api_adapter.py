@@ -108,6 +108,7 @@ def test_adapter_refuses_non_loopback_targets_and_unsafe_credential_modes(tmp_pa
 def test_adapter_can_read_api_key_from_local_openjarvis_config_only(tmp_path):
     config = tmp_path / "config.toml"
     config.write_text('[server.auth]\napi_key = "test-config-key"\n', encoding="utf-8")
+    os.chmod(config, 0o600)
     seen = []
 
     def handler(request):
@@ -123,6 +124,20 @@ def test_adapter_can_read_api_key_from_local_openjarvis_config_only(tmp_path):
     adapter.submit_task(objective="read", capability_scope=["read_only"], idempotency_key="link-message-id-0005")
     assert seen[0].headers["authorization"] == "Bearer test-config-key"
     client.close()
+
+
+def test_adapter_refuses_group_or_world_readable_config_credentials(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text('[server.auth]\napi_key = "must-not-be-used"\n', encoding="utf-8")
+    os.chmod(config, 0o644)
+    adapter = OpenJarvisApiSupervisorAdapter(
+        key_file=tmp_path / "missing-key-file",
+        config_file=config,
+        http_client=httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"task_id": "a" * 32, "state": "COMPLETED"}))),
+    )
+    with pytest.raises(SupervisorUnavailable, match="configuration permissions"):
+        adapter.submit_task(objective="read only", capability_scope=["read_only"], idempotency_key="link-message-id-0007")
+    adapter.close()
 
 
 def test_loopback_server_503_is_retryable(tmp_path):

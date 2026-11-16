@@ -73,11 +73,12 @@ class OpenJarvisApiSupervisorAdapter:
             if self.key_file.is_symlink() or not self.key_file.is_file():
                 raise SupervisorUnavailable("OpenJarvis supervisor credential is invalid")
             try:
-                mode = stat.S_IMODE(self.key_file.stat().st_mode)
+                metadata = self.key_file.stat()
+                mode = stat.S_IMODE(metadata.st_mode)
                 key = self.key_file.read_text(encoding="utf-8").strip()
             except OSError as exc:
                 raise SupervisorUnavailable("OpenJarvis supervisor credential is unavailable") from exc
-            if mode & 0o077 or not key or "\n" in key or "\r" in key:
+            if metadata.st_uid != os.getuid() or mode & 0o077 or not key or "\n" in key or "\r" in key:
                 raise SupervisorUnavailable("OpenJarvis supervisor credential permissions are invalid")
             return key
         environment_key = os.environ.get("OPENJARVIS_API_KEY", "").strip()
@@ -85,8 +86,13 @@ class OpenJarvisApiSupervisorAdapter:
             return environment_key
         if self.config_file.is_file() and not self.config_file.is_symlink():
             try:
+                metadata = self.config_file.stat()
+                if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+                    raise SupervisorUnavailable("OpenJarvis credential configuration permissions are invalid")
                 config = tomllib.loads(self.config_file.read_text(encoding="utf-8"))
                 key = str(config.get("server", {}).get("auth", {}).get("api_key", "")).strip()
+            except SupervisorUnavailable:
+                raise
             except (OSError, tomllib.TOMLDecodeError, AttributeError) as exc:
                 raise SupervisorUnavailable("OpenJarvis supervisor credential configuration is unavailable") from exc
             if key and "\n" not in key and "\r" not in key:

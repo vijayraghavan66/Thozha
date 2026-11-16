@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import time
 
 import pytest
@@ -122,6 +124,36 @@ def test_response_outbox_is_tenant_scoped_expiring_and_replay_bound(tmp_path):
     with pytest.raises(ValueError, match="expired request"):
         outbox.append_responses(request, [appended], now_ms=request["expires_at_unix_ms"])
     outbox.close()
+
+
+def test_response_outbox_never_changes_shared_directory_permissions_or_follows_symlinks(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o755)
+    with pytest.raises(PermissionError, match="refusing to change its permissions"):
+        HostResponseOutbox(shared / "responses.db")
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o755
+
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    os.chmod(private, 0o700)
+    victim = tmp_path / "victim.db"
+    victim.write_text("do not modify", encoding="utf-8")
+    link = private / "responses.db"
+    link.symlink_to(victim)
+    with pytest.raises(ValueError, match="symbolic link"):
+        HostResponseOutbox(link)
+    assert victim.read_text(encoding="utf-8") == "do not modify"
+
+    linked_parent = tmp_path / "private-alias"
+    linked_parent.symlink_to(private, target_is_directory=True)
+    with pytest.raises(ValueError, match="symbolic links"):
+        HostResponseOutbox(linked_parent / "another.db")
+
+    database = HostResponseOutbox(private / "safe.db")
+    assert stat.S_IMODE(private.stat().st_mode) == 0o700
+    assert stat.S_IMODE((private / "safe.db").stat().st_mode) == 0o600
+    database.close()
 
 
 def test_operator_delivery_helpers_return_the_actual_envelope_id():
