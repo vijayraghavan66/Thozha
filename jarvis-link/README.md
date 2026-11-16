@@ -18,8 +18,14 @@ A self-hostable, end-to-end encrypted relay prototype connecting Jarvis hosts an
 - `docs/` — deployment, costs, security, and recovery notes.
 - `fixtures/` — public test keys and deterministic envelopes; no production private keys.
 
+## Remote host integration
+
+`host/scripts/serve_openjarvis.py` is the outbound-only host runner for a configured relay. It connects to the Worker over HTTPS/WSS, then forwards decrypted task and approval data only to the fixed OpenJarvis loopback API at `127.0.0.1:8000`. The supervisor API key is read locally from `~/.openjarvis/supervisor_api_key` or the local OpenJarvis config; it is never included in a relay request or envelope.
+
+The runner is not started automatically and the Cloudflare Worker is not deployed. See `docs/REMOTE-CONNECTIVITY.md` for the local wiring and the exact external configuration still required.
+
 Run all components locally first. The cloud deployment requires an explicit Cloudflare account and deployment step; this checkpoint does not configure one.
 
 ## Running the tests
 
-`scripts/run-all-tests.sh` runs the relay, host/integration (real local workerd), and companion suites. Set `KOTLINC` and `JAVA17_HOME` to use a standalone Kotlin compiler instead of Gradle. Nothing is deployed.
+`scripts/run-all-tests.sh` runs the relay, host/integration (real local workerd), and companion suites. In an isolated Jarvis Lab worktree, point `ANDROID_COMPANION` at the shared app checkout and `JARVIS_LINK_HOST_PYTHON` at an existing host test interpreter; `JAVA_HOME` selects the JDK. The script is local-only and never deploys.

@@ -30,6 +30,8 @@ object CompanionProtocolTest {
         endToEndEnvelopeRoundTrip(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
+        localTaskHistoryIsRestartSafe()
+        relayClientRequiresHttpsAndCanonicalTenantIds()
         sharedFixtureInterop(args.firstOrNull() ?: System.getProperty("jarvis.fixture", "../fixtures/envelope-v1.test.json"))
         println("Jarvis Link Companion protocol checks passed.")
     }
@@ -263,6 +265,44 @@ object CompanionProtocolTest {
         check(runCatching { review.validateForDecision("d".repeat(64), 1_000) }.isFailure)
         check(runCatching { review.validateForDecision("c".repeat(64), 2_000) }.isFailure)
         check("approval_id" in review.toDecisionJson("approve", "c".repeat(64), "idem-1", nowUnixMs = 1_000))
+    }
+
+    private fun localTaskHistoryIsRestartSafe() {
+        val directory = java.nio.file.Files.createTempDirectory("jarvis-local-task-history").toFile()
+        val state = FileLinkStateStore(File(directory, "state.json"))
+        val requestId = "local-usb-task-20261116-000000000001"
+        val first = LinkRuntime(
+            keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+            state = state,
+            storeDir = directory,
+            now = { 1_800_000_000_000L },
+        )
+        first.recordLocalTaskRequest(requestId, "What is Java?")
+        first.recordLocalTaskRequest(requestId, "What is Java?")
+        check(first.conversation().size == 1) { "re-recording one request created a duplicate conversation entry" }
+        first.recordLocalTaskResult(requestId, "a".repeat(32), "COMPLETED", "Java is a programming language.")
+
+        val recovered = LinkRuntime(
+            keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+            state = FileLinkStateStore(File(directory, "state.json")),
+            storeDir = directory,
+            now = { 1_800_000_000_001L },
+        )
+        val entry = recovered.conversation().single()
+        check(entry["message_id"] == requestId)
+        check(entry["task_id"] == "a".repeat(32))
+        check(entry["state"] == "COMPLETED")
+        check(entry["summary"] == "Java is a programming language.")
+        directory.deleteRecursively()
+    }
+
+    private fun relayClientRequiresHttpsAndCanonicalTenantIds() {
+        HttpJarvisLinkRelay("https://relay.example", "tenant_sim")
+        HttpJarvisLinkRelay("http://127.0.0.1:8787", "tenant_sim")
+        check(runCatching { HttpJarvisLinkRelay("http://relay.example", "tenant_sim") }.isFailure)
+        check(runCatching { HttpJarvisLinkRelay("https://relay.example", "short") }.isFailure)
+        check(runCatching { HttpJarvisLinkRelay("https://relay.example", "tenant.with.dots") }.isFailure)
+        check(runCatching { HttpJarvisLinkRelay("https://relay.example", "x".repeat(65)) }.isFailure)
     }
 
     private fun assertEquals(expected: Any?, actual: Any?) { if (expected != actual) error("Expected <$expected>, got <$actual>") }

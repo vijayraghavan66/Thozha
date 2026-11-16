@@ -39,6 +39,7 @@ from jarvis_link_host.crypto import DeviceCertificate, DeviceIdentity, device_id
 from jarvis_link_host.host import JarvisLinkHost  # noqa: E402
 from jarvis_link_host.runtime import HostRelayRuntime  # noqa: E402
 from jarvis_link_host.openjarvis_adapter import OpenJarvisSupervisorAdapter  # noqa: E402
+from jarvis_link_host.response_outbox import HostResponseOutbox  # noqa: E402
 from jarvis_link_host.simulated_operations import SIMULATED_OPERATION, SIMULATED_TARGET, resume_approved, simulated_arguments  # noqa: E402
 
 OPENJARVIS_SRC = Path(os.environ.get("OPENJARVIS_SRC", Path.home() / ".openjarvis" / "src" / "src"))
@@ -215,10 +216,10 @@ def _process_requests(state, client, identity, store, adapter) -> list[dict]:
     return created
 
 
-def _cycle(state, client, identity, store, adapter) -> dict:
+def _cycle(state, client, identity, store, adapter, response_outbox=None) -> dict:
     """One supervisor cycle: create queued requests, receive relay messages, resume approved tasks, publish results."""
     created = _process_requests(state, client, identity, store, adapter)
-    runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client)
+    runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client, response_outbox=response_outbox)
     counts = runtime.poll_once()
     report = []
     for record in _pending_records():
@@ -261,12 +262,13 @@ async def _serve(args, path: Path) -> None:
     state, client, identity = _relay(args, path)
     host_id = state["host_device_id"]
     store, adapter = _open_supervisor()
+    response_outbox = HostResponseOutbox(TEST_DIR / "response-outbox.db")
     ws_url = args.relay.replace("http", "ws", 1) + f"/v1/devices/{host_id}/stream"
     backoff = 2.0
     try:
         while True:
             try:
-                cycle = await asyncio.to_thread(_cycle, state, client, identity, store, adapter)
+                cycle = await asyncio.to_thread(_cycle, state, client, identity, store, adapter, response_outbox)
                 print(json.dumps({"event": "cycle", "at": time.strftime("%H:%M:%S"), **cycle}), flush=True)
             except Exception as failure:  # keep the loop alive; report only the exception class
                 print(json.dumps({"event": "cycle_error", "error": type(failure).__name__}), flush=True)
@@ -289,6 +291,7 @@ async def _serve(args, path: Path) -> None:
                 backoff = min(backoff * 2, 60.0)
     finally:
         store.close()
+        response_outbox.close()
 
 
 def cmd_revoke(args, path: Path) -> dict:

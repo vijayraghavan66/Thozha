@@ -74,8 +74,25 @@ class OpenJarvisSupervisorAdapter:
             status=row["status"],
         )
 
+    def list_pending_approvals(self, task_id: str) -> list[dict[str, Any]]:
+        rows = self.store.pending_approvals(100)
+        return [
+            {
+                "approval_id": row["id"],
+                "task_id": row["task_id"],
+                "operation": row["operation"],
+                "target": row["target"],
+                "canonical_arguments_digest": row["args_digest"],
+                "expires_at_unix_ms": _to_unix_ms(row["expires_at"]),
+                "redacted_summary": (str(row.get("reason") or "Exact operation requires approval.") + " Arguments: " + str(row.get("safe_args") or {}))[:500],
+            }
+            for row in rows
+            if row["task_id"] == task_id and row["status"] == "PENDING"
+        ]
+
     def decide_approval(self, *, task_id: str, approval_id: str, decision: str,
-                        expected_arguments_digest: str, idempotency_key: str) -> dict[str, Any]:
+                        expected_arguments_digest: str, idempotency_key: str,
+                        continuation_objective: str | None = None) -> dict[str, Any]:
         with self._lock:
             cached = self._db.execute("SELECT result_json FROM decision_keys WHERE idempotency_key=?", (idempotency_key,)).fetchone()
             if cached is not None:

@@ -26,7 +26,7 @@ class HttpJarvisLinkRelay(
         require(uri.scheme == "https" || (uri.scheme == "http" && loopback)) { "relay URL must be HTTPS (HTTP only for loopback)" }
         require(uri.userInfo == null && uri.query == null && uri.fragment == null) { "relay URL must not carry credentials or query" }
         require(uri.path.isNullOrEmpty()) { "relay URL must not include a path" }
-        require(tenantId.matches(Regex("^[A-Za-z0-9._-]{1,128}$"))) { "invalid tenant ID" }
+        require(tenantId.matches(Regex("^[A-Za-z0-9_-]{8,64}$"))) { "invalid tenant ID" }
         base = uri.toString().trimEnd('/')
     }
 
