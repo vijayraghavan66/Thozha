@@ -53,19 +53,22 @@ fun main() {
 
     // --- timeline ---------------------------------------------------------------------------------------------
     val sections = TimelinePresentation.sections(listOf(
-        mapOf("task_id" to "a", "text" to "Done one", "state" to "COMPLETED", "summary" to "ok", "updated_at_unix_ms" to 5L),
-        mapOf("task_id" to "b", "text" to "Running", "state" to "RUNNING", "updated_at_unix_ms" to 6L),
-        mapOf("task_id" to "c", "text" to "Approve me", "state" to "WAITING_APPROVAL", "updated_at_unix_ms" to 7L),
-        mapOf("task_id" to "d", "text" to "Cancelled", "state" to "CANCELLED", "updated_at_unix_ms" to 8L),
-        mapOf("task_id" to "e", "text" to "Failed", "state" to "FAILED", "updated_at_unix_ms" to 9L),
-        mapOf("task_id" to "a", "text" to "Duplicate", "state" to "COMPLETED", "updated_at_unix_ms" to 10L),
-        mapOf("text" to "No task id"),
+        mapOf("message_id" to "a", "text" to "Done one", "state" to "COMPLETED", "summary" to "ok", "updated_at_unix_ms" to 5L),
+        mapOf("message_id" to "b", "text" to "Running", "state" to "RUNNING", "updated_at_unix_ms" to 6L),
+        mapOf("message_id" to "c", "text" to "Approve me", "state" to "WAITING_APPROVAL", "updated_at_unix_ms" to 7L),
+        mapOf("message_id" to "d", "text" to "Cancelled", "state" to "CANCELLED", "updated_at_unix_ms" to 8L),
+        mapOf("message_id" to "e", "text" to "Failed", "state" to "FAILED", "updated_at_unix_ms" to 9L),
+        mapOf("message_id" to "a", "text" to "Duplicate", "state" to "COMPLETED", "updated_at_unix_ms" to 10L),
+        mapOf("text" to "No message id"),
+        mapOf("message_id" to "f", "text" to "Sent only", "state" to "SENT", "updated_at_unix_ms" to 11L),
     ), fmt)
     check(sections.map { it.title } == listOf("Needs you", "In progress", "Completed", "Failed", "Cancelled"), "sections appear in a fixed order and empties are omitted")
-    val rows = sections.flatMap { it.rows }.associateBy { it.taskId }
+    val rows = sections.flatMap { it.rows }.associateBy { it.requestId }
     check(rows.getValue("b").canCancel && rows.getValue("c").canCancel, "active and waiting tasks offer cancellation")
     check(!rows.getValue("a").canCancel && !rows.getValue("d").canCancel && !rows.getValue("e").canCancel, "finished tasks do not offer cancellation")
-    check(sections.flatMap { it.rows }.size == 5, "duplicate and task-less records are dropped")
+    check(rows.getValue("f").tone == TaskTone.RUNNING && !rows.getValue("f").canCancel, "sent-only requests are shown but not cancellable (matches the existing cancel rule)")
+    check(sections.flatMap { it.rows }.size == 6, "duplicate and id-less records are dropped")
+    check(rows.getValue("b").requestId == "b", "rows carry the request id the cancel path uses")
     check(TimelinePresentation.sections(emptyList(), fmt).isEmpty(), "no tasks yields the empty state")
 
     // --- approvals -----------------------------------------------------------------------------------------------
@@ -82,6 +85,7 @@ fun main() {
     val expired = ApprovalPresentation.card(approval("PENDING", -1), now) { "x" }!!
     check(expired.phase == ApprovalPhase.EXPIRED && !expired.canDecide, "an expired pending approval cannot be decided")
     check(!ApprovalPresentation.card(approval("PENDING", null), now) { "x" }!!.canDecide, "no stated expiry fails closed")
+    check(ApprovalPresentation.card(approval("PENDING", 0), now) { "x" }!!.phase == ApprovalPhase.EXPIRED, "an approval expires at its exact deadline")
     check(!ApprovalPresentation.card(approval("APPROVED", 60_000), now) { "x" }!!.canDecide, "an approved item is not decidable again")
     check(!ApprovalPresentation.card(approval("ODD", 60_000), now) { "x" }!!.canDecide, "unknown approval status is not decidable")
     check(ApprovalPresentation.card(mapOf("operation" to "x"), now) { "x" } == null, "an approval without an id is ignored")

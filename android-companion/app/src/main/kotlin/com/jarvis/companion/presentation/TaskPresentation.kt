@@ -2,6 +2,8 @@ package com.jarvis.companion.presentation
 
 /** One row of the Activity timeline. Read-only; cancelling is offered only when the runtime says it can be. */
 data class TimelineRow(
+    /** Identifier the existing cancel path uses (the conversation message id). */
+    val requestId: String,
     val taskId: String,
     val title: String,
     val tone: TaskTone,
@@ -14,15 +16,15 @@ data class TimelineRow(
 data class TimelineSection(val title: String, val rows: List<TimelineRow>)
 
 object TimelinePresentation {
-    private val activeStates = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "QUEUED", "SENT")
-    private val waitingStates = setOf("WAITING_APPROVAL", "PAUSED")
+    // Must match the states for which the existing task detail offers cancellation; do not widen it.
+    private val cancellableStates = setOf("CREATED", "RUNNING", "VERIFYING", "PLANNING", "WAITING_APPROVAL", "PAUSED")
 
     /**
      * Groups task records into sections in a fixed order: needs you, in progress, completed, failed and cancelled.
      * Sections with no rows are omitted; an empty list means the caller should show the empty state.
      */
     fun sections(tasks: List<Map<String, Any?>>, formatTime: (Long) -> String): List<TimelineSection> {
-        val rows = tasks.mapNotNull { row(it, formatTime) }.distinctBy { it.taskId }
+        val rows = tasks.mapNotNull { row(it, formatTime) }.distinctBy { it.requestId }
         val byTone = rows.groupBy { it.tone }
         return listOf(
             TimelineSection("Needs you", byTone[TaskTone.WAITING].orEmpty()),
@@ -35,14 +37,16 @@ object TimelinePresentation {
     }
 
     internal fun row(record: Map<String, Any?>, formatTime: (Long) -> String): TimelineRow? {
-        val taskId = (record["task_id"] as? String)?.takeIf { it.isNotBlank() } ?: return null
+        val requestId = (record["message_id"] as? String)?.takeIf { it.isNotBlank() } ?: return null
+        val taskId = (record["task_id"] as? String).orEmpty()
         val state = (record["state"] as? String)?.trim()?.uppercase()
         val tone = TaskStates.toneFor(state)
         val request = (record["text"] as? String).orEmpty().trim()
         val summary = (record["summary"] as? String).orEmpty().trim()
         val updated = (record["updated_at_unix_ms"] as? Number)?.toLong() ?: (record["created_at_unix_ms"] as? Number)?.toLong()
-        val canCancel = state != null && (state in activeStates || state in waitingStates) && tone != TaskTone.COMPLETED
+        val canCancel = state != null && state in cancellableStates
         return TimelineRow(
+            requestId = requestId,
             taskId = taskId,
             title = request.ifBlank { "Request" }.take(120),
             tone = tone,

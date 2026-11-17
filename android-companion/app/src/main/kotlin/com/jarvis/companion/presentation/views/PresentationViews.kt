@@ -81,7 +81,15 @@ fun Context.conversationBubble(item: ConversationItem): LinearLayout {
             )
             setPadding(dp(JarvisTokens.SPACE_M + 4), dp(JarvisTokens.SPACE_S + 2), dp(JarvisTokens.SPACE_M + 4), dp(JarvisTokens.SPACE_S + 2))
             addView(text(item.text, JarvisTokens.TEXT_BODY, R.color.label).apply {
+                // Long messages wrap inside a bounded column instead of running to the screen edge.
+                maxWidth = (resources.displayMetrics.widthPixels * 0.78f).toInt()
                 if (item.isProgress) setTextColor(color(R.color.label_secondary))
+                // Replies keep the same formatting as before (lists, code, emphasis); user text stays literal.
+                if (!isUser) {
+                    setText(com.jarvis.companion.AssistantTextFormatter.render(item.text), TextView.BufferType.SPANNABLE)
+                    setTextIsSelectable(true)
+                }
+                setLineSpacing(dp(3).toFloat(), 1f)
             })
             item.statusLabel?.let { addView(text(it, JarvisTokens.TEXT_CAPTION, R.color.label_secondary).apply { setPadding(0, dp(4), 0, 0) }) }
         }, LinearLayout.LayoutParams(-2, -2).apply { gravity = if (isUser) Gravity.END else Gravity.START })
@@ -168,7 +176,7 @@ fun Context.timelineRow(row: TimelineRow, onCancel: (String) -> Unit): LinearLay
                 textSize = JarvisTokens.TEXT_CAPTION
                 setTextColor(color(R.color.alert))
                 setPadding(dp(JarvisTokens.SPACE_S), dp(JarvisTokens.SPACE_XS), dp(JarvisTokens.SPACE_S), dp(JarvisTokens.SPACE_XS))
-                setOnClickListener { onCancel(row.taskId) }
+                setOnClickListener { onCancel(row.requestId) }
             })
         }
     })

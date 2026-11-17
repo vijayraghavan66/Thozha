@@ -148,7 +148,7 @@ class TelegramActivity : Activity() {
             TelegramConnection.LOGIN_REQUIRED -> Triple("Login required", "Sign in with your Telegram account.", R.color.warn)
             TelegramConnection.CONNECTING -> Triple("Connecting", "Starting the Telegram client.", R.color.label_secondary)
             TelegramConnection.CONNECTED -> Triple("Connected", "Messages can be exchanged with the Mac bot.", R.color.ok)
-            TelegramConnection.RECONNECTING -> Triple("Reconnecting", "The network is unavailable. Jarvis will retry.", R.color.warn)
+            TelegramConnection.RECONNECTING -> Triple("Reconnecting", "Telegram is reconnecting. Jarvis will retry.", R.color.warn)
             TelegramConnection.ERROR -> Triple("Error", snap?.error ?: "Telegram reported a problem.", R.color.alert)
         }
         return LinearLayout(this).apply {

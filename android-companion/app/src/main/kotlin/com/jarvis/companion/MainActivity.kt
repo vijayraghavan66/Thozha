@@ -32,6 +32,20 @@ import com.jarvis.companion.link.LinkSyncJob
 import com.jarvis.companion.link.LinkMode
 import com.jarvis.companion.link.LinkService
 import com.jarvis.companion.link.LinkSettings
+import com.jarvis.companion.presentation.AiEvidence
+import com.jarvis.companion.presentation.ApprovalPresentation
+import com.jarvis.companion.presentation.ConnectionPresentation
+import com.jarvis.companion.presentation.ConversationPresentation
+import com.jarvis.companion.presentation.TaskTone
+import com.jarvis.companion.presentation.TimelinePresentation
+import com.jarvis.companion.presentation.TransportState
+import com.jarvis.companion.presentation.VoicePhase
+import com.jarvis.companion.presentation.VoicePresentation
+import com.jarvis.companion.presentation.views.WaveformView
+import com.jarvis.companion.presentation.views.approvalCard
+import com.jarvis.companion.presentation.views.conversationBubble
+import com.jarvis.companion.presentation.views.emptyState
+import com.jarvis.companion.presentation.views.timelineRow
 import com.jarvis.link.SafeCapability
 import com.jarvis.link.TaskSubmission
 import com.jarvis.companion.notifications.PushRegistration
@@ -58,7 +72,12 @@ class MainActivity : Activity() {
         data class Approval(val id: String) : Detail
         data class Task(val id: String) : Detail
         data object Privacy : Detail
+        data object Live : Detail
     }
+
+    // Jarvis Live is a visual foundation only. There is no voice backend yet, so pressing the control reports that.
+    private var voicePhase = VoicePhase.IDLE
+    private var voiceMessage: String? = null
 
     private val worker = Executors.newSingleThreadExecutor()
     private val taskWorker = Executors.newSingleThreadExecutor()
@@ -256,13 +275,14 @@ class MainActivity : Activity() {
             is Detail.Approval -> approvalDetail(open.id)
             is Detail.Task -> taskDetail(open.id)
             Detail.Privacy -> privacyDetail()
+            Detail.Live -> liveScreen()
             null -> when (destination) {
                 Destination.HOME -> homeScreen()
                 Destination.ACTIVITY -> activityScreen()
                 Destination.SETTINGS -> settingsScreen()
             }
         }
-        val next = if (detail is Detail.Approval || detail is Detail.Task) {
+        val next = if (detail is Detail.Approval || detail is Detail.Task || detail is Detail.Live) {
             ScrollView(this).apply {
                 isFillViewport = false
                 addView(rendered, ViewGroup.LayoutParams(-1, -2))
@@ -314,7 +334,9 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER
             })
         } else {
-            conversation.takeLast(60).forEach { list.addView(messageView(it)) }
+            // Same records as before; the presentation layer only decides how each reply is shown.
+            ConversationPresentation.items(conversation.takeLast(120)) { timeLabel(it) }
+                .forEach { list.addView(conversationBubble(it)) }
         }
         scroll.addView(list, ViewGroup.LayoutParams(-1, -2))
         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
@@ -753,18 +775,21 @@ class MainActivity : Activity() {
         if (supervisorApprovalError.isNotBlank()) {
             page.addView(emptyNote(supervisorApprovalError))
         }
-        val tasks = runCatching { LinkService.runtime(this).conversation() }.getOrDefault(emptyList()).reversed()
-        page.addView(section("Tasks"))
-        if (tasks.isEmpty()) {
-            page.addView(emptyNote("Requests you send from Home appear here with their progress."))
+        val tasks = runCatching { LinkService.runtime(this).conversation() }.getOrDefault(emptyList()).reversed().take(50)
+        val sections = TimelinePresentation.sections(tasks) { timeLabel(it) }
+        if (sections.isEmpty()) {
+            page.addView(emptyState(R.string.jarvis_no_tasks))
         } else {
-            tasks.take(50).forEach { entry ->
-                val state = humanState(entry["state"] as? String ?: "SENT")
-                page.addView(row(
-                    title = entry["text"] as? String ?: "",
-                    subtitle = "${state.first} · ${time((entry["created_at_unix_ms"] as? Long) ?: 0L)}",
-                    accentColor = state.second,
-                ) { detail = Detail.Task(entry["message_id"] as? String ?: ""); renderAll(animate = true) })
+            sections.forEach { group ->
+                page.addView(section(group.title))
+                group.rows.forEach { entry ->
+                    page.addView(timelineRow(entry) { requestId -> confirmCancelTask(requestId) }.apply {
+                        setOnClickListener {
+                            detail = Detail.Task(entry.requestId)
+                            renderAll(animate = true)
+                        }
+                    })
+                }
             }
         }
         scroll.addView(page, ViewGroup.LayoutParams(-1, -2))
@@ -776,15 +801,24 @@ class MainActivity : Activity() {
             .firstOrNull { it.approvalId == id }
         val page = detailPage("Approval")
         if (review != null) {
-            page.addView(text(review.operation.replace('_', ' '), 30, color(R.color.label), bold = true))
-            page.addView(detailField("Target", review.target))
-            page.addView(detailField("Expires", time(review.expiresAtUnixMs)))
+            // The card shows the exact operation, target and fingerprint, and offers decisions only while the request
+            // is pending and unexpired. The decisions still go through decide(), so the Mac re-validates everything.
+            val record = mapOf<String, Any?>(
+                "approval_id" to review.approvalId,
+                "operation" to review.operation,
+                "target" to review.target,
+                "canonical_arguments_digest" to review.canonicalArgumentsDigest,
+                "status" to "PENDING",
+                "expires_at_unix_ms" to review.expiresAtUnixMs,
+            )
+            ApprovalPresentation.card(record, System.currentTimeMillis()) { remaining -> remainingLabel(remaining) }?.let { card ->
+                page.addView(
+                    approvalCard(card, onApprove = { decide(review, "approve") }, onReject = { decide(review, "reject") }),
+                    linear(-1, -2).also { it.setMargins(0, dp(8), 0, dp(16)) },
+                )
+            }
             page.addView(detailField("Summary", review.redactedSummary))
-            page.addView(detailField("Operation digest", review.canonicalArgumentsDigest))
-            page.addView(View(this), LinearLayout.LayoutParams(-1, dp(24)))
             if (decisionNote.isNotBlank()) page.addView(text(decisionNote, 15, color(R.color.label_secondary)).apply { setPadding(0, 0, 0, dp(16)) })
-            page.addView(actionButton("Approve once", R.color.accent, R.color.on_accent, filled = true) { decide(review, "approve") })
-            page.addView(actionButton("Reject", R.color.alert, R.color.alert, filled = false) { decide(review, "reject") })
             return page
         }
         val approval = supervisorApprovalDetails[id] ?: supervisorApprovals.firstOrNull { it.id == id }
@@ -978,15 +1012,40 @@ class MainActivity : Activity() {
 
     // ---- Connection --------------------------------------------------------------------------------------
 
-    private fun statusLine(): Pair<String, Int>? = connectionWord().let { word ->
-        word to when {
-            word.startsWith("Connected") -> color(R.color.ok)
-            word.startsWith("Mac + AI replied") -> color(R.color.ok)
-            word.startsWith("Telegram connected") -> color(R.color.warn)
-            word.startsWith("Mac unavailable") -> color(R.color.alert)
-            word.startsWith("Connecting") -> color(R.color.warn)
-            else -> color(R.color.label_secondary)
+    private fun statusLine(): Pair<String, Int>? = connectionStatus().let { status -> status.headline to status.color }
+
+    private data class HomeStatus(val headline: String, val color: Int)
+
+    /**
+     * Truthful status for Home. Telegram transport, the Mac's last observed reply and the AI (verified only by a
+     * real answer) are separate facts. Telegram being connected never produces a "Mac unavailable" label.
+     */
+    private fun connectionStatus(): HomeStatus {
+        val snapshot = com.jarvis.companion.telegram.TelegramSession.controller?.snapshot()
+        val transport = snapshot?.connection?.name?.let { runCatching { TransportState.valueOf(it) }.getOrNull() }
+        if (transport != null && transport != TransportState.NOT_CONFIGURED) {
+            val entries = runCatching { LinkService.runtime(this).conversation() }.getOrDefault(emptyList())
+            val now = System.currentTimeMillis()
+            val answered = entries.lastOrNull { (it["state"] as? String) == "COMPLETED" && !(it["summary"] as? String).isNullOrBlank() }
+            val ai = when {
+                answered == null -> AiEvidence.NOT_VERIFIED
+                now - ((answered["updated_at_unix_ms"] as? Number)?.toLong() ?: 0L) < 30 * 60_000L -> AiEvidence.ANSWERED
+                else -> AiEvidence.NO_RECENT_ANSWER
+            }
+            // Any record the Mac has moved on (not just our own send) counts as an observed Mac update.
+            val lastMacUpdate = entries.filter { (it["state"] as? String) !in setOf("QUEUED", "SENT") }
+                .mapNotNull { (it["updated_at_unix_ms"] as? Number)?.toLong() }
+                .maxOrNull()
+            val summary = ConnectionPresentation.summary(transport, lastMacUpdate, ai, now) { ago(it) }
+            val tone = when (summary.rows.first().tone) {
+                TaskTone.COMPLETED -> R.color.ok
+                TaskTone.FAILED -> R.color.alert
+                TaskTone.WAITING, TaskTone.RUNNING -> R.color.warn
+                else -> R.color.label_secondary
+            }
+            return HomeStatus(summary.headline, color(tone))
         }
+        return HomeStatus(connectionWord(), color(R.color.label_secondary))
     }
 
     private fun homeHeader(): View = LinearLayout(this).apply {
@@ -996,6 +1055,16 @@ class MainActivity : Activity() {
         homePresence = presence
         addView(presence, LinearLayout.LayoutParams(dp(44), dp(44)).also { it.setMargins(0, 0, dp(10), 0) })
         addView(header("Jarvis", statusLine()), LinearLayout.LayoutParams(0, -2, 1f))
+        addView(text("Live", 14, R.color.accent, bold = true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            background = outline(color(R.color.accent), dp(18))
+            contentDescription = "Open Jarvis Live"
+            pressable {
+                detail = Detail.Live
+                renderAll(animate = true)
+            }
+        }, LinearLayout.LayoutParams(-2, -2))
     }
 
     private fun presenceState(): JarvisPresenceView.State {
@@ -1018,25 +1087,12 @@ class MainActivity : Activity() {
         }
     }
 
+    /** USB/relay path only (Telegram not set up). Wording reports what was observed, not an assumed outage. */
     private fun connectionWord(): String {
-        if (com.jarvis.companion.telegram.TelegramSession.activeTunnel() != null) {
-            val latest = runCatching {
-                LinkService.runtime(this).conversation().lastOrNull {
-                    it["transport"] in setOf("link", "telegram") && it["state"] == "COMPLETED" && !(it["summary"] as? String).isNullOrBlank()
-                }
-            }.getOrNull()
-            val updated = latest?.get("updated_at_unix_ms") as? Long ?: 0L
-            if (latest != null && System.currentTimeMillis() - updated < 30 * 60_000L) {
-                return "Mac + AI replied recently"
-            }
-            val status = runCatching { LinkService.runtime(this).status() }.getOrNull()
-            return if (status?.certificatesVerified == true) "Telegram connected · Mac not yet confirmed"
-            else "Telegram connected · Link setup needed"
-        }
         val secure = SecureStore(this)
         if (secure.token().isNullOrBlank()) return "Pair with your Mac"
         if (pinningLocalGatewayIdentity || refreshingSupervisorApprovals || refreshingLocalTasks) return "Connecting…"
-        if (supervisorApprovalError.isNotBlank()) return "Mac unavailable"
+        if (supervisorApprovalError.isNotBlank()) return "Mac not reachable over USB"
         val (at, transport) = secure.lastMacConnection()
         return when {
             at == 0L -> "Connecting…"
@@ -1256,11 +1312,52 @@ class MainActivity : Activity() {
     private fun friendly(failure: Throwable?): String = when (failure) {
         is ApiException -> localTaskError(failure)
         is RelayHttpException -> "Jarvis could not reach your Mac (${failure.code.lowercase().replace('_', ' ')})."
-        is java.io.IOException -> "Your Mac is unavailable. The message is saved and will be sent when it returns."
+        is java.io.IOException -> "Not delivered yet. The message is saved on this phone and will be retried."
         else -> "Something went wrong. Try again."
     }
 
     private fun time(ms: Long): String = if (ms <= 0L) "" else DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(ms))
+
+    private fun timeLabel(ms: Long): String = if (ms <= 0L) "" else DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(ms))
+
+    /** Relative age for status lines, e.g. "just now", "4 min ago", "2 h ago". */
+    private fun ago(elapsedMs: Long): String {
+        val minutes = elapsedMs / 60_000L
+        return when {
+            minutes < 1L -> "just now"
+            minutes < 60L -> "$minutes min ago"
+            minutes < 48 * 60L -> "${minutes / 60L} h ago"
+            else -> "${minutes / (24 * 60L)} d ago"
+        }
+    }
+
+    private fun remainingLabel(remainingMs: Long): String {
+        val minutes = remainingMs / 60_000L
+        return when {
+            minutes >= 1L -> "$minutes min"
+            else -> "${maxOf(1L, remainingMs / 1000L)} s"
+        }
+    }
+
+    /** Jarvis Live visual screen. No microphone is requested and no audio is sent: the voice backend is not connected. */
+    private fun liveScreen(): View {
+        val page = detailPage("Jarvis Live")
+        val model = VoicePresentation.view(voicePhase, voiceMessage)
+        page.addView(text(model.title, 30, color(R.color.label), bold = true))
+        page.addView(text(model.hint, 16, color(R.color.label_secondary)).apply { setPadding(0, dp(6), 0, dp(20)) })
+        // The bars stay at rest because there is no microphone input yet; the view never fabricates a level.
+        page.addView(WaveformView(this).apply { setLevels(FloatArray(28)) }, LinearLayout.LayoutParams(-1, dp(120)))
+        page.addView(actionButton("Hold to talk", R.color.accent, R.color.on_accent, filled = true) {
+            voicePhase = VoicePhase.ERROR
+            voiceMessage = "Voice input is not connected yet. Nothing was recorded or sent."
+            haptic(HapticFeedbackConstants.REJECT)
+            renderAll(animate = false)
+        }.apply { isEnabled = model.pushToTalkEnabled })
+        page.addView(text("Voice replies and microphone access arrive with the voice backend. Until then, use the Home composer.", 14, color(R.color.label_secondary)).apply {
+            setPadding(0, dp(20), 0, 0)
+        })
+        return page
+    }
 
     private fun color(id: Int): Int = getColor(id)
 
