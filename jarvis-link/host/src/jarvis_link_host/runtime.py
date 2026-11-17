@@ -344,7 +344,10 @@ class HostRelayRuntime:
                 except Exception as ack_error:  # transient ACK failures leave the message queued
                     if not self._transient(ack_error):
                         continue
-            except SupervisorRefused:
+            except SupervisorRefused as refused:
+                # Diagnostic only: the reason class and a short detail, never objectives or payloads.
+                import sys as _sys
+                print(json.dumps({"event": "supervisor_refused", "detail": str(refused)[:160]}), file=_sys.stderr, flush=True)
                 try:
                     refusal = self._refusal_envelope(envelope, cert, message_id).to_dict()
                     refusal_digest = hashlib.sha256(json.dumps(refusal, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

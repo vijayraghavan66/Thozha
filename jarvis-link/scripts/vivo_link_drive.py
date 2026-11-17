@@ -56,7 +56,7 @@ def main() -> int:
     parser.add_argument("--serial", required=True)
     parser.add_argument("--relay", default="http://127.0.0.1:8787")
     parser.add_argument("--objective", default="Harmless status check")
-    parser.add_argument("--scope", default="assistant", choices=["read_only", "assistant"],
+    parser.add_argument("--scope", default="assistant", choices=["read_only", "assistant", "development"],
                         help="submit: capability scope (assistant is required for Mac control)")
     parser.add_argument("--ttl-ms")
     parser.add_argument("--approval-id")

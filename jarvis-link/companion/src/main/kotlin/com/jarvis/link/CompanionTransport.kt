@@ -57,7 +57,9 @@ class MemoryMessageInbox : MessageInbox {
 }
 
 enum class SafeCapability(val wireName: String) {
-    READ_ONLY("read_only"), WEB_RESEARCH("web_research"), DESKTOP_OBSERVATION("desktop_observation"), ASSISTANT("assistant")
+    READ_ONLY("read_only"), WEB_RESEARCH("web_research"), DESKTOP_OBSERVATION("desktop_observation"), ASSISTANT("assistant"),
+    /** Bounded project work. Honoured only for companions the Mac operator has allowlisted. */
+    DEVELOPMENT("development")
 }
 
 data class TaskSubmission(

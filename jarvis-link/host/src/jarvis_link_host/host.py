@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import time
+from pathlib import Path
 from typing import Any, Mapping
 
 from .crypto import (
@@ -21,7 +22,20 @@ from .crypto import (
 from .replay import ReplayCache
 from .supervisor import SupervisorPort
 
-_CAPABILITIES = {"read_only", "web_research", "desktop_observation", "assistant"}
+_CAPABILITIES = {"read_only", "web_research", "desktop_observation", "assistant", "development"}
+# The development scope is never granted by a message. Only companion devices listed here (written by the Mac
+# operator, fail-closed when absent) may submit it.
+DEVELOPMENT_ALLOWLIST_PATH = Path.home() / ".jarvis-link-test" / "development-companions.json"
+
+
+def development_companions(path: Path = DEVELOPMENT_ALLOWLIST_PATH) -> frozenset[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return frozenset()
+    if not isinstance(data, list):
+        return frozenset()
+    return frozenset(item for item in data if isinstance(item, str) and re.fullmatch(r"[0-9a-f]{32}", item))
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _FORBIDDEN_KEYS = {"command", "cmd", "shell", "shell_command", "script", "executable", "exec"}
 
@@ -166,6 +180,8 @@ class JarvisLinkHost:
     def _dispatch(self, envelope: LinkEnvelope, payload: dict[str, Any], *, now_ms: int) -> dict[str, Any]:
         if envelope.kind == "task.submit":
             objective, capabilities = _task_submit_payload(payload)
+            if "development" in capabilities and (capabilities != ["development"] or envelope.from_device_id not in development_companions()):
+                raise TaskEnvelopeError("development scope is not enabled for this companion")
             result = self.supervisor.submit_task(
                 objective=objective,
                 capability_scope=capabilities,

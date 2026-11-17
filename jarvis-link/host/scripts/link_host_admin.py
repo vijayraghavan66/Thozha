@@ -105,7 +105,7 @@ def _record_task_watch(*, task_id: str, idempotency_key: str, companion_id: str)
 
 
 def _publish_task_updates(state, client, identity, adapter, runtime) -> int:
-    """Send each watched task's terminal state (from the supervisor) to the companion that submitted it."""
+    """Announce new pending approvals of watched tasks, and publish each terminal state, to the submitting companion."""
     if not TASK_WATCH_PATH.is_file() or not hasattr(adapter, "task_status"):
         return 0
     entries = json.loads(TASK_WATCH_PATH.read_text())
@@ -115,6 +115,18 @@ def _publish_task_updates(state, client, identity, adapter, runtime) -> int:
             continue
         current = adapter.task_status(entry["idempotency_key"])
         if current["state"] not in TERMINAL_TASK_STATES:
+            # Active task: announce each pending approval exactly once, with its exact operation and expiry.
+            announced = set(entry.get("announced", []))
+            for approval in adapter.list_pending_approvals(entry["task_id"]):
+                if approval["approval_id"] in announced:
+                    continue
+                runtime.send_approval_request(
+                    companion_certificate=_companion_certificate(client, entry["companion_id"]),
+                    companion_id=entry["companion_id"], request=approval,
+                )
+                announced.add(approval["approval_id"])
+                published += 1
+            entry["announced"] = sorted(announced)
             continue
         runtime.send_task_update(
             companion_certificate=_companion_certificate(client, entry["companion_id"]),
