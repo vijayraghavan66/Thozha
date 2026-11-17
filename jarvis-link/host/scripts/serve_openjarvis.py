@@ -75,7 +75,11 @@ async def _serve(args: argparse.Namespace) -> None:
         device_id=state["host_device_id"],
         identity=identity,
     )
-    supervisor = OpenJarvisApiSupervisorAdapter(key_file=args.supervisor_key_file)
+    # Digests of submitted idempotency keys, so a replayed submit can be recognised and its task returned.
+    supervisor = OpenJarvisApiSupervisorAdapter(
+        key_file=args.supervisor_key_file,
+        submission_ledger=Path.home() / ".jarvis-link-test" / "submissions.json",
+    )
     outbox = HostResponseOutbox(args.response_db)
     host = JarvisLinkHost(
         tenant_id=state["tenant_id"],

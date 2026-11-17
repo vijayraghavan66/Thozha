@@ -26,7 +26,7 @@ from .supervisor import ApprovalRecord
 _ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
-_ALLOWED_SCOPES = {"read_only", "assistant"}
+_ALLOWED_SCOPES = {"read_only", "assistant", "development"}
 
 
 class SupervisorUnavailable(RuntimeError):
@@ -40,6 +40,56 @@ def _expiry_ms(value: str) -> int:
     return int(parsed.timestamp() * 1000)
 
 
+def _submission_digest(objective: str, capability_scope: list[str]) -> str:
+    """Identifies one exact submission without storing the objective text."""
+    canonical = json.dumps({"objective": objective, "capability_scope": capability_scope},
+                           sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class _SubmissionLedger:
+    """Maps each idempotency key to the digest it was first submitted with and the task it created.
+
+    A replayed key is accepted only when its digest matches, so a key reused for a different request is refused.
+    Holds digests and task IDs only. With no path it is kept in memory for the life of the adapter.
+    """
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+        self._entries: dict[str, dict[str, Any]] = {}
+        if path is not None and path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise SupervisorUnavailable("submission ledger is unreadable") from exc
+            if not isinstance(loaded, dict):
+                raise SupervisorUnavailable("submission ledger is invalid")
+            self._entries = loaded
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        return self._entries.get(key)
+
+    def put(self, key: str, entry: dict[str, Any]) -> None:
+        self._entries[key] = entry
+        self._save()
+
+    def discard(self, key: str) -> None:
+        if self._entries.pop(key, None) is not None:
+            self._save()
+
+    def _save(self) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(self._entries, indent=2, sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp.replace(self.path)
+
+
 class OpenJarvisApiSupervisorAdapter:
     """SupervisorPort client restricted to an authenticated loopback API."""
 
@@ -50,6 +100,7 @@ class OpenJarvisApiSupervisorAdapter:
         config_file: str | Path | None = None,
         base_url: str = "http://127.0.0.1:8000",
         http_client: httpx.Client | None = None,
+        submission_ledger: str | Path | None = None,
     ) -> None:
         parsed = urlsplit(base_url)
         try:
@@ -67,6 +118,7 @@ class OpenJarvisApiSupervisorAdapter:
             trust_env=False,
         )
         self._owned_client = http_client is None
+        self._ledger = _SubmissionLedger(Path(submission_ledger).expanduser() if submission_ledger else None)
 
     def _api_key(self) -> str:
         if self.key_file.exists():
@@ -99,7 +151,8 @@ class OpenJarvisApiSupervisorAdapter:
                 return key
         raise SupervisorUnavailable("OpenJarvis supervisor credential is unavailable")
 
-    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+    def _request(self, method: str, path: str, body: dict[str, Any] | None = None,
+                 *, accept_statuses: frozenset[int] = frozenset()) -> tuple[int, dict[str, Any]]:
         if not path.startswith("/") or "\r" in path or "\n" in path:
             raise ValueError("invalid supervisor API path")
         headers = {"Authorization": f"Bearer {self._api_key()}", "Accept": "application/json"}
@@ -117,6 +170,8 @@ class OpenJarvisApiSupervisorAdapter:
             raise SupervisorRefused("OpenJarvis supervisor returned an invalid response")
         if response.status_code >= 500 or response.status_code in {408, 425, 429}:
             raise SupervisorUnavailable(f"OpenJarvis supervisor returned HTTP {response.status_code}")
+        if response.status_code in accept_statuses:
+            return response.status_code, data
         if response.status_code >= 400:
             # Never relay upstream detail, which could contain a private objective.
             raise SupervisorRefused(f"OpenJarvis supervisor refused the request (HTTP {response.status_code})")
@@ -129,15 +184,34 @@ class OpenJarvisApiSupervisorAdapter:
             raise SupervisorRefused("task capability scope is unsupported")
         if not _IDEMPOTENCY_RE.fullmatch(idempotency_key):
             raise SupervisorRefused("task idempotency key is invalid")
+        digest = _submission_digest(objective.strip(), capability_scope)
+        known = self._ledger.get(idempotency_key)
+        if known is not None and known.get("digest") != digest:
+            raise SupervisorRefused("task idempotency key was already used for a different request")
+        # Record the digest before posting, so a retry after a lost response can prove it is the same request.
+        self._ledger.put(idempotency_key, {"digest": digest, "task_id": known.get("task_id") if known else None})
         status, data = self._request("POST", "/v1/jarvis/link/tasks", {
             "objective": objective.strip(),
             "capability_scope": capability_scope,
             "idempotency_key": idempotency_key,
-        })
+        }, accept_statuses=frozenset({409}))
+        if status == 409:
+            # The supervisor already holds this key. Accept it only when this ledger recorded the same digest before
+            # posting, so the existing task is the one this request created. Otherwise the key is not ours: drop the
+            # record made above and refuse.
+            if known is None:
+                self._ledger.discard(idempotency_key)
+                raise SupervisorRefused("task idempotency key replay could not be verified")
+            current = self.task_status(idempotency_key)
+            if known.get("task_id") and current["task_id"] != known["task_id"]:
+                raise SupervisorRefused("task idempotency key replay does not match the recorded task")
+            self._ledger.put(idempotency_key, {"digest": digest, "task_id": current["task_id"]})
+            return {**current, "simulated": False, "replayed": True}
         task_id = data.get("task_id")
         state = data.get("state")
         if not isinstance(task_id, str) or not _ID_RE.fullmatch(task_id) or not isinstance(state, str):
             raise SupervisorRefused("OpenJarvis supervisor returned an invalid task record")
+        self._ledger.put(idempotency_key, {"digest": digest, "task_id": task_id})
         if status == 202 and state.upper() in {"CREATED", "PLANNING", "RUNNING", "VERIFYING"}:
             deadline = time.monotonic() + 240.0
             delay = 1.0
