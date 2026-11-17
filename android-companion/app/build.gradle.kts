@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.gms.google-services") apply false
 }
 
@@ -41,6 +42,7 @@ android {
 
     buildFeatures {
         buildConfig = true
+        compose = true
     }
 }
 
@@ -52,6 +54,14 @@ dependencies {
         implementation("com.google.firebase:firebase-messaging")
     }
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // Native Compose UI (Jarvis 3.0). BOM pins the Compose library versions together.
+    implementation(platform("androidx.compose:compose-bom:2026.06.01"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.animation:animation")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.activity:activity-compose:1.13.0")
 }
 
 if (!hasFirebaseConfig) {
