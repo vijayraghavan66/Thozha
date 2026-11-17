@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="jarvis_waveform_description">Voice level</string>
+    <string name="jarvis_approve">Approve</string>
+    <string name="jarvis_reject">Reject</string>
+    <string name="jarvis_cancel_task">Cancel task</string>
+    <string name="jarvis_no_pending_approvals">Nothing needs your approval.</string>
+    <string name="jarvis_no_tasks">No tasks yet. Requests you send from Home appear here.</string>
+</resources>
