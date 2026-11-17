@@ -210,7 +210,10 @@ class AdvancedActivity : Activity() {
         root.setOnApplyWindowInsetsListener { view, insets ->
             if (Build.VERSION.SDK_INT >= 30) {
                 val systemBars = insets.getInsets(WindowInsets.Type.systemBars())
-                view.setPadding(0, systemBars.top, 0, systemBars.bottom)
+                // Edge-to-edge: when the keyboard is open, its inset replaces the navigation-bar inset so fields stay visible.
+                val keyboard = insets.getInsets(WindowInsets.Type.ime())
+                val keyboardOpen = insets.isVisible(WindowInsets.Type.ime())
+                view.setPadding(0, systemBars.top, 0, if (keyboardOpen) keyboard.bottom else systemBars.bottom)
             } else {
                 @Suppress("DEPRECATION")
                 view.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)

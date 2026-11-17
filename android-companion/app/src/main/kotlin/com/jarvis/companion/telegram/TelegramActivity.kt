@@ -56,6 +56,17 @@ class TelegramActivity : Activity() {
             setBackgroundColor(color(R.color.bg))
             addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         }
+        // Edge-to-edge: respect the status bar, and let the keyboard inset replace the navigation-bar inset while open,
+        // so the focused credential or code field is never hidden behind the keyboard.
+        root.setOnApplyWindowInsetsListener { view, insets ->
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+                val keyboard = insets.getInsets(android.view.WindowInsets.Type.ime())
+                val keyboardOpen = insets.isVisible(android.view.WindowInsets.Type.ime())
+                view.setPadding(0, bars.top, 0, if (keyboardOpen) keyboard.bottom else bars.bottom)
+            }
+            insets
+        }
         setContentView(root)
         if (credentials != null) ensureRunning()
         render()

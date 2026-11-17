@@ -185,16 +185,38 @@ class MainActivity : Activity() {
         content = FrameLayout(this)
         root.addView(content, FrameLayout.LayoutParams(-1, -1))
         root.addView(buildNav(), FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
-        root.setOnApplyWindowInsetsListener { view, insets ->
+        // Edge-to-edge is the default at this target SDK, so adjustResize does not move the window for the keyboard.
+        // The app must read the IME inset itself: pad the content above the keyboard, hide the navigation while the
+        // keyboard is open, and keep the composer and the newest message on screen.
+        root.setOnApplyWindowInsetsListener { _, insets ->
             val bars = if (Build.VERSION.SDK_INT >= 30) insets.getInsets(WindowInsets.Type.systemBars()) else null
-            content.setPadding(0, bars?.top ?: insets.systemWindowInsetTop, 0, 0)
-            (navContainer.layoutParams as FrameLayout.LayoutParams).bottomMargin = (bars?.bottom ?: insets.systemWindowInsetBottom) + dp(12)
+            val barBottom = bars?.bottom ?: insets.systemWindowInsetBottom
+            val (imeBottom, imeVisible) = imeState(insets)
+            val wasVisible = keyboardVisible
+            keyboardVisible = imeVisible
+            content.setPadding(0, bars?.top ?: insets.systemWindowInsetTop, 0, if (imeVisible) imeBottom else 0)
+            navContainer.visibility = if (imeVisible) View.GONE else View.VISIBLE
+            (navContainer.layoutParams as FrameLayout.LayoutParams).bottomMargin = barBottom + dp(12)
+            content.findViewWithTag<View>(COMPOSER_TAG)?.let { composer ->
+                (composer.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = if (imeVisible) dp(12) else dp(112)
+                composer.requestLayout()
+            }
+            if (imeVisible && !wasVisible) {
+                content.findViewWithTag<ScrollView>(CONVERSATION_TAG)?.let { scroll -> scroll.post { scroll.fullScroll(View.FOCUS_DOWN) } }
+            }
             insets
         }
         setContentView(root)
     }
 
     private lateinit var navContainer: FrameLayout
+    private var keyboardVisible = false
+
+    /** Keyboard height and visibility from the IME inset. Older platforms have no IME inset, so report hidden. */
+    private fun imeState(insets: WindowInsets): Pair<Int, Boolean> =
+        if (Build.VERSION.SDK_INT >= 30) {
+            insets.getInsets(WindowInsets.Type.ime()).bottom to insets.isVisible(WindowInsets.Type.ime())
+        } else 0 to false
 
     private fun buildNav(): View {
         navContainer = FrameLayout(this).apply {
@@ -202,9 +224,9 @@ class MainActivity : Activity() {
                 it.bottomMargin = dp(12)
             }
         }
+        // Flat pill: a shadow on a plain rounded background is cut off at its bounds, so depth comes from the surface tone.
         val pill = FrameLayout(this).apply {
             background = roundRect(color(R.color.surface), dp(32))
-            elevation = dp(6).toFloat()
         }
         navIndicator = View(this).apply { background = roundRect(color(R.color.surface_strong), dp(28)) }
         pill.addView(navIndicator, FrameLayout.LayoutParams(dp(56), dp(56), Gravity.TOP or Gravity.START).also {
@@ -318,6 +340,7 @@ class MainActivity : Activity() {
             isFillViewport = true
             overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
             setBackgroundColor(color(R.color.bg))
+            tag = CONVERSATION_TAG
         }
         val list = LinearLayout(this).apply {
             setBackgroundColor(color(R.color.bg))
@@ -348,7 +371,9 @@ class MainActivity : Activity() {
             approvals.isNotEmpty() -> screen.addView(approvalBanner(approvals.first()), linear(-1, -2).also { it.setMargins(dp(20), 0, dp(20), dp(10)) })
             supervisorApproval != null -> screen.addView(approvalBanner(supervisorApproval), linear(-1, -2).also { it.setMargins(dp(20), 0, dp(20), dp(10)) })
         }
-        screen.addView(composer(), linear(-1, -2).also { it.setMargins(dp(16), 0, dp(16), dp(112)) })
+        // Clearance below the composer is the navigation bar's height only when that bar is on screen.
+        val composerBottom = if (keyboardVisible) dp(12) else dp(112)
+        screen.addView(composer().also { it.tag = COMPOSER_TAG }, linear(-1, -2).also { it.setMargins(dp(16), 0, dp(16), composerBottom) })
         return screen
     }
 
@@ -1364,6 +1389,8 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
     companion object {
+        private const val COMPOSER_TAG = "jarvis.composer"
+        private const val CONVERSATION_TAG = "jarvis.conversation"
         private const val REQUEST_POST_NOTIFICATIONS = 4201
         private const val REQUEST_LOCAL_NETWORK = 4202
     }
