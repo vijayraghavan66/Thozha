@@ -81,10 +81,52 @@ def _open_supervisor():
 
 
 def _host(state: dict, identity: DeviceIdentity, supervisor) -> JarvisLinkHost:
-    return JarvisLinkHost(
+    host = JarvisLinkHost(
         tenant_id=state["tenant_id"], device_id=state["host_device_id"], identity=identity,
         host_certificate=DeviceCertificate.from_dict(state["host_certificate"]), supervisor=supervisor,
     )
+    host.task_observer = _record_task_watch
+    return host
+
+
+TASK_WATCH_PATH = TEST_DIR / "task-watch.json"
+TERMINAL_TASK_STATES = {"COMPLETED", "FAILED", "CANCELLED"}
+
+
+def _record_task_watch(*, task_id: str, idempotency_key: str, companion_id: str) -> None:
+    """Remember which companion submitted a task, so its final state can be published back to that companion."""
+    entries = json.loads(TASK_WATCH_PATH.read_text()) if TASK_WATCH_PATH.is_file() else []
+    if any(entry["task_id"] == task_id for entry in entries):
+        return
+    entries.append({"task_id": task_id, "idempotency_key": idempotency_key, "companion_id": companion_id, "published": False})
+    tmp = TASK_WATCH_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries, indent=2))
+    tmp.replace(TASK_WATCH_PATH)
+
+
+def _publish_task_updates(state, client, identity, adapter, runtime) -> int:
+    """Send each watched task's terminal state (from the supervisor) to the companion that submitted it."""
+    if not TASK_WATCH_PATH.is_file() or not hasattr(adapter, "task_status"):
+        return 0
+    entries = json.loads(TASK_WATCH_PATH.read_text())
+    published = 0
+    for entry in entries:
+        if entry["published"]:
+            continue
+        current = adapter.task_status(entry["idempotency_key"])
+        if current["state"] not in TERMINAL_TASK_STATES:
+            continue
+        runtime.send_task_update(
+            companion_certificate=_companion_certificate(client, entry["companion_id"]),
+            companion_id=entry["companion_id"], task_id=entry["task_id"], state=current["state"],
+            summary=current.get("summary") or "",
+        )
+        entry["published"] = True
+        published += 1
+    tmp = TASK_WATCH_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries, indent=2))
+    tmp.replace(TASK_WATCH_PATH)
+    return published
 
 
 def _load(path: Path) -> tuple[dict, DeviceIdentity]:
@@ -206,7 +248,8 @@ def _create_and_send(state, client, identity, store, adapter, item: dict) -> dic
 
 def _process_requests(state, client, identity, store, adapter) -> list[dict]:
     queue = TEST_DIR / "requests"
-    if not queue.is_dir():
+    # The simulated-echo approval harness needs the local store. The API engine path never uses it.
+    if store is None or not queue.is_dir():
         return []
     created = []
     for item_path in sorted(queue.glob("*.json")):
@@ -221,8 +264,9 @@ def _cycle(state, client, identity, store, adapter, response_outbox=None) -> dic
     created = _process_requests(state, client, identity, store, adapter)
     runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client, response_outbox=response_outbox)
     counts = runtime.poll_once()
+    published = _publish_task_updates(state, client, identity, adapter, runtime)
     report = []
-    for record in _pending_records():
+    for record in (_pending_records() if store is not None else []):
         if record["done"]:
             continue
         status = store.approval(record["approval_id"])["status"]
@@ -241,7 +285,7 @@ def _cycle(state, client, identity, store, adapter, response_outbox=None) -> dic
         report.append({"approval_id": record["approval_id"], "approval_status": status, "outcome": outcome,
                        "task_state": store.get_task(record["task_id"])["state"]})
     _save_records(_merge_done(report))
-    return {**counts, "created": created, "resumed": report}
+    return {**counts, "created": created, "resumed": report, "published": published}
 
 
 def _merge_done(report: list[dict]) -> list[dict]:
@@ -261,7 +305,13 @@ async def _serve(args, path: Path) -> None:
 
     state, client, identity = _relay(args, path)
     host_id = state["host_device_id"]
-    store, adapter = _open_supervisor()
+    if args.engine == "api":
+        # Real engine path. The OpenJarvis server owns the supervisor database; this process never opens it,
+        # so its restart recovery cannot pause tasks that the running server is executing.
+        from jarvis_link_host.openjarvis_api_adapter import OpenJarvisApiSupervisorAdapter
+        store, adapter = None, OpenJarvisApiSupervisorAdapter()
+    else:
+        store, adapter = _open_supervisor()
     response_outbox = HostResponseOutbox(TEST_DIR / "response-outbox.db")
     ws_url = args.relay.replace("http", "ws", 1) + f"/v1/devices/{host_id}/stream"
     backoff = 2.0
@@ -290,7 +340,8 @@ async def _serve(args, path: Path) -> None:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
     finally:
-        store.close()
+        if store is not None:
+            store.close()
         response_outbox.close()
 
 
@@ -318,6 +369,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--message", default="JARVIS_SIMULATED_APPROVAL_1")
     parser.add_argument("--approval-ttl", type=int, default=300)
     parser.add_argument("--interval", type=float, default=60.0, help="serve: fallback cycle interval (s)")
+    parser.add_argument("--engine", choices=["api", "store"], default="api",
+                        help="serve: 'api' dispatches to the running OpenJarvis server (real AI engine); "
+                             "'store' is the legacy local-store path that records tasks without executing them")
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     args = parser.parse_args(argv)
     print(json.dumps(COMMANDS[args.command](args, args.state), indent=2, sort_keys=True))

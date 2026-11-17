@@ -56,6 +56,8 @@ def main() -> int:
     parser.add_argument("--serial", required=True)
     parser.add_argument("--relay", default="http://127.0.0.1:8787")
     parser.add_argument("--objective", default="Harmless status check")
+    parser.add_argument("--scope", default="assistant", choices=["read_only", "assistant"],
+                        help="submit: capability scope (assistant is required for Mac control)")
     parser.add_argument("--ttl-ms")
     parser.add_argument("--approval-id")
     args = parser.parse_args()
@@ -74,7 +76,10 @@ def main() -> int:
             "--es", "root_public_key", root["root_public_key"],
         ]
     if args.command == "submit":
-        extras += ["--es", "objective", args.objective, "--es", "scope", "read_only"]
+        # base64url (no padding) keeps spaces intact through adb argument parsing; the receiver decodes objective_b64.
+        import base64
+        encoded = base64.urlsafe_b64encode(args.objective.encode("utf-8")).decode("ascii").rstrip("=")
+        extras += ["--es", "objective_b64", encoded, "--es", "scope", args.scope]
         if args.ttl_ms:
             extras += ["--el", "ttl_ms", args.ttl_ms]
     if args.command in {"approve", "reject"}:

@@ -173,6 +173,11 @@ class JarvisLinkHost:
             )
             if not isinstance(result, dict) or not isinstance(result.get("task_id"), str):
                 raise RuntimeError("supervisor returned an invalid task result")
+            # Lets the serve loop later publish the task's final state to the same companion.
+            observer = getattr(self, "task_observer", None)
+            if observer is not None:
+                observer(task_id=result["task_id"], idempotency_key=envelope.message_id,
+                         companion_id=envelope.from_device_id)
             return {"kind": "task.accepted", **result}
 
         if envelope.kind == "task.cancel":
