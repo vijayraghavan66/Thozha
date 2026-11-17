@@ -1,0 +1,17 @@
+<resources>
+    <color name="ink_0">#091117</color>
+    <color name="ink_1">#0D1921</color>
+    <color name="ink_2">#13232D</color>
+    <color name="ink_3">#1A303C</color>
+    <color name="line">#29404A</color>
+    <color name="line_bright">#3C6470</color>
+    <color name="paper">#EAF3F4</color>
+    <color name="muted">#A0B2B9</color>
+    <color name="signal">#51DCE0</color>
+    <color name="signal_pressed">#8051DCE0</color>
+    <color name="success">#8DE3B7</color>
+    <color name="warning">#FFC06F</color>
+    <color name="danger">#FF8082</color>
+    <color name="error_surface">#332125</color>
+    <color name="notice_surface">#142B32</color>
+</resources>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only harness for Jarvis Link device verification. It is not part of the release manifest.
+  The receiver is exported so `adb shell am broadcast` can drive the self-test on a development phone.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".link.LinkDebugReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.jarvis.link.debug.SELFTEST" />
+                <action android:name="com.jarvis.link.debug.STATUS" />
+                <action android:name="com.jarvis.link.debug.ENROLL" />
+                <action android:name="com.jarvis.link.debug.SYNC" />
+                <action android:name="com.jarvis.link.debug.SUBMIT" />
+                <action android:name="com.jarvis.link.debug.POLL" />
+                <action android:name="com.jarvis.link.debug.FLUSH" />
+                <action android:name="com.jarvis.link.debug.FORGET" />
+                <action android:name="com.jarvis.link.debug.APPROVALS" />
+                <action android:name="com.jarvis.link.debug.APPROVE" />
+                <action android:name="com.jarvis.link.debug.REJECT" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
