@@ -8,17 +8,57 @@ import java.nio.charset.StandardCharsets.UTF_8
 /** A relay HTTP rejection. [code] is the relay's stable error code; relay text is never surfaced. */
 class RelayHttpException(val status: Int, val code: String) : IOException("relay HTTP $status ($code)")
 
+/** Raw result of one relay exchange, independent of how the bytes travelled. */
+data class RelayRawResponse(val status: Int, val text: String)
+
 /**
- * Outbound-only HTTPS client for the relay. Requests carry exactly the bytes that were signed, so no
- * JSON is re-serialised between signing and sending. Plain HTTP is accepted only for loopback
- * development (adb reverse / local wrangler), mirroring the Python host client.
+ * How signed relay requests reach the relay. The default is HTTPS (or loopback HTTP). The Telegram tunnel
+ * implements the same contract by carrying the identical request over Telegram. Requests always carry the
+ * exact bytes that were signed; a transport must not modify headers or body.
+ */
+interface RelayTransport {
+    fun exchange(method: String, pathAndQuery: String, headers: Map<String, String>, body: ByteArray): RelayRawResponse
+}
+
+/** HTTPS transport using the platform's own HTTP stack (and therefore the device's configured network path). */
+class HttpUrlRelayTransport(private val base: String, private val timeoutMs: Int) : RelayTransport {
+    override fun exchange(method: String, pathAndQuery: String, headers: Map<String, String>, body: ByteArray): RelayRawResponse {
+        val connection = (URI(base + pathAndQuery).toURL().openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            instanceFollowRedirects = false
+            connectTimeout = timeoutMs
+            readTimeout = timeoutMs
+            useCaches = false
+            headers.forEach { (name, value) -> setRequestProperty(name, value) }
+            if (method == "POST" || method == "PUT") {
+                doOutput = true
+                // Buffered output, not fixed-length streaming: HttpURLConnection cannot retry a POST after a
+                // 401 in streaming mode and then discards the relay's error body (verified with a Java probe).
+            }
+        }
+        try {
+            if (method == "POST" || method == "PUT") connection.outputStream.use { it.write(body) }
+            val status = connection.responseCode
+            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            return RelayRawResponse(status, stream?.use { it.readBytes().toString(UTF_8) }.orEmpty())
+        } finally {
+            connection.disconnect()
+        }
+    }
+}
+
+/**
+ * Outbound client for the relay. Requests carry exactly the bytes that were signed, so no JSON is
+ * re-serialised between signing and sending. Plain HTTP is accepted only for loopback development.
  */
 class HttpJarvisLinkRelay(
     baseUrl: String,
     private val tenantId: String,
-    private val timeoutMs: Int = 10_000,
+    timeoutMs: Int = 10_000,
+    transport: RelayTransport? = null,
 ) : JarvisLinkRelayApi {
     private val base: String
+    private val transport: RelayTransport
 
     init {
         val uri = URI(baseUrl.trimEnd('/'))
@@ -28,6 +68,7 @@ class HttpJarvisLinkRelay(
         require(uri.path.isNullOrEmpty()) { "relay URL must not include a path" }
         require(tenantId.matches(Regex("^[A-Za-z0-9_-]{8,64}$"))) { "invalid tenant ID" }
         base = uri.toString().trimEnd('/')
+        this.transport = transport ?: HttpUrlRelayTransport(base, timeoutMs)
     }
 
     override fun postMessage(envelopeJson: String, headers: Map<String, String>): RelayReceipt {
@@ -76,38 +117,18 @@ class HttpJarvisLinkRelay(
 
     private fun call(method: String, pathAndQuery: String, body: ByteArray, signed: Map<String, String>): Map<String, Any> {
         require(pathAndQuery.startsWith("/") && '\n' !in pathAndQuery && '\r' !in pathAndQuery)
-        val connection = (URI(base + pathAndQuery).toURL().openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            instanceFollowRedirects = false
-            connectTimeout = timeoutMs
-            readTimeout = timeoutMs
-            useCaches = false
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("X-Jarvis-Link-Tenant", tenantId)
-            signed.forEach { (name, value) -> setRequestProperty(name, value) }
-            if (method == "POST" || method == "PUT") {
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-                // Buffered output, not fixed-length streaming: HttpURLConnection cannot retry a POST after a
-                // 401 in streaming mode and then discards the relay's error body (verified with a Java probe).
-            }
+        val headers = linkedMapOf("Accept" to "application/json", "X-Jarvis-Link-Tenant" to tenantId)
+        headers.putAll(signed)
+        if (method == "POST" || method == "PUT") headers["Content-Type"] = "application/json"
+        val response = transport.exchange(method, pathAndQuery, headers, body)
+        if (response.status !in 200..299) {
+            val code = runCatching {
+                @Suppress("UNCHECKED_CAST")
+                ((LinkJson.parseObject(response.text)["error"] as? Map<String, Any>)?.get("code") as? String)
+            }.getOrNull() ?: "relay_error"
+            throw RelayHttpException(response.status, code)
         }
-        try {
-            if (method == "POST" || method == "PUT") connection.outputStream.use { it.write(body) }
-            val status = connection.responseCode
-            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-            val text = stream?.use { it.readBytes().toString(UTF_8) }.orEmpty()
-            if (status !in 200..299) {
-                val code = runCatching {
-                    @Suppress("UNCHECKED_CAST")
-                    ((LinkJson.parseObject(text)["error"] as? Map<String, Any>)?.get("code") as? String)
-                }.getOrNull() ?: "relay_error"
-                throw RelayHttpException(status, code)
-            }
-            return LinkJson.parseObject(text)
-        } finally {
-            connection.disconnect()
-        }
+        return LinkJson.parseObject(response.text)
     }
 
     private fun certificateFrom(fields: Map<String, Any>): DeviceCertificate = DeviceCertificate(

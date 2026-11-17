@@ -234,12 +234,15 @@ object CompanionProtocolTest {
             inbox = inbox,
             now = { now },
         )
-        val submitted = client.submitTask(TaskSubmission("read local project summary", setOf(SafeCapability.READ_ONLY)))
+        val requestId = "ab".repeat(16)
+        val submitted = client.submitTask(TaskSubmission("read local project summary", setOf(SafeCapability.READ_ONLY), requestId))
+        check(submitted.messageId == requestId) { "task message ID must match the phone's durable conversation ID" }
         check(submitted.queuedOffline && outbox.list().size == 1)
         client.setOnline(true)
         check(client.flushOutbox().size == 1)
         check(outbox.list().isEmpty() && relay.queued.size == 1)
         val receivedByHost = LinkEnvelope.parse(relay.queued.single())
+        check(receivedByHost.header.messageId == requestId) { "host reply in_reply_to must correlate with Home" }
         val hostPlaintext = LinkCrypto.decryptEnvelope(receivedByHost, hostEnc, hostCert, companionCert, hostRoot, now)
         check("read local project summary" in hostPlaintext)
         check("shell" !in hostPlaintext)
@@ -292,10 +295,16 @@ object CompanionProtocolTest {
             storeDir = directory,
             now = { 1_800_000_000_000L },
         )
-        first.recordLocalTaskRequest(requestId, "What is Java?")
-        first.recordLocalTaskRequest(requestId, "What is Java?")
+        first.recordLocalTaskRequest(requestId, "What is Java?", transport = "link")
+        first.recordLocalTaskRequest(requestId, "What is Java?", transport = "link")
         check(first.conversation().size == 1) { "re-recording one request created a duplicate conversation entry" }
-        first.recordLocalTaskResult(requestId, "a".repeat(32), "COMPLETED", "Java is a programming language.")
+        val taskId = "a".repeat(32)
+        first.recordEvents(listOf(CompanionEvent.TaskUpdate(
+            taskId = taskId,
+            state = "COMPLETED",
+            summary = "Java is a programming language.",
+            inReplyTo = requestId,
+        )))
 
         val recovered = LinkRuntime(
             keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
@@ -306,6 +315,7 @@ object CompanionProtocolTest {
         val entry = recovered.conversation().single()
         check(entry["message_id"] == requestId)
         check(entry["task_id"] == "a".repeat(32))
+        check(entry["transport"] == "link")
         check(entry["state"] == "COMPLETED")
         check(entry["summary"] == "Java is a programming language.")
         directory.deleteRecursively()

@@ -340,6 +340,7 @@ class JarvisLinkCompanion(
             tenantId, signingIdentity, hostCertificate, hostRoot,
             "task.submit", submission.toJson(), nowUnixMs = now(),
             ttlMs = ttlMs ?: (15 * 60 * 1000L),
+            messageId = submission.clientRequestId,
         )
         return sendOrQueue(envelope)
     }

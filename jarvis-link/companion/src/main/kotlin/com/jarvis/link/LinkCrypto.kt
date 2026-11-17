@@ -162,6 +162,7 @@ object LinkCrypto {
         payloadUtf8Json: String,
         nowUnixMs: Long = System.currentTimeMillis(),
         ttlMs: Long = 15 * 60 * 1000L,
+        messageId: String? = null,
     ): LinkEnvelope {
         validateDeviceId(fromDevice.deviceId)
         validateDeviceId(recipientCertificate.deviceId)
@@ -174,7 +175,8 @@ object LinkCrypto {
         require(ttlMs in 1..(24 * 60 * 60 * 1000L)) { "Message TTL must be between 1 ms and 24 hours" }
         require(payloadUtf8Json.isNotBlank() && payloadUtf8Json.toByteArray(UTF_8).size <= 64 * 1024) { "Payload is empty or too large" }
 
-        val messageId = newId()
+        val messageId = messageId ?: newId()
+        validateDeviceId(messageId)
         val messageIdBytes = decodeHex(messageId)
         val recipientKeyBase64 = recipientCertificate.encryptionPublicKeyBase64Url
         val recipientKey = decodePublicKey(recipientKeyBase64)

@@ -76,6 +76,11 @@ class LinkRuntime(
     private val state: LinkStateStore,
     private val storeDir: File,
     private val now: () -> Long = System::currentTimeMillis,
+    /**
+     * Optional alternative path to the relay. Returning null keeps the default HTTPS/loopback transport
+     * (USB/adb reverse or a configured relay). The same signed requests travel either way.
+     */
+    private val transportFactory: ((String) -> RelayTransport?)? = null,
 ) {
     private fun load(): Map<String, Any> = state.read()?.let { LinkJson.parseObject(it) } ?: emptyMap()
 
@@ -86,7 +91,8 @@ class LinkRuntime(
         state.write(LinkJson.encode(merged))
     }
 
-    private fun relay(relayUrl: String, tenant: String) = HttpJarvisLinkRelay(relayUrl, tenant)
+    private fun relay(relayUrl: String, tenant: String) =
+        HttpJarvisLinkRelay(relayUrl, tenant, transport = transportFactory?.invoke(relayUrl))
 
     /** Starts enrollment. Pins the host root supplied by the operator; the relay is not trusted for it. */
     fun enroll(relayUrl: String, invitation: RelayInvitation, deviceName: String, root: TrustedHostRoot): Map<String, Any> {
@@ -253,8 +259,9 @@ class LinkRuntime(
         (load()["conversation"] as? List<Map<String, Any>>) ?: emptyList()
 
     /** Stores a local USB task under its API idempotency key before the request can time out. */
-    fun recordLocalTaskRequest(idempotencyKey: String, text: String) {
+    fun recordLocalTaskRequest(idempotencyKey: String, text: String, transport: String = "api") {
         require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid task idempotency key" }
+        require(transport in setOf("api", "link", "telegram")) { "invalid conversation transport" }
         val cleaned = text.trim()
         require(cleaned.isNotEmpty() && cleaned.toByteArray(Charsets.UTF_8).size <= 4096) { "message must be 1–4096 bytes" }
         val entries = conversation().filterNot { it["message_id"] == idempotencyKey }.toMutableList()
@@ -265,6 +272,7 @@ class LinkRuntime(
             "state" to "RUNNING",
             "summary" to "",
             "task_id" to "",
+            "transport" to transport,
             "updated_at_unix_ms" to now(),
         ))
         save(mapOf("conversation" to entries.takeLast(100)))
@@ -318,7 +326,7 @@ class LinkRuntime(
         return ((values["last_sync_ms"] as? Long) ?: 0L) to ((values["last_sync_error"] as? String) ?: "")
     }
 
-    private fun recordEvents(events: List<CompanionEvent>) {
+    internal fun recordEvents(events: List<CompanionEvent>) {
         var approvals = storedApprovals().toMutableList()
         val updates = ((load()["updates"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
         for (event in events) {
