@@ -6,12 +6,14 @@ size and count quotas, a time limit and a bounded repair budget. Every operation
 independently, and usage is recorded atomically. Anything outside the bounds is refused; nothing is
 expanded automatically.
 
-This module performs no approvals itself. The caller must pass in an approval decision that the supervisor
-recorded for the exact plan digest.
+This module performs no approvals itself. The caller supplies an approval ID, but issuance succeeds only
+when the canonical supervisor database contains the live decision for the exact plan digest and paired
+device actor. Caller-provided approval labels are never treated as evidence.
 """
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import os
 import re
@@ -20,13 +22,16 @@ import stat
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 OP_WRITE = "write_file"
 OP_TEST = "run_tests"
-ALLOWED_OPS = frozenset({OP_WRITE, OP_TEST})
+OP_ARTIFACT = "artifact_manifest"
+OP_REPAIR = "repair_attempt"
+ALLOWED_OPS = frozenset({OP_WRITE, OP_TEST, OP_ARTIFACT})
+PLAN_APPROVAL_OPERATION = "mcp:jarvis_dev:approve_plan"
+PLAN_APPROVAL_TARGET_PREFIX = "taskflow:plan:"
 # Test commands are fixed identifiers. Arbitrary command strings are never accepted.
 TEST_COMMANDS = {"unittest-tests": ("python3", "-m", "unittest", "discover", "-s", "tests", "-q")}
 MAX_FILE_BYTES_HARD = 256 * 1024
@@ -34,9 +39,12 @@ MAX_TOTAL_BYTES_HARD = 4 * 1024 * 1024
 MAX_WRITES_HARD = 200
 MAX_TEST_RUNS_HARD = 50
 MAX_REPAIRS_HARD = 5
+MAX_ARTIFACTS_HARD = 2000
 MAX_DURATION_HARD_S = 4 * 60 * 60
 _PLAN_ID = re.compile(r"[A-Za-z0-9_.-]{8,80}")
 _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,120}")
+_DEVICE_ID = re.compile(r"[0-9a-f]{32}")
+_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 class CapabilityError(Exception):
@@ -68,6 +76,12 @@ class CapabilitySpec:
     def validate_bounds(self) -> None:
         if not _PLAN_ID.fullmatch(self.plan_id):
             raise CapabilityError("INVALID_SPEC", "plan_id must be a bounded identifier")
+        if not _DEVICE_ID.fullmatch(self.device_id):
+            raise CapabilityError("INVALID_SPEC", "device_id must be a canonical companion identifier")
+        if not isinstance(self.user_id, str) or not 1 <= len(self.user_id) <= 128 or any(ord(c) < 32 for c in self.user_id):
+            raise CapabilityError("INVALID_SPEC", "user_id must be a bounded printable identifier")
+        if not _DIGEST.fullmatch(self.plan_digest or ""):
+            raise CapabilityError("INVALID_SPEC", "plan_digest must be SHA-256 hex")
         if not self.allowed_ops or not self.allowed_ops <= ALLOWED_OPS:
             raise CapabilityError("INVALID_SPEC", "operation types must be a non-empty subset of the allowlist")
         if not (1 <= self.max_file_bytes <= MAX_FILE_BYTES_HARD):
@@ -132,6 +146,52 @@ def _resolve_inside(root: str, rel: str, *, for_write: bool) -> str:
     return real
 
 
+def _read_regular_file_nofollow(root: str, rel: str, max_bytes: int) -> bytes:
+    """Read one bounded workspace file by walking directory FDs without following symlinks."""
+    parts = _check_relative(rel)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open(root, os.O_RDONLY | directory_flag | nofollow_flag)
+    current_fd = root_fd
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | directory_flag | nofollow_flag, dir_fd=current_fd)
+            if current_fd != root_fd:
+                os.close(current_fd)
+            current_fd = next_fd
+        file_fd = os.open(parts[-1], os.O_RDONLY | nofollow_flag, dir_fd=current_fd)
+        try:
+            metadata = os.fstat(file_fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise CapabilityError("PATH_DENIED", "artifact is not a regular file")
+            if metadata.st_size > max_bytes:
+                raise CapabilityError("QUOTA_FILE_SIZE", "artifact exceeds the approved per-file size")
+            chunks: list[bytes] = []
+            remaining = max_bytes + 1
+            while remaining > 0:
+                chunk = os.read(file_fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            if len(data) > max_bytes:
+                raise CapabilityError("QUOTA_FILE_SIZE", "artifact exceeds the approved per-file size")
+            return data
+        finally:
+            os.close(file_fd)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise CapabilityError("SYMLINK_DENIED", "symlinks are never followed inside a capability") from exc
+        if exc.errno == errno.ENOENT:
+            raise CapabilityError("NOT_FOUND", "artifact does not exist") from exc
+        raise CapabilityError("PATH_DENIED", "artifact path could not be read safely") from exc
+    finally:
+        if current_fd != root_fd:
+            os.close(current_fd)
+        os.close(root_fd)
+
+
 def _under_allowed(rel: str, allowed: tuple[str, ...]) -> bool:
     if not allowed or "" in allowed:
         return True
@@ -144,14 +204,44 @@ def digest_plan(spec_fields: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _spec_fields(spec: CapabilitySpec) -> dict[str, Any]:
+    """Canonical public capability bounds covered by the supervisor's plan approval."""
+    return {
+        "plan_id": spec.plan_id,
+        "device_id": spec.device_id,
+        "user_id": spec.user_id,
+        "workspace_root": spec.workspace_root,
+        "allowed_ops": sorted(spec.allowed_ops),
+        "allowed_paths": list(spec.allowed_paths),
+        "max_file_bytes": spec.max_file_bytes,
+        "max_total_bytes": spec.max_total_bytes,
+        "max_writes": spec.max_writes,
+        "max_test_runs": spec.max_test_runs,
+        "max_repairs": spec.max_repairs,
+        "max_duration_s": spec.max_duration_s,
+        "ttl_s": spec.ttl_s,
+    }
+
+
+def plan_approval_target(spec: CapabilitySpec) -> str:
+    return PLAN_APPROVAL_TARGET_PREFIX + spec.plan_id
+
+
+def plan_approval_arguments(spec: CapabilitySpec) -> dict[str, Any]:
+    """Exact arguments the lead-owned MCP adapter must put in the supervisor approval record."""
+    return {"plan": _spec_fields(spec), "plan_digest": spec.plan_digest}
+
+
 class CapabilityStore:
     """SQLite-backed, durable capability state. All counter updates are transactional."""
 
     def __init__(self, path: str | os.PathLike[str], *, clock=time.time) -> None:
         self.path = str(path)
         self._clock = clock
-        self._lock = threading.Lock()
+        # Operation methods call issuance/task helpers while holding the store lock.
+        self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute(
             """CREATE TABLE IF NOT EXISTS dev_capabilities (
@@ -169,6 +259,12 @@ class CapabilityStore:
             """CREATE TABLE IF NOT EXISTS dev_audit (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, capability_id TEXT NOT NULL, event TEXT NOT NULL,
                 detail_json TEXT NOT NULL, at REAL NOT NULL)"""
+        )
+        self._db.execute(
+            """CREATE TABLE IF NOT EXISTS dev_capability_issuances (
+                approval_id TEXT PRIMARY KEY, capability_id TEXT NOT NULL UNIQUE,
+                task_id TEXT NOT NULL, requester_actor TEXT NOT NULL, plan_digest TEXT NOT NULL,
+                approved_by TEXT NOT NULL, created_at REAL NOT NULL)"""
         )
 
     def close(self) -> None:
@@ -188,21 +284,177 @@ class CapabilityStore:
         return [(event, json.loads(detail)) for event, detail in rows]
 
     # ---- issuance ----------------------------------------------------------------------------
-    def issue(self, spec: CapabilitySpec, *, approved_plan_digest: str, approved_by: str) -> str:
-        """Issue only when the supervisor-recorded approval matches this exact plan digest.
+    def issue(
+        self,
+        spec: CapabilitySpec,
+        *,
+        supervisor_store: Any | None = None,
+        approval_id: str | None = None,
+        task_id: str | None = None,
+        requester_actor: str | None = None,
+        **caller_claims: Any,
+    ) -> str:
+        """Issue from a real supervisor record; caller-supplied approval labels are rejected."""
+        if caller_claims:
+            raise CapabilityError("CALLER_CLAIMS_REJECTED", "approval identity must come from the supervisor record")
+        if supervisor_store is None or not approval_id or not task_id or not requester_actor:
+            raise CapabilityError("SUPERVISOR_APPROVAL_REQUIRED", "a supervisor-recorded plan approval is required")
+        return self.issue_from_supervisor_approval(
+            spec,
+            supervisor_store=supervisor_store,
+            approval_id=approval_id,
+            task_id=task_id,
+            requester_actor=requester_actor,
+        )
 
-        The caller obtains ``approved_plan_digest`` from a decided supervisor approval. A mismatch refuses issuance.
+    def issue_from_supervisor_approval(
+        self,
+        spec: CapabilitySpec,
+        *,
+        supervisor_store: Any,
+        approval_id: str,
+        task_id: str,
+        requester_actor: str,
+    ) -> str:
+        """Consume one exact, live user approval before issuing a durable project capability.
+
+        The approved MCP operation is ``mcp:jarvis_dev:approve_plan`` with target
+        ``taskflow:plan:<plan_id>`` and :func:`plan_approval_arguments`. The approval's
+        actual ``decided_by`` value must be the same paired device actor that owns the
+        development task. There is no ``approved_by`` or digest assertion parameter.
         """
         spec.validate_bounds()
-        if approved_plan_digest != spec.plan_digest:
-            raise CapabilityError("PLAN_MISMATCH", "approval does not match this exact plan")
-        if not approved_by:
-            raise CapabilityError("APPROVAL_REQUIRED", "a decided approval is required")
-        if approved_by == spec.user_id:
-            raise CapabilityError("SELF_APPROVAL", "the requesting user cannot approve their own plan")
-        root = canonical_workspace(spec.workspace_root)
-        if root != spec.workspace_root:
-            spec = CapabilitySpec(**{**spec.__dict__, "workspace_root": root})
+        if canonical_workspace(spec.workspace_root) != spec.workspace_root:
+            raise CapabilityError("WORKSPACE_NOT_CANONICAL", "approved workspace root must already be canonical")
+        if digest_plan(_spec_fields(spec)) != spec.plan_digest:
+            raise CapabilityError("PLAN_MISMATCH", "capability bounds do not match the approved plan digest")
+        if not re.fullmatch(r"[0-9a-f]{32}", task_id or ""):
+            raise CapabilityError("TASK_INVALID", "task ID is invalid")
+        if requester_actor != f"device:{spec.device_id}":
+            raise CapabilityError("IDENTITY_MISMATCH", "requester actor is not bound to this device")
+
+        # Resolve only the canonical supervisor implementation; a model-provided object
+        # or dictionary cannot assert that an approval exists.
+        from openjarvis.tasks.supervisor import SupervisorStore, operation_digest, utc_now
+
+        if not isinstance(supervisor_store, SupervisorStore):
+            raise CapabilityError("SUPERVISOR_REQUIRED", "capabilities can only be issued from SupervisorStore")
+        task = supervisor_store.get_task(task_id)
+        if task is None:
+            raise CapabilityError("TASK_UNKNOWN", "approved development task does not exist")
+        try:
+            metadata = json.loads(task.get("recovery_json") or "{}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise CapabilityError("TASK_INVALID", "development task metadata is invalid") from exc
+        if (
+            metadata.get("source") != "jarvis_link"
+            or metadata.get("scope") != "development"
+            or metadata.get("owner_actor") != requester_actor
+        ):
+            raise CapabilityError("TASK_SCOPE_MISMATCH", "task source, scope, or owning device does not match")
+
+        expected_operation = PLAN_APPROVAL_OPERATION
+        expected_target = plan_approval_target(spec)
+        expected_arguments = plan_approval_arguments(spec)
+        expected_digest = operation_digest(expected_operation, expected_target, expected_arguments)
+        approval = supervisor_store.approval(approval_id)
+        if approval is None:
+            raise CapabilityError("APPROVAL_UNKNOWN", "supervisor approval does not exist")
+        if approval.get("task_id") != task_id:
+            raise CapabilityError("TASK_MISMATCH", "approval belongs to another task")
+        if approval.get("operation") != expected_operation or approval.get("target") != expected_target:
+            raise CapabilityError("OPERATION_MISMATCH", "approval is not for this exact development plan")
+        if approval.get("args_digest") != expected_digest:
+            raise CapabilityError("PLAN_MISMATCH", "supervisor approval does not match the canonical plan")
+        if approval.get("status") == "EXPIRED":
+            raise CapabilityError("APPROVAL_EXPIRED", "supervisor approval has expired")
+        # The supervisor clears arguments_json when a decision is consumed. A retry
+        # must therefore use the immutable digest and our durable issuance row, rather
+        # than expecting the now-cleared arguments to remain available.
+        approved_by = approval.get("decided_by")
+        if approval.get("status") == "PENDING":
+            raise CapabilityError("SUPERVISOR_APPROVAL_REQUIRED", "supervisor has not recorded a live approval decision")
+        if not isinstance(approved_by, str) or approved_by != requester_actor or not approved_by.startswith("device:"):
+            raise CapabilityError("APPROVER_IDENTITY_MISMATCH", "approval must come from the paired user device")
+
+        existing = self._issuance(approval_id)
+        if existing is not None:
+            if (
+                existing["task_id"] != task_id
+                or existing["requester_actor"] != requester_actor
+                or existing["plan_digest"] != spec.plan_digest
+                or existing["approved_by"] != approved_by
+            ):
+                raise CapabilityError("REPLAY", "approval ID was already used for a different capability")
+            _payload, state, _issued, expires, _w, _t, _r, _b, revoked = self._load(existing["capability_id"])
+            if state != "ACTIVE" or revoked is not None or self._clock() >= expires:
+                raise CapabilityError("CAPABILITY_INACTIVE", "previously issued capability is no longer active")
+            if task.get("state") not in {"RUNNING", "PLANNING", "VERIFYING"}:
+                raise CapabilityError("TASK_INACTIVE", "development task is no longer active")
+            return existing["capability_id"]
+
+        if approval.get("status") != "APPROVED":
+            raise CapabilityError("SUPERVISOR_APPROVAL_REQUIRED", "supervisor has not recorded a live approval decision")
+        try:
+            recorded_arguments = json.loads(approval.get("arguments_json") or "null")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise CapabilityError("PLAN_MISMATCH", "supervisor approval arguments are invalid") from exc
+        if recorded_arguments != expected_arguments:
+            raise CapabilityError("PLAN_MISMATCH", "supervisor approval does not match the canonical plan")
+        if approval.get("expires_at", "") <= utc_now():
+            supervisor_store.expire_approval(approval_id, reason="development_capability_issue_expired")
+            raise CapabilityError("APPROVAL_EXPIRED", "supervisor approval has expired")
+        if task.get("state") != "WAITING_APPROVAL":
+            raise CapabilityError("TASK_STATE_MISMATCH", "task is not waiting for this approval")
+
+        consumed = supervisor_store.consume_approval(
+            approval_id,
+            task_id=task_id,
+            operation=expected_operation,
+            target=expected_target,
+            arguments=expected_arguments,
+        )
+        if not consumed:
+            # A concurrent/retried call may have consumed the same approval just before
+            # the durable issuance row was written. Return only that exact existing ID.
+            existing = self._issuance(approval_id)
+            if existing and existing["task_id"] == task_id and existing["requester_actor"] == requester_actor and existing["plan_digest"] == spec.plan_digest:
+                return existing["capability_id"]
+            raise CapabilityError("APPROVAL_ALREADY_USED", "supervisor approval is stale, expired, or already consumed")
+
+        return self._create_issued_capability(
+            spec,
+            approval_id=approval_id,
+            task_id=task_id,
+            requester_actor=requester_actor,
+            approved_by=approved_by,
+        )
+
+    def _issuance(self, approval_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT capability_id,task_id,requester_actor,plan_digest,approved_by FROM dev_capability_issuances WHERE approval_id=?",
+                (approval_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _issuance_for_capability(self, capability_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT approval_id,capability_id,task_id,requester_actor,plan_digest,approved_by FROM dev_capability_issuances WHERE capability_id=?",
+                (capability_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _create_issued_capability(
+        self,
+        spec: CapabilitySpec,
+        *,
+        approval_id: str,
+        task_id: str,
+        requester_actor: str,
+        approved_by: str,
+    ) -> str:
         capability_id = uuid.uuid4().hex
         now = self._clock()
         payload = {**spec.__dict__, "allowed_ops": sorted(spec.allowed_ops), "allowed_paths": list(spec.allowed_paths)}
@@ -213,14 +465,58 @@ class CapabilityStore:
                     "INSERT INTO dev_capabilities(capability_id, spec_json, state, issued_at, expires_at) VALUES (?,?,?,?,?)",
                     (capability_id, json.dumps(payload, sort_keys=True), "ACTIVE", now, now + spec.ttl_s),
                 )
+                self._db.execute(
+                    "INSERT INTO dev_capability_issuances(approval_id,capability_id,task_id,requester_actor,plan_digest,approved_by,created_at) VALUES (?,?,?,?,?,?,?)",
+                    (approval_id, capability_id, task_id, requester_actor, spec.plan_digest, approved_by, now),
+                )
                 self._audit(capability_id, "issued", plan_id=spec.plan_id, plan_digest=spec.plan_digest,
-                            approved_by=approved_by, device_id=spec.device_id, user_id=spec.user_id,
-                            workspace_root=root, ttl_s=spec.ttl_s)
+                            approval_id=approval_id, task_id=task_id, approved_by=approved_by,
+                            device_id=spec.device_id, user_id=spec.user_id, workspace_root=spec.workspace_root,
+                            ttl_s=spec.ttl_s)
                 self._db.execute("COMMIT")
             except Exception:
                 self._db.execute("ROLLBACK")
                 raise
         return capability_id
+
+    def revoke_for_supervisor_task(self, supervisor_store: Any, *, task_id: str, requester_actor: str) -> int:
+        """Revoke task-bound capabilities only after supervisor cancellation is durable."""
+        from openjarvis.tasks.supervisor import SupervisorStore
+
+        if not isinstance(supervisor_store, SupervisorStore):
+            raise CapabilityError("SUPERVISOR_REQUIRED", "revocation requires the canonical supervisor store")
+        task = supervisor_store.get_task(task_id)
+        if task is None:
+            raise CapabilityError("TASK_UNKNOWN", "development task does not exist")
+        try:
+            metadata = json.loads(task.get("recovery_json") or "{}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise CapabilityError("TASK_INVALID", "development task metadata is invalid") from exc
+        if metadata.get("source") != "jarvis_link" or metadata.get("scope") != "development" or metadata.get("owner_actor") != requester_actor:
+            raise CapabilityError("TASK_SCOPE_MISMATCH", "task source, scope, or owner does not match")
+        if task.get("state") != "CANCELLED":
+            raise CapabilityError("TASK_NOT_CANCELLED", "supervisor must cancel the task before revocation")
+        now = self._clock()
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._db.execute(
+                    "SELECT capability_id FROM dev_capability_issuances WHERE task_id=?", (task_id,)
+                ).fetchall()
+                count = 0
+                for (capability_id,) in rows:
+                    updated = self._db.execute(
+                        "UPDATE dev_capabilities SET state='REVOKED',revoked_at=? WHERE capability_id=? AND state='ACTIVE'",
+                        (now, capability_id),
+                    )
+                    if updated.rowcount:
+                        count += 1
+                        self._audit(capability_id, "revoked", reason="supervisor_task_cancelled", task_id=task_id)
+                self._db.execute("COMMIT")
+                return count
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
 
     def _load(self, capability_id: str) -> tuple[dict[str, Any], str, float, float, int, int, int, int, float | None]:
         row = self._db.execute(
@@ -233,7 +529,16 @@ class CapabilityStore:
         spec = json.loads(spec_json)
         return spec, state, issued, expires, writes, tests, repairs, total, revoked
 
-    def _check_live(self, capability_id: str, device_id: str, user_id: str) -> tuple[dict[str, Any], int, int, int, int]:
+    def _check_live(
+        self,
+        capability_id: str,
+        device_id: str,
+        user_id: str,
+        *,
+        supervisor_store: Any,
+        task_id: str,
+        requester_actor: str,
+    ) -> tuple[dict[str, Any], int, int, int, int]:
         spec, state, _issued, expires, writes, tests, repairs, total, revoked = self._load(capability_id)
         if state != "ACTIVE" or revoked is not None:
             raise CapabilityError("REVOKED", "capability is revoked or cancelled")
@@ -242,18 +547,42 @@ class CapabilityStore:
             raise CapabilityError("EXPIRED", "capability has expired")
         if spec["device_id"] != device_id or spec["user_id"] != user_id:
             raise CapabilityError("IDENTITY_MISMATCH", "request identity is not bound to this capability")
+        from openjarvis.tasks.supervisor import SupervisorStore
+
+        if not isinstance(supervisor_store, SupervisorStore):
+            raise CapabilityError("SUPERVISOR_REQUIRED", "operation requires the canonical supervisor store")
+        issuance = self._issuance_for_capability(capability_id)
+        if issuance is None:
+            raise CapabilityError("ISSUANCE_MISSING", "capability is not bound to a supervisor approval")
+        if issuance["task_id"] != task_id or issuance["requester_actor"] != requester_actor or requester_actor != f"device:{device_id}":
+            raise CapabilityError("TASK_BINDING_MISMATCH", "operation task or device does not match the approved capability")
+        task = supervisor_store.get_task(task_id)
+        if task is None:
+            raise CapabilityError("TASK_UNKNOWN", "capability task no longer exists")
+        try:
+            metadata = json.loads(task.get("recovery_json") or "{}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise CapabilityError("TASK_INVALID", "capability task metadata is invalid") from exc
+        if metadata.get("source") != "jarvis_link" or metadata.get("scope") != "development" or metadata.get("owner_actor") != requester_actor:
+            raise CapabilityError("TASK_BINDING_MISMATCH", "task source, scope, or device does not match the capability")
+        if task.get("state") not in {"RUNNING", "PLANNING", "VERIFYING"}:
+            raise CapabilityError("TASK_INACTIVE", "development capability is unusable outside an active task")
         return spec, writes, tests, repairs, total
 
     # ---- operations --------------------------------------------------------------------------
     def authorize_write(self, capability_id: str, *, device_id: str, user_id: str, op_id: str,
-                        rel_path: str, size: int, content_sha256: str) -> str:
+                        rel_path: str, size: int, content_sha256: str,
+                        supervisor_store: Any, task_id: str, requester_actor: str) -> str:
         """Validate one write against every bound, then record it. Returns the canonical target path."""
         if not re.fullmatch(r"[0-9a-f]{64}", content_sha256 or ""):
             raise CapabilityError("INVALID_HASH", "content digest must be SHA-256 hex")
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
-                spec, writes, _tests, _repairs, total = self._check_live(capability_id, device_id, user_id)
+                spec, writes, _tests, _repairs, total = self._check_live(
+                    capability_id, device_id, user_id, supervisor_store=supervisor_store,
+                    task_id=task_id, requester_actor=requester_actor,
+                )
                 if OP_WRITE not in spec["allowed_ops"]:
                     raise CapabilityError("OP_NOT_PERMITTED", "writes are not part of this plan")
                 _check_relative(rel_path)
@@ -285,14 +614,18 @@ class CapabilityStore:
                 raise
         return target
 
-    def authorize_test(self, capability_id: str, *, device_id: str, user_id: str, op_id: str, command: str) -> tuple[str, ...]:
+    def authorize_test(self, capability_id: str, *, device_id: str, user_id: str, op_id: str, command: str,
+                       supervisor_store: Any, task_id: str, requester_actor: str) -> tuple[str, ...]:
         if command not in TEST_COMMANDS:
             self._record_denial(capability_id, "test_denied", op_id, "COMMAND_NOT_ALLOWED", command)
             raise CapabilityError("COMMAND_NOT_ALLOWED", "test command is not on the allowlist")
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
-                spec, _writes, tests, _repairs, _total = self._check_live(capability_id, device_id, user_id)
+                spec, _writes, tests, _repairs, _total = self._check_live(
+                    capability_id, device_id, user_id, supervisor_store=supervisor_store,
+                    task_id=task_id, requester_actor=requester_actor,
+                )
                 if OP_TEST not in spec["allowed_ops"]:
                     raise CapabilityError("OP_NOT_PERMITTED", "test runs are not part of this plan")
                 if tests + 1 > spec["max_test_runs"]:
@@ -313,15 +646,79 @@ class CapabilityStore:
                 raise
         return TEST_COMMANDS[command]
 
-    def consume_repair(self, capability_id: str, *, device_id: str, user_id: str, op_id: str) -> int:
+    def artifact_manifest(
+        self,
+        capability_id: str,
+        *,
+        device_id: str,
+        user_id: str,
+        task_id: str,
+        requester_actor: str,
+        supervisor_store: Any,
+        op_id: str,
+        rel_paths: list[str],
+    ) -> dict[str, Any]:
+        """Return hashes/sizes only for explicitly listed, in-scope regular files."""
+        if not isinstance(rel_paths, list) or len(rel_paths) > MAX_ARTIFACTS_HARD or any(not isinstance(path, str) for path in rel_paths):
+            raise CapabilityError("ARTIFACT_LIMIT", "artifact file list exceeds the bounded manifest limit")
+        if len(set(rel_paths)) != len(rel_paths):
+            raise CapabilityError("REPLAY", "artifact manifest contains duplicate paths")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                spec, _writes, _tests, _repairs, _total = self._check_live(
+                    capability_id, device_id, user_id, supervisor_store=supervisor_store,
+                    task_id=task_id, requester_actor=requester_actor,
+                )
+                if OP_ARTIFACT not in spec["allowed_ops"]:
+                    raise CapabilityError("OP_NOT_PERMITTED", "artifact delivery is not part of this plan")
+                if self._db.execute("SELECT 1 FROM dev_operations WHERE op_id=?", (op_id,)).fetchone():
+                    raise CapabilityError("REPLAY", "operation id was already used")
+                files: list[dict[str, Any]] = []
+                total_bytes = 0
+                for rel_path in sorted(rel_paths):
+                    _check_relative(rel_path)
+                    if not _under_allowed(rel_path, tuple(spec["allowed_paths"])):
+                        raise CapabilityError("PATH_NOT_PERMITTED", "artifact is outside the plan's allowed paths")
+                    data = _read_regular_file_nofollow(spec["workspace_root"], rel_path, spec["max_file_bytes"])
+                    total_bytes += len(data)
+                    if total_bytes > spec["max_total_bytes"]:
+                        raise CapabilityError("QUOTA_TOTAL_BYTES", "artifact manifest exceeds the approved total bytes")
+                    files.append({"path": rel_path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+                manifest_json = json.dumps(files, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                manifest_digest = hashlib.sha256(manifest_json.encode("utf-8")).hexdigest()
+                self._db.execute(
+                    "INSERT INTO dev_operations(op_id,capability_id,kind,detail_json,created_at) VALUES (?,?,?,?,?)",
+                    (op_id, capability_id, OP_ARTIFACT, json.dumps({"files": len(files), "bytes": total_bytes, "manifest_sha256": manifest_digest}), self._clock()),
+                )
+                self._audit(capability_id, "artifact_manifest_created", files=len(files), bytes=total_bytes, manifest_sha256=manifest_digest)
+                self._db.execute("COMMIT")
+                return {"files": files, "total_bytes": total_bytes, "manifest_sha256": manifest_digest}
+            except Exception as failure:
+                self._db.execute("ROLLBACK")
+                if isinstance(failure, CapabilityError):
+                    self._record_denial(capability_id, "artifact_manifest_denied", op_id, failure.code, "manifest")
+                raise
+
+    def consume_repair(self, capability_id: str, *, device_id: str, user_id: str, op_id: str,
+                       supervisor_store: Any, task_id: str, requester_actor: str) -> int:
         """Spend one bounded repair attempt. Exhaustion stops the loop; it never grants more budget."""
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
-                spec, _w, _t, repairs, _total = self._check_live(capability_id, device_id, user_id)
+                spec, _w, _t, repairs, _total = self._check_live(
+                    capability_id, device_id, user_id, supervisor_store=supervisor_store,
+                    task_id=task_id, requester_actor=requester_actor,
+                )
+                if self._db.execute("SELECT 1 FROM dev_operations WHERE op_id=?", (op_id,)).fetchone():
+                    raise CapabilityError("REPLAY", "operation id was already used")
                 if repairs + 1 > spec["max_repairs"]:
                     raise CapabilityError("REPAIR_LIMIT", "repair budget is exhausted; request a new approval")
                 self._db.execute("UPDATE dev_capabilities SET repairs=repairs+1 WHERE capability_id=?", (capability_id,))
+                self._db.execute(
+                    "INSERT INTO dev_operations(op_id,capability_id,kind,detail_json,created_at) VALUES (?,?,?,?,?)",
+                    (op_id, capability_id, OP_REPAIR, json.dumps({"attempt": repairs + 1}), self._clock()),
+                )
                 self._audit(capability_id, "repair_consumed", op_id=op_id, attempt=repairs + 1)
                 self._db.execute("COMMIT")
                 return repairs + 1
@@ -348,10 +745,11 @@ class CapabilityStore:
 
     def _record_denial(self, capability_id: str, event: str, op_id: str, code: str, subject: str) -> None:
         # Denials are audited outside the failed transaction so they survive the rollback.
-        self._db.execute(
-            "INSERT INTO dev_audit(capability_id, event, detail_json, at) VALUES (?,?,?,?)",
-            (capability_id, event, json.dumps({"op_id": op_id, "code": code, "subject": subject[:200]}, sort_keys=True), self._clock()),
-        )
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO dev_audit(capability_id, event, detail_json, at) VALUES (?,?,?,?)",
+                (capability_id, event, json.dumps({"op_id": op_id, "code": code, "subject": subject[:200]}, sort_keys=True), self._clock()),
+            )
 
     def usage(self, capability_id: str) -> dict[str, Any]:
         _spec, state, _i, _e, writes, tests, repairs, total, _r = self._load(capability_id)
