@@ -216,6 +216,29 @@ def _progress_label(event: dict) -> tuple[str, str] | None:
             return "RUNNING", "Approved Mac action completed; continuing task"
         if payload.get("success") is False:
             return "FAILED", "Approved Mac action failed"
+    if event_type == "development.plan_approval_requested":
+        return "WAITING_APPROVAL", "Waiting for your approval of the bounded project plan"
+    if event_type == "development.plan_capability_issued":
+        return "RUNNING", "Approved project plan is active"
+    if event_type == "development.operation_started":
+        operation = payload.get("operation")
+        labels = {
+            "write_file": "Writing an approved project file",
+            "run_tests": "Running the approved project tests",
+            "artifact_manifest": "Checking approved project artifacts",
+        }
+        return ("RUNNING", labels[operation]) if operation in labels else None
+    if event_type == "development.file_written":
+        return "RUNNING", "Approved project file written"
+    if event_type == "development.tests_completed":
+        if payload.get("passed") is True:
+            return "RUNNING", "Approved project tests passed"
+        if payload.get("passed") is False:
+            return "RUNNING", "Project tests found failures; checking within the approved repair limit"
+    if event_type == "development.repair_started":
+        return "RUNNING", "Starting an approved repair attempt"
+    if event_type == "development.artifacts_collected":
+        return "RUNNING", "Approved project artifact manifest ready"
     if event_type == "task.state":
         target = payload.get("to")
         labels = {

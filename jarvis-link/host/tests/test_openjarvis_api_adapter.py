@@ -302,6 +302,18 @@ def test_host_progress_mapping_emits_only_user_facing_supervisor_stages(tmp_path
         "event_type": "link_task.completed",
         "payload": {"result_text": "private assistant answer"},
     }) is None
+    assert module._progress_label({
+        "event_type": "development.plan_approval_requested",
+        "payload": {"approval_id": "private-to-owner"},
+    }) == ("WAITING_APPROVAL", "Waiting for your approval of the bounded project plan")
+    assert module._progress_label({
+        "event_type": "development.operation_started",
+        "payload": {"operation": "run_tests", "command": "private command"},
+    }) == ("RUNNING", "Running the approved project tests")
+    assert module._progress_label({
+        "event_type": "development.tests_completed",
+        "payload": {"passed": False, "output": "private test output"},
+    }) == ("RUNNING", "Project tests found failures; checking within the approved repair limit")
 
 
 def test_host_publishes_new_durable_events_and_advances_checkpoint(tmp_path, monkeypatch):
