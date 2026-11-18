@@ -30,6 +30,7 @@ object CompanionProtocolTest {
         assistantTextJsonRoundTrip()
         endToEndEnvelopeRoundTrip(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
+        crashAfterRelayAcceptancePreservesExactEnvelope(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
         localTaskHistoryIsRestartSafe()
         concurrentLocalStateAndOutbox(hostCertificate, hostRoot, companion, now)
@@ -270,6 +271,32 @@ object CompanionProtocolTest {
         check(relay.acks.size == 2) { "redelivery should be ACKed without a second event" }
     }
 
+    private fun crashAfterRelayAcceptancePreservesExactEnvelope(
+        hostCert: DeviceCertificate, phone: SigningIdentity, phoneEnc: EncryptionIdentity,
+        phoneCert: DeviceCertificate, hostRoot: TrustedHostRoot, now: Long,
+    ) {
+        val directory = java.nio.file.Files.createTempDirectory("outbox-crash").toFile()
+        val relay = MemoryRelay(phone)
+        val file = File(directory, "outbox.json")
+        fun client() = JarvisLinkCompanion("tenant_sim", phone, phoneEnc, phoneCert, hostRoot, hostCert, relay,
+            FileMessageOutbox(file), MemoryMessageInbox(), now = { now }).also { it.setOnline(true) }
+        val first = client()
+        relay.crashAfterPost = true
+        val requestId = "ab".repeat(16)
+        check(runCatching { first.submitTask(TaskSubmission("recover after crash", setOf(SafeCapability.READ_ONLY), requestId)) }.isFailure)
+        check(relay.queued.size == 1)
+        val acceptedBytes = relay.queued.single()
+        check(FileMessageOutbox(file).list() == listOf(acceptedBytes)) { "accepted ciphertext was not durable before posting" }
+        relay.crashAfterPost = false
+        check(runCatching { first.submitTask(TaskSubmission("recover after crash", setOf(SafeCapability.READ_ONLY), requestId)) }.isFailure)
+        check(FileMessageOutbox(file).list() == listOf(acceptedBytes)) { "same ID replaced durable ciphertext" }
+        val restarted = client()
+        check(restarted.flushOutbox().size == 1)
+        check(relay.queued.size == 2 && relay.queued[1] == acceptedBytes) { "retry changed the signed bytes or ID" }
+        check(FileMessageOutbox(file).list().isEmpty())
+        directory.deleteRecursively()
+    }
+
     private fun approvalReviewIsDigestAndExpiryBound() {
         val review = ApprovalReview(
             approvalId = "a".repeat(32),
@@ -363,6 +390,7 @@ private class MemoryRelay(
     private val companion: SigningIdentity,
 ) : JarvisLinkRelayApi {
     val queued = mutableListOf<String>()
+    var crashAfterPost = false
     val incoming = mutableListOf<InboxItem>()
     val acks = mutableListOf<Pair<String, AckStatus>>()
 
@@ -370,6 +398,7 @@ private class MemoryRelay(
         verifyRequest(headers, "POST", "/v1/messages", envelopeJson.toByteArray(UTF_8), companion)
         val envelope = LinkEnvelope.parse(envelopeJson)
         queued += envelopeJson
+        if (crashAfterPost) throw AssertionError("simulated process death after relay acceptance")
         return RelayReceipt(envelope.header.messageId, "queued", envelope.header.expiresAtUnixMs)
     }
 

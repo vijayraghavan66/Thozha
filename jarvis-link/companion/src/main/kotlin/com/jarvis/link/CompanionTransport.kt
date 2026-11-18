@@ -40,6 +40,8 @@ class MemoryMessageOutbox : MessageOutbox {
     private val messages = linkedMapOf<String, String>()
     @Synchronized override fun enqueue(envelopeJson: String) {
         val envelope = LinkEnvelope.parse(envelopeJson)
+        val prior = messages[envelope.header.messageId]
+        require(prior == null || prior == envelopeJson) { "message ID already has different queued bytes" }
         messages.putIfAbsent(envelope.header.messageId, envelopeJson)
     }
     @Synchronized override fun list(): List<String> = messages.values.toList()
@@ -437,18 +439,22 @@ class JarvisLinkCompanion(
 
     private fun sendOrQueue(envelope: LinkEnvelope): DeliveryResult {
         val raw = envelope.toJson()
+        // Persist the exact signed ciphertext before any network operation. A crash after relay acceptance
+        // replays the same bytes and message ID; the relay treats that replay idempotently.
+        outbox.enqueue(raw)
         if (connectionState == LinkConnectionState.OFFLINE) {
-            outbox.enqueue(raw)
             return DeliveryResult(envelope.header.messageId, queuedOffline = true, receipt = null)
         }
         return try {
             val receipt = postEnvelope(raw, envelope)
+            outbox.remove(envelope.header.messageId)
             DeliveryResult(envelope.header.messageId, queuedOffline = false, receipt = receipt)
         } catch (failure: Exception) {
             if (failure is RelayHttpException && failure.isPermanent()) {
                 // The relay understood and refused the message (revoked, not recipient, expired, bad signature).
                 // Queuing it would retry a permanent failure forever, so surface it instead.
                 lastErrorCode = failure.code
+                outbox.remove(envelope.header.messageId)
                 throw failure
             }
             if (failure is SecurityException || (failure is RelayHttpException && failure.status == 401)) {
@@ -456,7 +462,6 @@ class JarvisLinkCompanion(
                 lastErrorCode = "AUTH_FAILED"
                 throw failure
             }
-            outbox.enqueue(raw)
             connectionState = LinkConnectionState.OFFLINE
             lastErrorCode = classify(failure)
             DeliveryResult(envelope.header.messageId, queuedOffline = true, receipt = null)

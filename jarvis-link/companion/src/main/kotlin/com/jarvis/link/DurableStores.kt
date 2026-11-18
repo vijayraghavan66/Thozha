@@ -29,7 +29,9 @@ class FileMessageOutbox(private val file: File) : MessageOutbox {
     }
     override fun enqueue(envelopeJson: String) = synchronized(FileStoreLock) {
         val items = readItems()
-        items[LinkEnvelope.parse(envelopeJson).header.messageId] = envelopeJson
+        val id = LinkEnvelope.parse(envelopeJson).header.messageId
+        require(items[id] == null || items[id] == envelopeJson) { "message ID already has different queued bytes" }
+        items[id] = envelopeJson
         writeAtomically(file, LinkJson.encode(mapOf("items" to items.values.toList())))
     }
     override fun list(): List<String> = synchronized(FileStoreLock) { readItems().values.toList() }
