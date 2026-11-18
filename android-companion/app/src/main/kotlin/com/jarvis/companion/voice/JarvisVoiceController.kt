@@ -19,7 +19,7 @@ import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.UUID
 
-private enum class CaptureMode { PUSH_TO_TALK, AUTOMATIC_ENDPOINTER }
+private enum class CaptureMode { PUSH_TO_TALK, AUTOMATIC_ENDPOINTER, BARGE_IN }
 
 /** Stable, UI-agnostic voice states for a lead-owned Compose or Activity control. */
 enum class VoiceControllerState { IDLE, LISTENING, PROCESSING, SPEAKING, ERROR }
@@ -56,6 +56,8 @@ class JarvisVoiceController(
         fun onRecognitionProvider(provider: VoiceRecognitionProvider) {}
         fun onOutputVoiceSelected(profile: VoiceOutputProfile) {}
         fun onPartialText(text: String) {}
+        /** The platform recognizer's speech-start/VAD event interrupted active TTS playback. */
+        fun onBargeInDetected() {}
         fun onFinalText(text: String) {}
         fun onError(error: VoiceControllerError) {}
     }
@@ -72,6 +74,7 @@ class JarvisVoiceController(
     private var closed = false
     private var activeRecognitionProvider = VoiceRecognitionProvider.SYSTEM_FALLBACK
     private val sessionGeneration = VoiceSessionGeneration()
+    private val bargeInGate = VoiceBargeInGate()
     private var captureMode: CaptureMode? = null
     private var activeUtteranceId: String? = null
     private var focusRequest: AudioFocusRequest? = null
@@ -107,6 +110,19 @@ class JarvisVoiceController(
     /** One natural speech turn; the platform endpointer closes the utterance at a pause. Still never auto-submits. */
     fun startVoiceTurn(): Boolean = startCapture(CaptureMode.AUTOMATIC_ENDPOINTER)
 
+    /**
+     * Start live platform ASR while the current TTS utterance is still playing. Android's
+     * recognizer owns microphone streaming and supplies its speech-start VAD event; on that
+     * event Jarvis stops its own TTS but leaves recognition running to capture the interruption.
+     * This depends on the installed recognition service and is not guaranteed to suppress speaker
+     * echo on every device. It never submits recognized text.
+     */
+    fun startBargeInTurn(): Boolean {
+        checkMainThread()
+        if (state != VoiceControllerState.SPEAKING || activeUtteranceId == null) return false
+        return startCapture(CaptureMode.BARGE_IN)
+    }
+
     private fun startCapture(mode: CaptureMode): Boolean {
         checkMainThread()
         if (closed) return false
@@ -115,13 +131,16 @@ class JarvisVoiceController(
             return false
         }
         if (state == VoiceControllerState.LISTENING) return captureMode == mode
+        val outputWasSpeaking = state == VoiceControllerState.SPEAKING && activeUtteranceId != null
+        if (mode == CaptureMode.BARGE_IN && !outputWasSpeaking) return false
         if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
             fail(VoiceControllerError.RECOGNIZER_UNAVAILABLE)
             return false
         }
-        if (state == VoiceControllerState.SPEAKING) stopSpeaking()
+        if (outputWasSpeaking && mode != CaptureMode.BARGE_IN) stopSpeaking()
         if (recognizer != null) cancelRecognition()
-        if (!requestFocus()) {
+        // Reuse the focus already held for speech output while starting a barge-in recognizer.
+        if (!outputWasSpeaking && !requestFocus()) {
             fail(VoiceControllerError.MICROPHONE_UNAVAILABLE)
             return false
         }
@@ -130,6 +149,7 @@ class JarvisVoiceController(
             val generation = sessionGeneration.begin()
             recognizer = speechRecognizer
             captureMode = mode
+            if (mode == CaptureMode.BARGE_IN) bargeInGate.arm()
             speechRecognizer.setRecognitionListener(recognitionListener(speechRecognizer, generation))
             post { if (sessionGeneration.isCurrent(generation)) listener.onRecognitionProvider(activeRecognitionProvider) }
             speechRecognizer.startListening(recognitionIntent())
@@ -137,12 +157,12 @@ class JarvisVoiceController(
             true
         } catch (_: SecurityException) {
             cancelRecognition()
-            abandonFocus()
+            if (outputWasSpeaking) stopSpeaking() else abandonFocus()
             fail(VoiceControllerError.PERMISSION_REQUIRED)
             false
         } catch (_: RuntimeException) {
-            abandonFocus()
             cancelRecognition()
+            if (outputWasSpeaking) stopSpeaking() else abandonFocus()
             fail(VoiceControllerError.MICROPHONE_UNAVAILABLE)
             false
         }
@@ -196,11 +216,7 @@ class JarvisVoiceController(
     fun stopSpeaking() {
         checkMainThread()
         if (closed) return
-        pendingSpeech = null
-        activeUtteranceId = null
-        try { textToSpeech?.stop() } catch (_: RuntimeException) { }
-        abandonFocus()
-        if (state == VoiceControllerState.SPEAKING) setState(VoiceControllerState.IDLE)
+        stopTts(preserveCapture = captureMode == CaptureMode.BARGE_IN && state == VoiceControllerState.LISTENING)
     }
 
     override fun close() {
@@ -212,6 +228,7 @@ class JarvisVoiceController(
         try { recognizer?.destroy() } catch (_: RuntimeException) { }
         recognizer = null
         captureMode = null
+        bargeInGate.disarm()
         try { textToSpeech?.stop(); textToSpeech?.shutdown() } catch (_: RuntimeException) { }
         textToSpeech = null
         activeUtteranceId = null
@@ -241,7 +258,12 @@ class JarvisVoiceController(
         private fun current() = !closed && recognizer === owner && sessionGeneration.isCurrent(generation)
 
         override fun onReadyForSpeech(params: Bundle?) { }
-        override fun onBeginningOfSpeech() { }
+        override fun onBeginningOfSpeech() {
+            if (current() && captureMode == CaptureMode.BARGE_IN && bargeInGate.onSpeechStarted()) {
+                stopTts(preserveCapture = true)
+                postIfCurrent(generation) { listener.onBargeInDetected() }
+            }
+        }
         override fun onRmsChanged(rmsdB: Float) { }
         override fun onBufferReceived(buffer: ByteArray?) { }
         override fun onEndOfSpeech() { if (current()) setState(VoiceControllerState.PROCESSING, generation) }
@@ -259,6 +281,7 @@ class JarvisVoiceController(
             val completedGeneration = sessionGeneration.invalidate()
             recognizer = null
             captureMode = null
+            bargeInGate.disarm()
             try { owner.destroy() } catch (_: RuntimeException) { }
             abandonFocus()
             if (text.isNullOrEmpty()) {
@@ -274,6 +297,7 @@ class JarvisVoiceController(
             val completedGeneration = sessionGeneration.invalidate()
             recognizer = null
             captureMode = null
+            bargeInGate.disarm()
             try { owner.destroy() } catch (_: RuntimeException) { }
             abandonFocus()
             fail(mapRecognitionError(error), completedGeneration)
@@ -314,6 +338,10 @@ class JarvisVoiceController(
             override fun onDone(utteranceId: String?) = post {
                 if (!closed && utteranceId != null && utteranceId == activeUtteranceId) {
                     activeUtteranceId = null
+                    if (captureMode == CaptureMode.BARGE_IN && state == VoiceControllerState.LISTENING) {
+                        bargeInGate.disarm()
+                        return@post
+                    }
                     abandonFocus()
                     setState(VoiceControllerState.IDLE)
                 }
@@ -322,6 +350,10 @@ class JarvisVoiceController(
             override fun onError(utteranceId: String?) = post {
                 if (!closed && utteranceId != null && utteranceId == activeUtteranceId) {
                     activeUtteranceId = null
+                    if (captureMode == CaptureMode.BARGE_IN && state == VoiceControllerState.LISTENING) {
+                        bargeInGate.disarm()
+                        return@post
+                    }
                     abandonFocus()
                     fail(VoiceControllerError.SYNTHESIS_FAILED)
                 }
@@ -329,6 +361,10 @@ class JarvisVoiceController(
             override fun onError(utteranceId: String?, errorCode: Int) = post {
                 if (!closed && utteranceId != null && utteranceId == activeUtteranceId) {
                     activeUtteranceId = null
+                    if (captureMode == CaptureMode.BARGE_IN && state == VoiceControllerState.LISTENING) {
+                        bargeInGate.disarm()
+                        return@post
+                    }
                     abandonFocus()
                     fail(VoiceControllerError.SYNTHESIS_FAILED)
                 }
@@ -388,12 +424,24 @@ class JarvisVoiceController(
 
     private fun cancelRecognition() {
         sessionGeneration.invalidate()
+        bargeInGate.disarm()
         val old = recognizer
         recognizer = null
         captureMode = null
         if (old != null) {
             try { old.cancel() } catch (_: RuntimeException) { }
             try { old.destroy() } catch (_: RuntimeException) { }
+        }
+    }
+
+    private fun stopTts(preserveCapture: Boolean) {
+        pendingSpeech = null
+        activeUtteranceId = null
+        bargeInGate.disarm()
+        try { textToSpeech?.stop() } catch (_: RuntimeException) { }
+        if (!preserveCapture) {
+            abandonFocus()
+            if (state == VoiceControllerState.SPEAKING) setState(VoiceControllerState.IDLE)
         }
     }
 

@@ -36,6 +36,17 @@ object VoicePolicyChecks {
         check(second != first && turn.isCurrent(second) && !turn.isCurrent(first)) {
             "a restarted voice turn must ignore late callbacks from the previous turn"
         }
-        println("Voice policy checks passed: 9 assertions")
+
+        val bargeIn = VoiceBargeInGate()
+        check(!bargeIn.onSpeechStarted()) { "unarmed speech activity must not interrupt output" }
+        bargeIn.arm()
+        check(bargeIn.onSpeechStarted()) { "the first platform VAD speech-start must interrupt output" }
+        check(!bargeIn.onSpeechStarted()) { "one recognition turn must emit only one interruption" }
+        bargeIn.arm()
+        bargeIn.disarm()
+        check(!bargeIn.onSpeechStarted()) { "cancellation or TTS completion must disarm barge-in" }
+        bargeIn.arm()
+        check(bargeIn.onSpeechStarted()) { "a new listening turn must be recoverable after interruption" }
+        println("Voice policy checks passed: 14 assertions")
     }
 }

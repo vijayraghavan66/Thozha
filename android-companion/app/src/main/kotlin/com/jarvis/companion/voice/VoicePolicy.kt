@@ -72,3 +72,19 @@ internal class VoiceSessionGeneration {
     fun invalidate(): Long = ++value
     fun isCurrent(session: Long): Boolean = session == value
 }
+
+/** One-shot speech-start gate used while platform ASR listens through assistant playback. */
+internal class VoiceBargeInGate {
+    private var armed = false
+
+    fun arm() { armed = true }
+
+    fun disarm() { armed = false }
+
+    /** Returns true only for the first VAD speech-start event in the active listening turn. */
+    fun onSpeechStarted(): Boolean {
+        if (!armed) return false
+        armed = false
+        return true
+    }
+}
