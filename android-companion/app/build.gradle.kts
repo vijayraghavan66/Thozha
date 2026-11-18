@@ -161,3 +161,11 @@ tasks.register<JavaExec>("verifyLinkProtocol") {
     args(rootProject.file("../jarvis-link/fixtures/envelope-v1.test.json").absolutePath)
 }
 
+
+tasks.register<JavaExec>("verifyExecutionLanes") {
+    group = "verification"
+    description = "Checks sends and local refresh can proceed while sync is blocked."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.ui.ExecutionLanesCheck")
+}

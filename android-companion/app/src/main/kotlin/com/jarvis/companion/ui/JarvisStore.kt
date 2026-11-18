@@ -17,7 +17,6 @@ import com.jarvis.link.LinkStatus
 import com.jarvis.link.SafeCapability
 import com.jarvis.link.TaskSubmission
 import java.util.UUID
-import java.util.concurrent.Executors
 
 enum class Tab(val label: String) { HOME("Home"), ACTIVITY("Activity"), APPROVALS("Approvals"), LIVE("Live") }
 
@@ -34,9 +33,7 @@ val ActiveStates = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING
  */
 class JarvisStore(private val app: Context) {
     private val main = Handler(Looper.getMainLooper())
-    private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "jarvis-ui-io").apply { isDaemon = true } }
-    private val sendIo = Executors.newSingleThreadExecutor { r -> Thread(r, "jarvis-ui-send").apply { isDaemon = true } }
-    private val syncIo = Executors.newSingleThreadExecutor { r -> Thread(r, "jarvis-ui-sync").apply { isDaemon = true } }
+    private val lanes = ExecutionLanes()
     private val sessions = ChatSessions(app)
     private var destroyed = false
 
@@ -108,7 +105,7 @@ class JarvisStore(private val app: Context) {
     fun syncNow() = ui {
         if (syncing) return@ui
         syncing = true
-        background(syncIo) {
+        background(lanes.sync) {
             runCatching { LinkBackgroundSync.run(app) }
             ui { syncing = false }
             refreshLocal()
@@ -132,7 +129,7 @@ class JarvisStore(private val app: Context) {
         submitting = true
         draft = ""
         notice = ""
-        background(sendIo) {
+        background(lanes.send) {
             val runtime = LinkService.runtime(app)
             if (runCatching { runtime.recordLocalTaskRequest(requestId, text, transport = transport) }.isFailure) {
                 ui {
@@ -218,9 +215,7 @@ class JarvisStore(private val app: Context) {
 
     fun destroy() {
         destroyed = true
-        io.shutdownNow()
-        sendIo.shutdownNow()
-        syncIo.shutdownNow()
+        lanes.close()
         main.removeCallbacksAndMessages(null)
     }
 
@@ -228,7 +223,7 @@ class JarvisStore(private val app: Context) {
         main.post { if (!destroyed) block() }
     }
 
-    private fun background(executor: java.util.concurrent.ExecutorService = io, block: () -> Unit) {
+    private fun background(executor: java.util.concurrent.ExecutorService = lanes.local, block: () -> Unit) {
         executor.execute {
             try {
                 block()
