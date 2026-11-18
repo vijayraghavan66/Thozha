@@ -12,7 +12,8 @@ object LocalAiRuntimeChecks {
         tamperedModelIsRejected()
         runtimeNeverFabricatesAnAnswerWithoutABackend()
         runtimeLifecycleAndCancellationUseInjectedBackend()
-        println("Local AI runtime checks passed: 4 cases; fake backend used only for lifecycle tests")
+        routingIsExplicitAndDeterministic()
+        println("Local AI runtime checks passed: 5 cases; fake backend used only for lifecycle tests")
     }
 
     private fun explicitImportRequiresConsentAndVerifiesPrivateArtifact() {
@@ -82,6 +83,25 @@ object LocalAiRuntimeChecks {
             runtime.close()
             check(runtime.status().phase == LocalAiPhase.CLOSED)
         } finally { dir.deleteRecursively() }
+    }
+
+    private fun routingIsExplicitAndDeterministic() {
+        val id = "routing-test-request-0001"
+        val simple = "What is Java?"
+        val complex = "Create a project and write Kotlin code, then run tests."
+        check(RequestRoutingPolicy.route(id, simple, LocalAiRequestMode.AUTO, true) is RequestRoute.Local)
+        check(RequestRoutingPolicy.route(id, simple, LocalAiRequestMode.AUTO, false) is RequestRoute.Mac)
+        check(RequestRoutingPolicy.route(id, complex, LocalAiRequestMode.AUTO, true) is RequestRoute.Mac)
+        val unavailable = RequestRoutingPolicy.route(id, simple, LocalAiRequestMode.LOCAL_ONLY, false)
+        check((unavailable as? RequestRoute.Rejected)?.code == RouteError.LOCAL_MODEL_UNAVAILABLE)
+        val needsMac = RequestRoutingPolicy.route(id, complex, LocalAiRequestMode.LOCAL_ONLY, true)
+        check((needsMac as? RequestRoute.Rejected)?.code == RouteError.LOCAL_CANNOT_HANDLE)
+        check(RequestRoutingPolicy.route(id, simple, LocalAiRequestMode.MAC_ONLY, true) is RequestRoute.Mac)
+        check(RequestRoutingPolicy.route(id, simple, LocalAiRequestMode.LOCAL_ONLY, false, isExactFastCommand = true) is RequestRoute.FastCommandUpstream)
+        check((RequestRoutingPolicy.route("bad", simple, LocalAiRequestMode.AUTO, true) as? RequestRoute.Rejected)?.code == RouteError.INVALID_REQUEST)
+        check(RequestRoutingPolicy.routeAfterLocalFailure(id, LocalAiRequestMode.AUTO, partialOutputProduced = false) is RequestRoute.Mac)
+        check((RequestRoutingPolicy.routeAfterLocalFailure(id, LocalAiRequestMode.AUTO, partialOutputProduced = true) as? RequestRoute.Rejected)?.code == RouteError.LOCAL_INFERENCE_FAILED)
+        check((RequestRoutingPolicy.routeAfterLocalFailure(id, LocalAiRequestMode.LOCAL_ONLY, partialOutputProduced = false) as? RequestRoute.Rejected)?.code == RouteError.LOCAL_INFERENCE_FAILED)
     }
 
     private fun descriptor(bytes: ByteArray, requiresLicenseAcceptance: Boolean = true): LocalModelDescriptor {
