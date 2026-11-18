@@ -78,6 +78,17 @@ tasks.register<JavaExec>("verifyLocalAi") {
     mainClass.set("com.jarvis.companion.localai.LocalAiRuntimeChecks")
 }
 
+tasks.register<JavaExec>("verifyVoicePolicy") {
+    group = "verification"
+    description = "Checks offline voice choice, language preference, audio-focus policy, and stale-session callback guards."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.voice.VoicePolicyChecks")
+}
+
 if (!hasFirebaseConfig) {
     tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
         exclude("**/notifications/**")

@@ -1,6 +1,10 @@
 package com.jarvis.companion.ui
 
+import android.Manifest
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,16 +15,33 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.jarvis.companion.link.LinkMode
 import com.jarvis.companion.link.LinkSettings
 import com.jarvis.companion.presentation.TaskTone
 import com.jarvis.companion.presentation.TaskStates
+import com.jarvis.companion.voice.JarvisVoiceController
+import com.jarvis.companion.voice.VoiceControllerError
+import com.jarvis.companion.voice.VoiceControllerState
+import com.jarvis.companion.voice.VoiceRecognitionProvider
 
 /**
  * Live connection facts: the Mac pairing, the relay path, the Telegram transport, and work that is running now.
@@ -77,6 +98,9 @@ fun LiveScreen(store: JarvisStore) {
                 )
             }
 
+            item { SectionLabel("Voice") }
+            item { LiveVoiceControls(store) }
+
             item { SectionLabel("Telegram") }
             item {
                 FactCard(
@@ -126,6 +150,125 @@ fun LiveScreen(store: JarvisStore) {
             }
             item { Spacer(Modifier.height(16.dp)) }
         }
+    }
+}
+
+/** One platform-endpointed voice turn; recognized speech goes to the normal editable draft, never auto-sends. */
+@Composable
+private fun LiveVoiceControls(store: JarvisStore) {
+    val context = LocalContext.current
+    val voiceState = remember { mutableStateOf(VoiceControllerState.IDLE) }
+    val providerLabel = remember { mutableStateOf("Not used in this session") }
+    val outputLabel = remember { mutableStateOf("Installed platform voice") }
+    val voice = remember(context, store) {
+        JarvisVoiceController(context, object : JarvisVoiceController.Listener {
+            override fun onStateChanged(state: VoiceControllerState) { voiceState.value = state }
+            override fun onRecognitionProvider(provider: VoiceRecognitionProvider) {
+                providerLabel.value = if (provider == VoiceRecognitionProvider.ON_DEVICE) {
+                    "On-device recognition"
+                } else {
+                    "System recognition; provider may use network"
+                }
+            }
+            override fun onOutputVoiceSelected(profile: com.jarvis.companion.voice.VoiceOutputProfile) {
+                outputLabel.value = "${profile.name} · ${profile.localeTag}" + if (profile.offline) " · offline" else " · system"
+            }
+            override fun onFinalText(text: String) {
+                store.draft = text
+                store.notice = "Voice captured. Review the transcript, then tap Send."
+                store.selectTab(Tab.HOME)
+            }
+            override fun onError(error: VoiceControllerError) {
+                store.notice = when (error) {
+                    VoiceControllerError.PERMISSION_REQUIRED -> "Microphone permission is required. Tap Start voice turn to allow it."
+                    VoiceControllerError.RECOGNIZER_UNAVAILABLE -> "Speech recognition is unavailable. Use the typed composer."
+                    VoiceControllerError.NO_MATCH -> "I didn't catch that. Try another voice turn or type your request."
+                    VoiceControllerError.SPEECH_TIMEOUT -> "No speech was detected. Start a new voice turn when ready."
+                    VoiceControllerError.NETWORK_OR_SERVICE -> "The system speech service couldn't complete recognition."
+                    VoiceControllerError.RECOGNIZER_BUSY -> "Speech recognition is busy. Try again shortly."
+                    VoiceControllerError.LANGUAGE_UNAVAILABLE -> "Speech recognition doesn't support the current language."
+                    VoiceControllerError.SYNTHESIS_UNAVAILABLE, VoiceControllerError.SYNTHESIS_FAILED -> "The installed speech voice is unavailable."
+                    VoiceControllerError.MICROPHONE_UNAVAILABLE -> "The microphone could not start. Check whether another app is using it."
+                    VoiceControllerError.UNKNOWN -> "Voice turn failed. Use the typed composer."
+                }
+            }
+        })
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(voice, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) voice.cancel() }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            voice.close()
+        }
+    }
+    val state = voiceState.value
+    val answer = remember(store.entries, store.session.id) {
+        store.entriesInSession().lastOrNull {
+            (it["state"] as? String) == "COMPLETED" && it["body_integrity_failed"] != true
+        }?.let { entry ->
+            (entry["body"] as? String)?.takeIf(String::isNotBlank)
+                ?: (entry["summary"] as? String).orEmpty()
+        }.orEmpty()
+    }
+    SurfaceCard {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            BasicText(
+                when (state) {
+                    VoiceControllerState.LISTENING -> "Listening; Android will finish after a pause."
+                    VoiceControllerState.PROCESSING -> "Transcribing speech…"
+                    VoiceControllerState.SPEAKING -> "Speaking. You can stop the current response."
+                    VoiceControllerState.ERROR -> "Voice is unavailable. Typed requests still work."
+                    VoiceControllerState.IDLE -> "Start one spoken turn; review the transcript before sending."
+                },
+                style = JarvisType.Body.copy(color = JarvisColor.Text),
+            )
+            BasicText("Recognition · ${providerLabel.value}", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+            BasicText("Speech output · ${outputLabel.value}", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted), maxLines = 2)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                VoiceControlButton(
+                    label = when (state) {
+                        VoiceControllerState.LISTENING, VoiceControllerState.PROCESSING -> "Cancel voice turn"
+                        VoiceControllerState.SPEAKING -> "Stop speaking"
+                        else -> "Start voice turn"
+                    },
+                    enabled = true,
+                ) {
+                    when (state) {
+                        VoiceControllerState.LISTENING, VoiceControllerState.PROCESSING -> voice.cancel()
+                        VoiceControllerState.SPEAKING -> voice.stopSpeaking()
+                        else -> {
+                            if (!JarvisVoiceController.hasMicrophonePermission(context)) {
+                                store.notice = "Allow microphone access, then start a voice turn."
+                                store.permissionRequester?.invoke(Manifest.permission.RECORD_AUDIO)
+                            } else {
+                                voice.startVoiceTurn()
+                            }
+                        }
+                    }
+                }
+                VoiceControlButton(label = "Speak latest reply", enabled = answer.isNotBlank()) {
+                    if (state == VoiceControllerState.LISTENING || state == VoiceControllerState.PROCESSING) voice.cancel()
+                    voice.speak(answer)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceControlButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (enabled) JarvisColor.SurfaceRaised else JarvisColor.Surface)
+            .semantics { contentDescription = label; role = Role.Button }
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        BasicText(label, style = JarvisType.Caption.copy(color = if (enabled) JarvisColor.Text else JarvisColor.TextMuted))
     }
 }
 

@@ -62,6 +62,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.jarvis.companion.voice.JarvisVoiceController
 import com.jarvis.companion.voice.VoiceControllerError
 import com.jarvis.companion.voice.VoiceControllerState
+import com.jarvis.companion.voice.VoiceRecognitionProvider
 import com.jarvis.companion.presentation.AiEvidence
 import com.jarvis.companion.presentation.ConnectionPresentation
 import com.jarvis.companion.presentation.ConversationPresentation
@@ -78,6 +79,13 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit) {
     val voice = remember(context, store) {
         JarvisVoiceController(context, object : JarvisVoiceController.Listener {
             override fun onStateChanged(state: VoiceControllerState) { voiceState.value = state }
+            override fun onRecognitionProvider(provider: VoiceRecognitionProvider) {
+                store.notice = if (provider == VoiceRecognitionProvider.ON_DEVICE) {
+                    "Speech is being recognized on this device."
+                } else {
+                    "Android's system speech service is active and may use network processing."
+                }
+            }
             override fun onPartialText(text: String) { voicePreview.value = text }
             override fun onFinalText(text: String) {
                 voicePreview.value = ""
