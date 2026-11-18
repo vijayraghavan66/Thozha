@@ -54,6 +54,9 @@ dependencies {
         implementation("com.google.firebase:firebase-messaging")
     }
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // Pinned to 0.16.1: official LiteRT-LM docs confirm this metadata is compatible with Kotlin 2.2.x.
+    // We ship no model weights; users must explicitly import an eligible local model.
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
     // Native Compose UI (Jarvis 3.0). BOM pins the Compose library versions together.
     implementation(platform("androidx.compose:compose-bom:2026.06.01"))
     implementation("androidx.compose.ui:ui")
@@ -62,6 +65,17 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.13.0")
+}
+
+tasks.register<JavaExec>("verifyLocalAi") {
+    group = "verification"
+    description = "Checks local model storage, explicit license gating, backend lifecycle and cancellation."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.localai.LocalAiRuntimeChecks")
 }
 
 if (!hasFirebaseConfig) {
