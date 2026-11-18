@@ -155,6 +155,10 @@ class LinkRuntime(
     fun submit(relayUrl: String, submission: TaskSubmission, ttlMs: Long?): DeliveryResult =
         companion(relayUrl).submitTask(submission, ttlMs)
 
+    /** Submits an allowlisted deterministic command through the signed encrypted outbox. */
+    fun submitFastCommand(relayUrl: String, command: FastCommandRequest, clientRequestId: String): DeliveryResult =
+        companion(relayUrl).submitFastCommand(command, clientRequestId = clientRequestId)
+
     /** Polls the relay and keeps approval requests and task updates in local (non-secret) state until decided. */
     fun poll(relayUrl: String, limit: Int = 20): PollResult {
         return companion(relayUrl).pollInbox(limit, ::persistInboxEvent)

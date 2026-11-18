@@ -184,8 +184,14 @@ class JarvisLinkHost:
             command = payload.get("command")
             handler = getattr(self.supervisor, "fast_command", None)
             if command == "mac.status" and set(payload) == {"command", "version"}:
-                # A response from this authenticated host is the live reachability proof.
-                return {"kind": "fast.result", "command": command, "online": True}
+                if handler is None:
+                    raise TaskEnvelopeError("supervisor fast status is unavailable")
+                result = handler(command=command, requester=envelope.from_device_id)
+                return {
+                    "kind": "fast.result", "command": command, **result,
+                    "state": "COMPLETED",
+                    "summary": "Mac is online." + (" AI is available." if result.get("ai_available") else " AI is unavailable."),
+                }
             if command == "task.status" and set(payload) == {"command", "task_id", "version"}:
                 task_id = payload.get("task_id")
                 if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
@@ -193,7 +199,10 @@ class JarvisLinkHost:
                 self._require_task_owner(envelope.from_device_id, task_id)
                 if handler is None:
                     raise TaskEnvelopeError("typed task status is unavailable")
-                return {"kind": "fast.result", "command": command, **handler(command=command, task_id=task_id, requester=envelope.from_device_id)}
+                result = handler(command=command, task_id=task_id, requester=envelope.from_device_id)
+                result.pop("task_id", None)
+                return {"kind": "fast.result", "command": command, "queried_task_id": task_id, **result,
+                        "state": "COMPLETED", "summary": f"Task status: {result.get('state', 'unknown')}."}
             if command == "app.open" and set(payload) == {"app", "command", "version"} and payload.get("app") == "Calculator":
                 if handler is None:
                     raise TaskEnvelopeError("supervisor fast command approval is unavailable")
@@ -205,7 +214,7 @@ class JarvisLinkHost:
                 if isinstance(task_id, str) and observer is not None:
                     observer(task_id=task_id, idempotency_key=envelope.message_id,
                              companion_id=envelope.from_device_id)
-                return {"kind": "fast.result", "command": command, **result}
+                return {"kind": "fast.result", "command": command, "summary": "Calculator requires your approval on this phone.", **result}
             raise TaskEnvelopeError("unsupported typed fast command")
 
         if envelope.kind == "task.submit":

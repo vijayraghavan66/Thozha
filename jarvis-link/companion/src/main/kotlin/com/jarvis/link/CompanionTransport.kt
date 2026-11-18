@@ -403,11 +403,12 @@ class JarvisLinkCompanion(
         return sendOrQueue(envelope)
     }
 
-    fun submitFastCommand(command: FastCommandRequest, ttlMs: Long? = null): DeliveryResult {
+    fun submitFastCommand(command: FastCommandRequest, ttlMs: Long? = null, clientRequestId: String? = null): DeliveryResult {
         val envelope = LinkCrypto.createEnvelope(
             tenantId, signingIdentity, hostCertificate, hostRoot,
             "fast.command", command.toJson(), nowUnixMs = now(),
             ttlMs = ttlMs ?: (2 * 60 * 1000L),
+            messageId = clientRequestId,
         )
         return sendOrQueue(envelope)
     }

@@ -70,8 +70,10 @@ def test_typed_fast_mac_status_bypasses_task_submission():
     env = task_envelope(host, phone, host_id, phone_id, host_cert,
                         {"command": "mac.status", "version": 1}, kind="fast.command")
     result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
-    assert result["result"] == {"kind": "fast.result", "command": "mac.status", "online": True}
-    assert supervisor.calls == []
+    assert result["result"] == {"kind": "fast.result", "command": "mac.status", "state": "COMPLETED",
+                                 "summary": "Mac is online. AI is available.", "online": True, "ai_available": True}
+    assert [call[0] for call in supervisor.calls] == ["fast_command"]
+    assert supervisor.calls[0][1]["command"] == "mac.status"
 
 
 def test_fast_command_rejects_extra_fields_and_unallowlisted_app():
@@ -94,6 +96,7 @@ def test_fast_calculator_routes_to_exact_supervisor_approval_without_task_submis
     assert result["result"] == {
         "kind": "fast.result", "command": "app.open", "state": "WAITING_APPROVAL",
         "operation": "mcp:jarvis_mac:open_app", "target": "Calculator",
+        "summary": "Calculator requires your approval on this phone.",
     }
     assert [call[0] for call in supervisor.calls] == ["fast_command"]
 

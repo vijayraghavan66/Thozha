@@ -48,6 +48,8 @@ class MockSupervisor:
     def fast_command(self, *, command: str, **arguments: Any) -> dict[str, Any]:
         """Deterministic test double; Calculator is represented only as pending approval."""
         self.calls.append(("fast_command", {"command": command, **arguments}))
+        if command == "mac.status":
+            return {"state": "ONLINE", "online": True, "ai_available": True}
         if command == "task.status":
             task_id = arguments["task_id"]
             task = self.tasks.get(task_id)
