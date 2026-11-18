@@ -82,9 +82,11 @@ class LinkRuntime(
      */
     private val transportFactory: ((String) -> RelayTransport?)? = null,
 ) {
-    private fun load(): Map<String, Any> = state.read()?.let { LinkJson.parseObject(it) } ?: emptyMap()
+    companion object { private val stateLock = Any(); private val syncLock = Any() }
 
-    private fun save(values: Map<String, Any?>) {
+    private fun load(): Map<String, Any> = synchronized(stateLock) { state.read()?.let { LinkJson.parseObject(it) } ?: emptyMap() }
+
+    private fun save(values: Map<String, Any?>) = synchronized(stateLock) {
         val merged = linkedMapOf<String, Any?>()
         merged.putAll(load())
         merged.putAll(values)
@@ -164,7 +166,7 @@ class LinkRuntime(
      * requests that have not been announced yet. Announced IDs are stored so a request notifies once.
      * Errors are reported as codes; queued messages stay queued for the next attempt.
      */
-    fun syncNow(relayUrl: String): SyncReport {
+    fun syncNow(relayUrl: String): SyncReport = synchronized(syncLock) {
         var flushed = 0
         var error = ""
         try {
@@ -195,8 +197,8 @@ class LinkRuntime(
     private fun announcedIds(): Set<String> =
         ((load()["announced_approval_ids"] as? List<String>) ?: emptyList()).toSet()
 
-    private fun markAnnounced(ids: List<String>) {
-        if (ids.isEmpty()) return
+    private fun markAnnounced(ids: List<String>) = synchronized(stateLock) {
+        if (ids.isEmpty()) return@synchronized
         val merged = (announcedIds() + ids).toList().takeLast(200)
         save(mapOf("announced_approval_ids" to merged))
     }
@@ -222,7 +224,7 @@ class LinkRuntime(
             review.canonicalArgumentsDigest,
             continuationObjective,
         )
-        save(mapOf("approvals" to storedApprovals().filter { it.approvalId != approvalId }.map(::approvalMap)))
+        synchronized(stateLock) { save(mapOf("approvals" to storedApprovals().filter { it.approvalId != approvalId }.map(::approvalMap))) }
         return linkedMapOf(
             "decision" to decision,
             "approval_id" to approvalId,
@@ -259,7 +261,7 @@ class LinkRuntime(
         (load()["conversation"] as? List<Map<String, Any>>) ?: emptyList()
 
     /** Stores a local USB task under its API idempotency key before the request can time out. */
-    fun recordLocalTaskRequest(idempotencyKey: String, text: String, transport: String = "api") {
+    fun recordLocalTaskRequest(idempotencyKey: String, text: String, transport: String = "api") = synchronized(stateLock) {
         require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid task idempotency key" }
         require(transport in setOf("api", "link", "telegram")) { "invalid conversation transport" }
         val cleaned = text.trim()
@@ -288,6 +290,7 @@ class LinkRuntime(
         val cleaned = text.trim()
         require(cleaned.isNotEmpty() && cleaned.toByteArray(Charsets.UTF_8).size <= 4096) { "message must be 1–4096 bytes" }
         val result = submit(relayUrl, TaskSubmission(cleaned, setOf(SafeCapability.ASSISTANT)), null)
+        synchronized(stateLock) {
         val entries = conversation().toMutableList()
         entries.add(linkedMapOf(
             "message_id" to result.messageId,
@@ -298,12 +301,13 @@ class LinkRuntime(
             "updated_at_unix_ms" to now(),
         ))
         save(mapOf("conversation" to entries.takeLast(100)))
+        }
         return linkedMapOf("message_id" to result.messageId, "queued_offline" to result.queuedOffline)
     }
 
-    private fun applyToConversation(messageId: String, taskId: String, state: String, summary: String) {
+    private fun applyToConversation(messageId: String, taskId: String, state: String, summary: String) = synchronized(stateLock) {
         val entries = conversation().map { entry ->
-            if (entry["message_id"] == messageId) LinkedHashMap(entry).apply {
+            if (entry["message_id"] == messageId && !(entry["state"] in setOf("COMPLETED", "FAILED", "CANCELLED", "REJECTED") && state in setOf("SENT", "QUEUED", "RUNNING"))) LinkedHashMap(entry).apply {
                 put("state", state); put("summary", summary); put("task_id", taskId); put("updated_at_unix_ms", now())
             } else entry
         }
@@ -311,7 +315,7 @@ class LinkRuntime(
     }
 
     /** Approval/continuation replies may reference the decision envelope; task ID is the stable fallback. */
-    private fun applyToConversationTask(taskId: String, state: String, summary: String) {
+    private fun applyToConversationTask(taskId: String, state: String, summary: String) = synchronized(stateLock) {
         val entries = conversation().map { entry ->
             if (entry["task_id"] == taskId) LinkedHashMap(entry).apply {
                 put("state", state); put("summary", summary); put("updated_at_unix_ms", now())
@@ -326,7 +330,7 @@ class LinkRuntime(
         return ((values["last_sync_ms"] as? Long) ?: 0L) to ((values["last_sync_error"] as? String) ?: "")
     }
 
-    internal fun recordEvents(events: List<CompanionEvent>) {
+    internal fun recordEvents(events: List<CompanionEvent>) = synchronized(stateLock) {
         var approvals = storedApprovals().toMutableList()
         val updates = ((load()["updates"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
         for (event in events) {

@@ -32,6 +32,7 @@ object CompanionProtocolTest {
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
         localTaskHistoryIsRestartSafe()
+        concurrentLocalStateAndOutbox(hostCertificate, hostRoot, companion, now)
         relayClientRequiresHttpsAndCanonicalTenantIds()
         sharedFixtureInterop(args.firstOrNull() ?: System.getProperty("jarvis.fixture", "../fixtures/envelope-v1.test.json"))
         println("Jarvis Link Companion protocol checks passed.")
@@ -318,6 +319,31 @@ object CompanionProtocolTest {
         check(entry["transport"] == "link")
         check(entry["state"] == "COMPLETED")
         check(entry["summary"] == "Java is a programming language.")
+        directory.deleteRecursively()
+    }
+
+    private fun concurrentLocalStateAndOutbox(hostCert: DeviceCertificate, hostRoot: TrustedHostRoot, phone: SigningIdentity, now: Long) {
+        val directory = java.nio.file.Files.createTempDirectory("link-concurrent").toFile()
+        val stateFile = File(directory, "state.json")
+        fun runtime() = LinkRuntime(SoftwareTestKeyProvider(File(directory, "keys.json")), FileLinkStateStore(stateFile), directory, now = { now })
+        val first = runtime()
+        val second = runtime()
+        val threads = (0 until 30).map { i -> Thread {
+            val id = i.toString(16).padStart(32, '0')
+            (if (i % 2 == 0) first else second).recordLocalTaskRequest(id, "request $i", "telegram")
+        }.apply { start() } }
+        threads.forEach { it.join() }
+        check(first.conversation().size == 30) { "concurrent state updates lost requests" }
+        val id = "0".repeat(32)
+        first.recordLocalTaskResult(id, "a".repeat(32), "COMPLETED", "finished")
+        second.recordLocalTaskResult(id, "", "SENT", "")
+        check(first.conversation().first { it["message_id"] == id }["state"] == "COMPLETED")
+        val outboxFile = File(directory, "outbox.json")
+        val boxes = listOf(FileMessageOutbox(outboxFile), FileMessageOutbox(outboxFile))
+        val envelopes = (0 until 12).map { i -> LinkCrypto.createEnvelope("tenant_sim", phone, hostCert, hostRoot, "task.submit", "{}", nowUnixMs = now, messageId = (i + 100).toString(16).padStart(32, '0')).toJson() }
+        val workers = envelopes.mapIndexed { i, raw -> Thread { boxes[i % 2].enqueue(raw) }.apply { start() } }
+        workers.forEach { it.join() }
+        check(FileMessageOutbox(outboxFile).list().size == envelopes.size) { "concurrent outbox writers lost messages" }
         directory.deleteRecursively()
     }
 

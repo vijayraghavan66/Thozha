@@ -14,54 +14,49 @@ internal fun writeAtomically(target: File, text: String) {
 }
 
 /** Encrypted envelopes waiting for relay delivery. Survives restarts; replays are idempotent at the relay. */
+private object FileStoreLock
+
 class FileMessageOutbox(private val file: File) : MessageOutbox {
-    private val items = linkedMapOf<String, String>()
-
-    init {
+    private fun readItems(): LinkedHashMap<String, String> {
+        val items = linkedMapOf<String, String>()
         if (file.isFile) {
-            val stored = LinkJson.parseObject(file.readText(UTF_8))
             @Suppress("UNCHECKED_CAST")
-            (stored["items"] as? List<String>)?.forEach { raw -> items[LinkEnvelope.parse(raw).header.messageId] = raw }
+            (LinkJson.parseObject(file.readText(UTF_8))["items"] as? List<String>)?.forEach { raw ->
+                items[LinkEnvelope.parse(raw).header.messageId] = raw
+            }
         }
+        return items
     }
-
-    @Synchronized override fun enqueue(envelopeJson: String) {
+    override fun enqueue(envelopeJson: String) = synchronized(FileStoreLock) {
+        val items = readItems()
         items[LinkEnvelope.parse(envelopeJson).header.messageId] = envelopeJson
-        save()
+        writeAtomically(file, LinkJson.encode(mapOf("items" to items.values.toList())))
     }
-
-    @Synchronized override fun list(): List<String> = items.values.toList()
-
-    @Synchronized override fun remove(messageId: String) {
-        if (items.remove(messageId) != null) save()
+    override fun list(): List<String> = synchronized(FileStoreLock) { readItems().values.toList() }
+    override fun remove(messageId: String) = synchronized(FileStoreLock) {
+        val items = readItems()
+        if (items.remove(messageId) != null) writeAtomically(file, LinkJson.encode(mapOf("items" to items.values.toList())))
+        Unit
     }
-
-    private fun save() = writeAtomically(file, LinkJson.encode(mapOf("items" to items.values.toList())))
 }
 
-/**
- * Message IDs already processed, with expiry. Duplicate suppression must survive a restart, otherwise a
- * redelivered task could run twice after the companion process is killed between decrypt and ACK.
- */
+/** Durable replay IDs shared by all runtime instances in the process. */
 class FileMessageInbox(private val file: File) : MessageInbox {
-    private val expires = linkedMapOf<String, Long>()
-
-    init {
-        if (file.isFile) {
-            LinkJson.parseObject(file.readText(UTF_8)).forEach { (id, value) -> expires[id] = value as Long }
-        }
+    private fun readExpiry(): LinkedHashMap<String, Long> {
+        val entries = linkedMapOf<String, Long>()
+        if (file.isFile) LinkJson.parseObject(file.readText(UTF_8)).forEach { (id, value) -> entries[id] = value as Long }
+        return entries
     }
-
-    @Synchronized override fun recordIfNew(messageId: String, expiresAtUnixMs: Long): Boolean {
-        if (expires.containsKey(messageId)) return false
-        expires[messageId] = expiresAtUnixMs
-        save()
-        return true
+    override fun recordIfNew(messageId: String, expiresAtUnixMs: Long): Boolean = synchronized(FileStoreLock) {
+        val entries = readExpiry()
+        if (entries.containsKey(messageId)) return@synchronized false
+        entries[messageId] = expiresAtUnixMs
+        writeAtomically(file, LinkJson.encode(entries))
+        true
     }
-
-    @Synchronized override fun forgetExpired(nowUnixMs: Long) {
-        if (expires.entries.removeIf { it.value <= nowUnixMs }) save()
+    override fun forgetExpired(nowUnixMs: Long) = synchronized(FileStoreLock) {
+        val entries = readExpiry()
+        if (entries.entries.removeIf { it.value <= nowUnixMs }) writeAtomically(file, LinkJson.encode(entries))
+        Unit
     }
-
-    private fun save() = writeAtomically(file, LinkJson.encode(expires.toMap()))
 }
