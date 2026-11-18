@@ -70,13 +70,13 @@ fun JarvisApp(store: JarvisStore) {
     val imeVisible = WindowInsets.isImeVisible
 
     // Telegram carries each sync as a user message and a bot response. Five-second polling caused
-    // TDLib flood waits when send and sync shared the same bot chat; 10s keeps active work responsive
-    // while staying below Telegram's per-chat message rate after accounting for both directions.
+    // TDLib flood waits when send and sync share the same bot chat. Each sync is a Telegram message
+    // and each response is another; pace active work at 30s to keep the pair below observed flood limits.
     LaunchedEffect(Unit) {
         store.refreshLocal()
         while (true) {
             store.syncNow()
-            delay(if (store.hasActiveWork()) 10_000L else 30_000L)
+            delay(30_000L)
         }
     }
     LaunchedEffect(Unit) {
