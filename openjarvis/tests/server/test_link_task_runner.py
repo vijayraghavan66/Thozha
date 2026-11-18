@@ -105,7 +105,7 @@ def test_link_runner_executes_codex_agent_once_and_returns_persisted_digest(link
         "idempotency_key": "link-run-2026-11-16-0001",
     }
     response = client.post("/v1/jarvis/link/tasks", headers=headers, json=body)
-    assert response.status_code == 200
+    assert response.status_code == 200, response.json()
     result = response.json()
     assert result["state"] == "COMPLETED"
     assert result["summary"] == "Safe summary: Summarize this read-only task"
@@ -186,6 +186,64 @@ def test_link_request_and_codex_prompt_keep_newlines_and_literal_markers(link_cl
     assert response.json()["summary"] == "Safe summary: " + objective
     prompt = _serialize_messages([SimpleNamespace(role="user", content=objective)])
     assert prompt == "USER: " + objective
+
+
+def test_fast_mac_status_is_deterministic_and_does_not_call_agent(link_client):
+    client, _store, agent = link_client
+    response = client.post(
+        "/v1/jarvis/link/fast-command",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json={"command": "mac.status", "requester": "a" * 32},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"command": "mac.status", "state": "ONLINE", "online": True, "ai_available": True}
+    assert agent.calls == []
+
+
+def test_fast_task_status_is_owner_bound_and_does_not_call_agent(link_client):
+    client, store, agent = link_client
+    task = store.create_link_task(
+        "Read task status", capability_scope=["read_only"],
+        idempotency_key="fast-status-owner-check-0001", owner_actor="device:" + "a" * 32,
+    )
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    allowed = client.post("/v1/jarvis/link/fast-command", headers=headers,
+                          json={"command": "task.status", "requester": "a" * 32, "task_id": task["task_id"]})
+    denied = client.post("/v1/jarvis/link/fast-command", headers=headers,
+                         json={"command": "task.status", "requester": "b" * 32, "task_id": task["task_id"]})
+    assert allowed.status_code == 200 and allowed.json()["state"] == "CREATED"
+    assert denied.status_code == 403
+    assert agent.calls == []
+
+
+def test_fast_calculator_creates_exact_approval_without_invoking_agent(link_client):
+    client, store, agent = link_client
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    body = {"command": "app.open", "requester": "c" * 32, "app": "Calculator", "idempotency_key": "d" * 32}
+    response = client.post("/v1/jarvis/link/fast-command", headers=headers, json=body)
+    assert response.status_code == 200, response.json()
+    result = response.json()
+    assert result["state"] == "WAITING_APPROVAL"
+    assert result["approval"]["operation"] == "mcp:jarvis_mac:open_app"
+    assert result["approval"]["target"] == "Calculator"
+    assert result["approval"]["canonical_arguments_digest"]
+    approvals = [row for row in store.pending_approvals(20) if row["task_id"] == result["task_id"]]
+    assert len(approvals) == 1
+    assert approvals[0]["status"] == "PENDING"
+    replay = client.post("/v1/jarvis/link/fast-command", headers=headers, json=body)
+    assert replay.status_code == 200
+    assert replay.json()["task_id"] == result["task_id"]
+    assert replay.json()["approval"]["approval_id"] == result["approval"]["approval_id"]
+    assert agent.calls == []
+
+
+def test_fast_command_rejects_unapproved_app_and_extra_fields(link_client):
+    client, _store, agent = link_client
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    base = {"command": "app.open", "requester": "d" * 32, "idempotency_key": "fast-invalid-app-request-0001"}
+    assert client.post("/v1/jarvis/link/fast-command", headers=headers, json={**base, "app": "Terminal"}).status_code == 422
+    assert client.post("/v1/jarvis/link/fast-command", headers=headers, json={**base, "app": "Calculator", "shell": "echo bad"}).status_code == 422
+    assert agent.calls == []
 
 
 def test_existing_link_task_header_requires_local_auth_digest_scope_and_idempotency(link_client):

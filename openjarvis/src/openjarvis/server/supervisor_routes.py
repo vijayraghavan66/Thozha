@@ -631,6 +631,93 @@ async def get_link_task_status(idempotency_key: str, request: Request) -> dict[s
     }
 
 
+@router.post("/link/fast-command")
+async def run_link_fast_command(request: Request) -> dict[str, Any]:
+    """Handle exact deterministic commands without invoking the agent."""
+    _require_loopback(request)
+    authorize_supervisor_request(request, master_only=True)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Expected JSON fast command") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="Fast command must be an object")
+    command, requester = body.get("command"), body.get("requester")
+    if not isinstance(requester, str) or not re.fullmatch(r"[0-9a-f]{32}", requester):
+        raise HTTPException(status_code=422, detail="Invalid companion identity")
+    store = get_supervisor_store()
+    if command == "mac.status" and set(body) == {"command", "requester"}:
+        agent = getattr(request.app.state, "agent", None)
+        engine = getattr(request.app.state, "engine", None)
+        model = getattr(request.app.state, "model", "") or getattr(agent, "_model", "")
+        from openjarvis.server.routes import _engine_key_for_model
+        ai_available = bool(agent is not None and engine is not None and model and _engine_key_for_model(engine, model) == "codex_sdk")
+        return {"command": command, "state": "ONLINE", "online": True, "ai_available": ai_available}
+
+    if command == "task.status" and set(body) == {"command", "requester", "task_id"}:
+        task_id = body.get("task_id")
+        if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
+            raise HTTPException(status_code=422, detail="Invalid task ID")
+        task = store.get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        try:
+            metadata = json.loads(task.get("recovery_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        if metadata.get("source") != "jarvis_link" or metadata.get("owner_actor") != "device:" + requester:
+            raise HTTPException(status_code=403, detail="Task belongs to another companion")
+        run = store.link_task_run(task_id) or {}
+        state = task.get("state", "UNKNOWN")
+        return {
+            "command": command,
+            "task_id": task_id,
+            "state": state,
+            "summary": str(run.get("result_summary") or "") if state == "COMPLETED" else "",
+            "result_text": (run.get("result_text") or run.get("result_summary") or "") if state == "COMPLETED" else None,
+        }
+
+    if command == "app.open" and set(body) == {"command", "requester", "app", "idempotency_key"} and body.get("app") == "Calculator":
+        idem = body.get("idempotency_key")
+        if not isinstance(idem, str) or not re.fullmatch(r"[0-9a-f]{32}", idem):
+            raise HTTPException(status_code=422, detail="Invalid fast command idempotency key")
+        try:
+            task = store.create_link_task(
+                "Open Calculator on the Mac", capability_scope=["assistant"],
+                idempotency_key=idem, owner_actor="device:" + requester,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail="Fast command belongs to another companion") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="Fast command idempotency conflict") from exc
+        task_id = task["task_id"]
+        if task.get("created"):
+            store.start_link_task(
+                task_id, objective_digest=task["objective_digest"], objective_text_digest=task["objective_digest"],
+                capability_scope=["assistant"], idempotency_key=idem,
+            )
+            approval_id, digest = store.create_approval(
+                task_id, "mcp:jarvis_mac:open_app", "Calculator", {"name": "Calculator"},
+                "Open Calculator is a Mac control action and needs your explicit approval.", ttl_seconds=600,
+            )
+            store.mark_link_task_waiting_approval(task_id, approval_id)
+        else:
+            pending = [item for item in store.pending_approvals(100) if item["task_id"] == task_id]
+            if len(pending) != 1 or pending[0]["operation"] != "mcp:jarvis_mac:open_app" or pending[0]["target"] != "Calculator":
+                raise HTTPException(status_code=409, detail="Existing fast command has no matching pending approval")
+            approval_id, digest = pending[0]["id"], pending[0]["args_digest"]
+        approval = store.approval(approval_id)
+        return {
+            "command": command, "task_id": task_id, "state": "WAITING_APPROVAL",
+            "approval": {"approval_id": approval_id, "task_id": task_id,
+                         "operation": "mcp:jarvis_mac:open_app", "target": "Calculator",
+                         "canonical_arguments_digest": digest,
+                         "expires_at": approval["expires_at"],
+                         "summary": "Open Calculator on the Mac after you approve this exact action."},
+        }
+    raise HTTPException(status_code=422, detail="Unsupported fast command")
+
+
 @router.post("/link/tasks/{idempotency_key}/cancel")
 async def cancel_link_task(idempotency_key: str, request: Request) -> dict[str, Any]:
     """Stop a Link task, revoke its pending approvals, and preserve a durable audit event."""
