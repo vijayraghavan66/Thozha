@@ -7,8 +7,12 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,18 +37,31 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.Manifest
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import com.jarvis.companion.voice.JarvisVoiceController
+import com.jarvis.companion.voice.VoiceControllerError
+import com.jarvis.companion.voice.VoiceControllerState
 import com.jarvis.companion.presentation.AiEvidence
 import com.jarvis.companion.presentation.ConnectionPresentation
 import com.jarvis.companion.presentation.ConversationPresentation
@@ -55,6 +72,47 @@ import com.jarvis.companion.presentation.ConversationItem
 
 @Composable
 fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val voiceState = remember { mutableStateOf(VoiceControllerState.IDLE) }
+    val voicePreview = remember { mutableStateOf("") }
+    val voice = remember(context, store) {
+        JarvisVoiceController(context, object : JarvisVoiceController.Listener {
+            override fun onStateChanged(state: VoiceControllerState) { voiceState.value = state }
+            override fun onPartialText(text: String) { voicePreview.value = text }
+            override fun onFinalText(text: String) {
+                voicePreview.value = ""
+                store.draft = text
+                store.notice = "Voice captured. Review the text, then tap Send."
+            }
+            override fun onError(error: VoiceControllerError) {
+                voicePreview.value = ""
+                store.notice = when (error) {
+                    VoiceControllerError.PERMISSION_REQUIRED -> "Microphone permission is required. Tap the mic to allow it."
+                    VoiceControllerError.RECOGNIZER_UNAVAILABLE -> "Speech recognition is unavailable. You can type your request."
+                    VoiceControllerError.NO_MATCH -> "I didn't catch that. Try again or type your request."
+                    VoiceControllerError.SPEECH_TIMEOUT -> "No speech was detected. Hold the mic and try again."
+                    VoiceControllerError.NETWORK_OR_SERVICE -> "Speech recognition couldn't connect. Try again or type your request."
+                    VoiceControllerError.RECOGNIZER_BUSY -> "Speech recognition is busy. Try again in a moment."
+                    VoiceControllerError.LANGUAGE_UNAVAILABLE -> "Speech recognition doesn't support this language."
+                    VoiceControllerError.SYNTHESIS_UNAVAILABLE, VoiceControllerError.SYNTHESIS_FAILED -> "Text-to-speech is unavailable right now."
+                    VoiceControllerError.MICROPHONE_UNAVAILABLE -> "The microphone couldn't start. Check another app isn't using it."
+                    VoiceControllerError.UNKNOWN -> "Voice input failed. You can type your request."
+                }
+            }
+        })
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(voice, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) voice.cancel()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            voice.close()
+        }
+    }
+    val haptics = LocalHapticFeedback.current
     val now = store.now
     val entries = store.entriesInSession()
     val items = remember(entries, now) { ConversationPresentation.items(entries) { clockTime(it) } }
@@ -101,11 +159,13 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit) {
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JarvisSpace.Page, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                itemsIndexed(newest, key = { _, item -> item.id }) { _, item -> MessageRow(item) }
+                itemsIndexed(newest, key = { _, item -> item.id }) { _, item ->
+                    MessageRow(item, onSpeak = if (item.speaker == Speaker.JARVIS) ({ voice.speak(item.text) }) else null)
+                }
             }
         }
 
-        Composer(store)
+        Composer(store, voice, voiceState.value, voicePreview.value, haptics)
     }
 }
 
@@ -127,7 +187,7 @@ private fun connectionHeader(entries: List<Map<String, Any>>, transport: Transpo
 private data class ConnectionHeader(val headline: String, val subline: String)
 
 @Composable
-private fun MessageRow(item: ConversationItem) {
+private fun MessageRow(item: ConversationItem, onSpeak: (() -> Unit)?) {
     val isUser = item.speaker == Speaker.USER
     Column(
         Modifier.fillMaxWidth(),
@@ -153,6 +213,26 @@ private fun MessageRow(item: ConversationItem) {
                         style = JarvisType.Body.copy(color = if (item.text.isBlank()) JarvisColor.TextMuted else JarvisColor.Text),
                     )
                 }
+                if (onSpeak != null && item.text.isNotBlank()) {
+                    Row(
+                        Modifier
+                            .padding(top = 8.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable(role = Role.Button, onClick = onSpeak)
+                            .semantics { contentDescription = "Read answer aloud" }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Image(
+                            painter = rememberVectorPainter(JarvisIcons.Speaker),
+                            contentDescription = null,
+                            colorFilter = ColorFilter.tint(JarvisColor.Sage),
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        BasicText("Listen", style = JarvisType.Caption.copy(color = JarvisColor.Sage))
+                    }
+                }
             }
         }
         item.statusLabel?.let { label ->
@@ -167,8 +247,23 @@ private fun MessageRow(item: ConversationItem) {
 }
 
 @Composable
-private fun Composer(store: JarvisStore) {
+private fun Composer(
+    store: JarvisStore,
+    voice: JarvisVoiceController,
+    voiceState: VoiceControllerState,
+    voicePreview: String,
+    haptics: androidx.compose.ui.hapticfeedback.HapticFeedback,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val canSend = store.draft.isNotBlank() && !store.submitting
+    val micPermission = JarvisVoiceController.hasMicrophonePermission(context)
+    val micDescription = when (voiceState) {
+        VoiceControllerState.LISTENING -> "Listening. Release to finish voice input."
+        VoiceControllerState.PROCESSING -> "Processing voice input"
+        VoiceControllerState.SPEAKING -> "Speaking. Tap mic to stop."
+        VoiceControllerState.ERROR -> "Voice input error. Tap mic to retry."
+        VoiceControllerState.IDLE -> if (micPermission) "Hold to dictate" else "Allow microphone, then hold to dictate"
+    }
     Row(
         Modifier
             .imePadding()
@@ -182,7 +277,14 @@ private fun Composer(store: JarvisStore) {
     ) {
         Box(Modifier.weight(1f).padding(vertical = 10.dp)) {
             if (store.draft.isEmpty()) {
-                BasicText("Ask Jarvis", style = JarvisType.Request.copy(color = JarvisColor.TextMuted))
+                BasicText(
+                    voicePreview.takeIf { it.isNotBlank() } ?: when (voiceState) {
+                        VoiceControllerState.LISTENING -> "Listening… release to finish"
+                        VoiceControllerState.PROCESSING -> "Transcribing…"
+                        else -> "Ask Jarvis"
+                    },
+                    style = JarvisType.Request.copy(color = if (voicePreview.isNotBlank()) JarvisColor.Text else JarvisColor.TextMuted),
+                )
             }
             BasicTextField(
                 value = store.draft,
@@ -196,6 +298,55 @@ private fun Composer(store: JarvisStore) {
             )
         }
         Spacer(Modifier.width(6.dp))
+        Box(
+            Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(if (voiceState == VoiceControllerState.LISTENING) JarvisColor.SageTint else JarvisColor.SurfaceRaised)
+                .pointerInput(voice, micPermission) {
+                    detectTapGestures(onPress = {
+                        if (!micPermission) {
+                            store.notice = "Allow microphone access, then hold the mic to dictate."
+                            store.permissionRequester?.invoke(Manifest.permission.RECORD_AUDIO)
+                            return@detectTapGestures
+                        }
+                        if (voiceState == VoiceControllerState.SPEAKING) {
+                            voice.stopSpeaking()
+                            return@detectTapGestures
+                        }
+                        if (!voice.startPushToTalk()) return@detectTapGestures
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        val released = tryAwaitRelease()
+                        if (released) voice.releasePushToTalk() else voice.cancel()
+                    })
+                }
+                .semantics {
+                    contentDescription = micDescription
+                    role = Role.Button
+                    stateDescription = micDescription
+                    onClick(label = if (voiceState == VoiceControllerState.LISTENING) "Finish voice input" else "Start voice input") {
+                        if (!micPermission) {
+                            store.permissionRequester?.invoke(Manifest.permission.RECORD_AUDIO)
+                        } else if (voiceState == VoiceControllerState.LISTENING) {
+                            voice.releasePushToTalk()
+                        } else if (voiceState == VoiceControllerState.SPEAKING) {
+                            voice.stopSpeaking()
+                        } else {
+                            voice.startPushToTalk()
+                        }
+                        true
+                    }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                painter = rememberVectorPainter(JarvisIcons.Microphone),
+                contentDescription = null,
+                colorFilter = ColorFilter.tint(if (voiceState == VoiceControllerState.LISTENING) JarvisColor.Sage else JarvisColor.TextMuted),
+                modifier = Modifier.size(21.dp),
+            )
+        }
+        Spacer(Modifier.width(4.dp))
         Box(
             Modifier
                 .size(48.dp)

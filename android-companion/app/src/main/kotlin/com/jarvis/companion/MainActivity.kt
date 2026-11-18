@@ -26,10 +26,20 @@ import com.jarvis.companion.ui.JarvisStore
  */
 class MainActivity : ComponentActivity() {
     private var store: JarvisStore? = null
+    private var permissionInFlight: String? = null
     @Volatile private var pinning = false
     private val telegramListener: (TelegramSnapshot) -> Unit = { snapshot -> store?.onTelegramSnapshot(snapshot) }
 
-    private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+    private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val requested = permissionInFlight
+        permissionInFlight = null
+        if (requested == Manifest.permission.RECORD_AUDIO) {
+            store?.notice = if (granted) {
+                "Microphone ready. Hold the mic button to dictate; review the words before sending."
+            } else {
+                "Microphone permission wasn't granted. You can still type your request."
+            }
+        }
         store?.refreshLocal()
     }
 
@@ -40,7 +50,7 @@ class MainActivity : ComponentActivity() {
         // Restores the existing Telegram session in the background (no login prompts; never resets).
         TelegramBootstrap.ensureRunning(this)
         val jarvis = JarvisStore(applicationContext)
-        jarvis.permissionRequester = { permission -> permissionLauncher.launch(permission) }
+        jarvis.permissionRequester = { permission -> requestPermission(permission) }
         store = jarvis
         setContent { JarvisApp(jarvis) }
         askForNotificationsOnce()
@@ -71,8 +81,13 @@ class MainActivity : ComponentActivity() {
     private fun askForNotificationsOnce() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || LinkAlerts.canPost(this)) return
         if (LinkSettings(this).markNotificationsAskedOnce()) {
-            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            requestPermission(Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    private fun requestPermission(permission: String) {
+        permissionInFlight = permission
+        permissionLauncher.launch(permission)
     }
 
     /** Verifies the Mac's Wi-Fi identity once over the already paired route. Failures stay silent, as before. */

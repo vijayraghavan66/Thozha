@@ -39,6 +39,8 @@ object JarvisIcons {
         icon("Settings", "M4 7h9", "M17 7h3", "M4 17h3", "M11 17h9", "M15 5v4", "M9 15v4")
     }
     val Send by lazy { icon("Send", "M12 19V5", "M6 11l6-6 6 6") }
+    val Microphone by lazy { icon("Microphone", "M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z", "M19 11a7 7 0 0 1-14 0", "M12 18v3", "M8 21h8") }
+    val Speaker by lazy { icon("Speaker", "M3 10v4h4l5 4V6l-5 4z", "M16 9a5 5 0 0 1 0 6", "M18 6a9 9 0 0 1 0 12") }
     val NewChat by lazy { icon("NewChat", "M12 5v14", "M5 12h14") }
     val History by lazy { icon("History", "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18", "M12 7v5l3 2") }
     val Back by lazy { icon("Back", "M15 6l-6 6 6 6") }
