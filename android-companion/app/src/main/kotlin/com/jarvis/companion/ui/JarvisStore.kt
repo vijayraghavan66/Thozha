@@ -11,6 +11,9 @@ import com.jarvis.companion.link.LinkService
 import com.jarvis.companion.link.LinkSettings
 import com.jarvis.companion.fastpath.FastCommand
 import com.jarvis.companion.fastpath.FastCommandClassifier
+import com.jarvis.companion.localai.LocalAiRequestMode
+import com.jarvis.companion.localai.RequestRoute
+import com.jarvis.companion.localai.RequestRoutingPolicy
 import com.jarvis.companion.model.ApiException
 import com.jarvis.companion.telegram.TelegramSession
 import com.jarvis.companion.telegram.TelegramSnapshot
@@ -62,6 +65,16 @@ class JarvisStore(private val app: Context) {
     var permissionRequester: ((String) -> Unit)? = null
 
     var reduceMotion by mutableStateOf(app.getSharedPreferences("jarvis_ui", Context.MODE_PRIVATE).getBoolean("reduce_motion", false))
+    var aiRequestMode by mutableStateOf(loadAiRequestMode())
+
+    private fun loadAiRequestMode(): LocalAiRequestMode = runCatching {
+        LocalAiRequestMode.valueOf(app.getSharedPreferences("jarvis_ai_routing", Context.MODE_PRIVATE).getString("mode", null) ?: "AUTO")
+    }.getOrDefault(LocalAiRequestMode.AUTO)
+
+    fun updateAiRequestMode(mode: LocalAiRequestMode) = ui {
+        app.getSharedPreferences("jarvis_ai_routing", Context.MODE_PRIVATE).edit().putString("mode", mode.name).apply()
+        aiRequestMode = mode
+    }
 
     fun updateReduceMotion(value: Boolean) {
         app.getSharedPreferences("jarvis_ui", Context.MODE_PRIVATE).edit().putBoolean("reduce_motion", value).apply()
@@ -125,10 +138,23 @@ class JarvisStore(private val app: Context) {
             return@ui
         }
         val requestId = UUID.randomUUID().toString().replace("-", "")
+        val fastCommand = FastCommandClassifier.classify(text)
+        val route = RequestRoutingPolicy.route(
+            requestId = requestId,
+            prompt = text,
+            mode = aiRequestMode,
+            // A model must be loaded and verified before AUTO may use the local backend.
+            // This build has no user-imported model manager yet, so it remains false.
+            localModelReady = false,
+            isExactFastCommand = fastCommand != null,
+        )
+        if (route is RequestRoute.Rejected) {
+            notice = route.message
+            return@ui
+        }
         val requestTrace = java.security.MessageDigest.getInstance("SHA-256")
             .digest(requestId.toByteArray(Charsets.UTF_8)).take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
         val submitStartedNs = System.nanoTime()
-        val fastCommand = FastCommandClassifier.classify(text)
         val transport = if (TelegramSession.activeTunnel() != null) "telegram" else "link"
         val conversation = session
         sessions.assign(requestId, conversation.id)
@@ -151,11 +177,16 @@ class JarvisStore(private val app: Context) {
             refreshLocal()
             val delivery = runCatching {
                 val relayUrl = LinkSettings(app).relayUrl
-                when (fastCommand) {
+                when (route) {
+                    is RequestRoute.FastCommandUpstream -> when (fastCommand) {
                     FastCommand.MacStatus -> runtime.submitFastCommand(relayUrl, FastCommandRequest.MacStatus, requestId)
                     is FastCommand.TaskStatus -> runtime.submitFastCommand(relayUrl, FastCommandRequest.TaskStatus(fastCommand.taskId), requestId)
                     is FastCommand.OpenApplication -> runtime.submitFastCommand(relayUrl, FastCommandRequest.OpenCalculator(requestId), requestId)
-                    null -> runtime.submit(relayUrl, TaskSubmission(text, setOf(SafeCapability.ASSISTANT), clientRequestId = requestId), null)
+                    null -> error("Fast-command route lost its deterministic command")
+                    }
+                    is RequestRoute.Mac -> runtime.submit(relayUrl, TaskSubmission(text, setOf(SafeCapability.ASSISTANT), clientRequestId = requestId), null)
+                    is RequestRoute.Local -> error("Local route is unavailable until a verified local model is loaded")
+                    is RequestRoute.Rejected -> error("Rejected route reached the send executor")
                 }
             }
             delivery.onSuccess { result ->

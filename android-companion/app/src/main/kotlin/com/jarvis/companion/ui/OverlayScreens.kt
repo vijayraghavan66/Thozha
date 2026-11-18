@@ -83,6 +83,29 @@ fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
                 ) { store.syncNow() }
             }
 
+            item { SectionLabel("AI routing") }
+            item {
+                SurfaceCard(
+                    onClick = {
+                        val modes = com.jarvis.companion.localai.LocalAiRequestMode.entries
+                        val next = modes[(modes.indexOf(store.aiRequestMode) + 1) % modes.size]
+                        store.updateAiRequestMode(next)
+                    },
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        BasicText("${aiModeLabel(store.aiRequestMode)} · tap to change", style = JarvisType.Section.copy(color = JarvisColor.Text))
+                        BasicText(
+                            when (store.aiRequestMode) {
+                                com.jarvis.companion.localai.LocalAiRequestMode.AUTO -> "Exact supported commands use their typed path. Other requests use a loaded local model only when one is verified; otherwise they go to the Mac. No local model is loaded in this build."
+                                com.jarvis.companion.localai.LocalAiRequestMode.MAC_ONLY -> "Requests use the paired Mac AI. Exact supported commands still use their authenticated typed path."
+                                com.jarvis.companion.localai.LocalAiRequestMode.LOCAL_ONLY -> "No local model is installed or loaded. Jarvis will keep requests on this phone and refuse them until local inference is ready."
+                            },
+                            style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
+                        )
+                    }
+                }
+            }
+
             item { SectionLabel("Appearance") }
             item {
                 SurfaceCard {
@@ -177,6 +200,12 @@ private fun notificationPermissionLabel(context: Context): String {
 private fun modeLabel(mode: com.jarvis.companion.link.LinkMode): String = when (mode) {
     com.jarvis.companion.link.LinkMode.LOCAL_USB -> "Local USB"
     com.jarvis.companion.link.LinkMode.TEST_RELAY -> "Test relay"
+}
+
+private fun aiModeLabel(mode: com.jarvis.companion.localai.LocalAiRequestMode): String = when (mode) {
+    com.jarvis.companion.localai.LocalAiRequestMode.AUTO -> "AI route: Auto"
+    com.jarvis.companion.localai.LocalAiRequestMode.MAC_ONLY -> "AI route: Mac only"
+    com.jarvis.companion.localai.LocalAiRequestMode.LOCAL_ONLY -> "AI route: Local only"
 }
 
 /** A native switch drawn with Compose; the knob moves on a spring. */
