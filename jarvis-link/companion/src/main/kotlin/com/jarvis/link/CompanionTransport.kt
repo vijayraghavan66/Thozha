@@ -370,7 +370,7 @@ class JarvisLinkCompanion(
     }
 
     @Synchronized fun flushOutbox(): List<RelayReceipt> {
-        if (connectionState == LinkConnectionState.OFFLINE) return emptyList()
+        // OFFLINE only records the last failure. It must not block the next attempt, or one outage latches forever.
         connectionState = LinkConnectionState.RECONNECTING
         val receipts = mutableListOf<RelayReceipt>()
         try {
@@ -394,7 +394,6 @@ class JarvisLinkCompanion(
 
     fun pollInbox(limit: Int = 20): PollResult {
         require(limit in 1..100)
-        if (connectionState == LinkConnectionState.OFFLINE) throw IOException("Relay offline")
         connectionState = LinkConnectionState.CONNECTING
         try {
             inbox.forgetExpired(now())
