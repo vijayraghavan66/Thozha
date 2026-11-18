@@ -9,7 +9,7 @@ import java.security.MessageDigest
 import java.util.Properties
 import java.util.UUID
 
-enum class LocalModelFormat { LITERT_LM }
+enum class LocalModelFormat(val extension: String) { LITERT_LM("litertlm"), GGUF("gguf") }
 
 /** Metadata needed to show an explicit model import choice. No model is downloaded by this catalog. */
 data class LocalModelDescriptor(
@@ -18,7 +18,8 @@ data class LocalModelDescriptor(
     val fileName: String,
     val format: LocalModelFormat,
     val expectedBytes: Long,
-    val minimumRamBytes: Long,
+    /** Null means the publisher does not provide a verified minimum-RAM figure. */
+    val minimumRamBytes: Long?,
     val quantization: String,
     val sourcePage: String,
     val sourceRevision: String,
@@ -26,13 +27,17 @@ data class LocalModelDescriptor(
     val licenseUrl: String,
     val requiresLicenseAcceptance: Boolean = true,
     val expectedSha256: String? = null,
+    /** Returns an immutable Hugging Face file URL only for catalogs with an explicit revision path. */
+    val pinnedDownloadUrl: String? = sourcePage
+        .replace(Regex("/tree/[0-9a-f]{7,64}$"), "/resolve/$sourceRevision/$fileName")
+        .takeIf { it != sourcePage },
 ) {
     init {
         require(id.matches(Regex("^[a-z0-9._-]{1,64}$")))
         require(displayName.isNotBlank() && displayName.length <= 120)
-        require(fileName.matches(Regex("^[A-Za-z0-9._-]{1,160}\\.litertlm$"))) { "model filename must be a plain .litertlm filename" }
+        require(fileName.matches(Regex("^[A-Za-z0-9._-]{1,160}\\.${format.extension}$"))) { "model filename extension does not match its format" }
         require(expectedBytes > 0 && expectedBytes <= MAX_MODEL_BYTES)
-        require(minimumRamBytes > 0)
+        require(minimumRamBytes == null || minimumRamBytes > 0)
         require(quantization.isNotBlank() && quantization.length <= 80)
         require(sourcePage.startsWith("https://") && licenseUrl.startsWith("https://"))
         require(sourceRevision.matches(Regex("^[0-9a-f]{7,64}$")))
@@ -61,6 +66,23 @@ object LocalModelCatalog {
         requiresLicenseAcceptance = true,
         expectedSha256 = null,
     )
+
+    /** Public Apache-2.0 GGUF candidate. Requires llama.cpp; LiteRT-LM cannot load this format. */
+    val qwen3ZeroPointSixBQ4 = LocalModelDescriptor(
+        id = "qwen3-0.6b-q4-0",
+        displayName = "Qwen3 0.6B (Q4_0)",
+        fileName = "Qwen3-0.6B-Q4_0.gguf",
+        format = LocalModelFormat.GGUF,
+        expectedBytes = 449_839_104L, // 429 MiB as published by the file repository
+        minimumRamBytes = null, // No verified minimum-RAM requirement was found; device testing is required.
+        quantization = "Q4_0",
+        sourcePage = "https://huggingface.co/ggml-org/Qwen3-0.6B-GGUF/tree/afe8ad3",
+        sourceRevision = "afe8ad3",
+        licenseName = "Apache-2.0",
+        licenseUrl = "https://www.apache.org/licenses/LICENSE-2.0",
+        requiresLicenseAcceptance = false,
+        expectedSha256 = "da2572f16c06133561ce56accaa822216f2391ef4d37fba427801cd6736417d4",
+    )
 }
 
 data class ModelStoragePreflight(
@@ -69,6 +91,64 @@ data class ModelStoragePreflight(
     val enoughSpace: Boolean,
     val licenseAcceptanceRequired: Boolean,
 )
+
+enum class ModelAcquisitionSource { USER_SELECTED_FILE, CATALOG_DOWNLOAD }
+
+/** Explicit consent surface for a future downloader. This decision object never performs I/O. */
+data class ModelAcquisitionConsent(
+    val userInitiated: Boolean,
+    val licenseAccepted: Boolean,
+    val networkMetered: Boolean,
+    val allowMeteredNetwork: Boolean,
+)
+
+data class AuthorizedModelAcquisition(
+    val descriptor: LocalModelDescriptor,
+    val source: ModelAcquisitionSource,
+    val downloadUrl: String,
+    val requiredBytes: Long,
+    val expectedSha256: String,
+)
+
+enum class ModelAcquisitionError { NOT_USER_INITIATED, LICENSE_NOT_ACCEPTED, METERED_NETWORK_NOT_ALLOWED, INSUFFICIENT_STORAGE, UNVERIFIED_SOURCE }
+
+class ModelAcquisitionException(val code: ModelAcquisitionError, message: String) : Exception(message)
+
+/**
+ * UI-independent gate for model acquisition. There is deliberately no HTTP client here: an
+ * integration must first present this exact size/license/network summary, obtain consent, then
+ * provide its own cancellable transport. No background or automatic downloads are possible here.
+ */
+object LocalModelAcquisitionPolicy {
+    fun authorizeCatalogDownload(
+        descriptor: LocalModelDescriptor,
+        availableBytes: Long,
+        consent: ModelAcquisitionConsent,
+    ): AuthorizedModelAcquisition {
+        if (!consent.userInitiated) throw ModelAcquisitionException(ModelAcquisitionError.NOT_USER_INITIATED, "Model download must be started explicitly by the user.")
+        if (descriptor.requiresLicenseAcceptance && !consent.licenseAccepted) {
+            throw ModelAcquisitionException(ModelAcquisitionError.LICENSE_NOT_ACCEPTED, "Accept the model license before downloading.")
+        }
+        if (consent.networkMetered && !consent.allowMeteredNetwork) {
+            throw ModelAcquisitionException(ModelAcquisitionError.METERED_NETWORK_NOT_ALLOWED, "This download requires a separate choice to use metered data.")
+        }
+        val url = descriptor.pinnedDownloadUrl
+        val checksum = descriptor.expectedSha256
+        if (url == null || checksum == null) {
+            throw ModelAcquisitionException(ModelAcquisitionError.UNVERIFIED_SOURCE, "Catalog download is disabled until an immutable source and publisher checksum are verified.")
+        }
+        if (availableBytes < descriptor.expectedBytes) {
+            throw ModelAcquisitionException(ModelAcquisitionError.INSUFFICIENT_STORAGE, "Not enough free storage for this model.")
+        }
+        return AuthorizedModelAcquisition(
+            descriptor = descriptor,
+            source = ModelAcquisitionSource.CATALOG_DOWNLOAD,
+            downloadUrl = url,
+            requiredBytes = descriptor.expectedBytes,
+            expectedSha256 = checksum,
+        )
+    }
+}
 
 data class InstalledLocalModel(
     val descriptor: LocalModelDescriptor,

@@ -16,6 +16,7 @@ enum class LocalAiErrorCode {
     BACKEND_UNAVAILABLE,
     MODEL_NOT_INSTALLED,
     MODEL_INVALID,
+    UNSUPPORTED_MODEL_FORMAT,
     LICENSE_REQUIRED,
     INVALID_PROMPT,
     INFERENCE_FAILED,
@@ -37,6 +38,7 @@ class LocalCancellationToken internal constructor() {
 /** No tool API is exposed here: local model output is plain text and cannot approve or execute actions. */
 interface LocalInferenceBackend : Closeable {
     val runtimeId: String
+    val supportedFormats: Set<LocalModelFormat>
     fun load(model: InstalledLocalModel)
     fun generate(prompt: String, cancellation: LocalCancellationToken, onText: (String) -> Unit = {}): String
     fun cancel()
@@ -63,6 +65,12 @@ class LocalAiRuntime(
 
     fun loadModel(descriptor: LocalModelDescriptor): LocalAiSnapshot {
         val engine = backend ?: throw LocalAiException(LocalAiErrorCode.BACKEND_UNAVAILABLE, "No on-device inference backend is bundled in this build.")
+        if (descriptor.format !in engine.supportedFormats) {
+            throw LocalAiException(
+                LocalAiErrorCode.UNSUPPORTED_MODEL_FORMAT,
+                "The selected model format is not supported by ${engine.runtimeId}.",
+            )
+        }
         synchronized(lock) {
             ensureOpen()
             if (snapshot.phase == LocalAiPhase.GENERATING || snapshot.phase == LocalAiPhase.CANCELLING) {

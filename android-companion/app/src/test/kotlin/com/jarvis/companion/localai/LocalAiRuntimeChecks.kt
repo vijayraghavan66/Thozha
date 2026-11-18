@@ -13,7 +13,9 @@ object LocalAiRuntimeChecks {
         runtimeNeverFabricatesAnAnswerWithoutABackend()
         runtimeLifecycleAndCancellationUseInjectedBackend()
         routingIsExplicitAndDeterministic()
-        println("Local AI runtime checks passed: 5 cases; fake backend used only for lifecycle tests")
+        modelCatalogAndAcquisitionRequireExplicitSafeConsent()
+        runtimeRejectsUnsupportedModelFormatBeforeLoading()
+        println("Local AI runtime checks passed: 7 cases; fake backend used only for lifecycle tests")
     }
 
     private fun explicitImportRequiresConsentAndVerifiesPrivateArtifact() {
@@ -104,6 +106,77 @@ object LocalAiRuntimeChecks {
         check((RequestRoutingPolicy.routeAfterLocalFailure(id, LocalAiRequestMode.LOCAL_ONLY, partialOutputProduced = false) as? RequestRoute.Rejected)?.code == RouteError.LOCAL_INFERENCE_FAILED)
     }
 
+    private fun modelCatalogAndAcquisitionRequireExplicitSafeConsent() {
+        val model = LocalModelCatalog.qwen3ZeroPointSixBQ4
+        check(model.format == LocalModelFormat.GGUF)
+        check(model.expectedBytes == 449_839_104L)
+        check(model.expectedSha256 == "da2572f16c06133561ce56accaa822216f2391ef4d37fba427801cd6736417d4")
+        check(model.licenseName == "Apache-2.0" && !model.requiresLicenseAcceptance)
+        check(model.minimumRamBytes == null)
+        val noExplicitStart = runCatching {
+            LocalModelAcquisitionPolicy.authorizeCatalogDownload(
+                model, model.expectedBytes,
+                ModelAcquisitionConsent(userInitiated = false, licenseAccepted = true, networkMetered = false, allowMeteredNetwork = false),
+            )
+        }.exceptionOrNull()
+        check((noExplicitStart as? ModelAcquisitionException)?.code == ModelAcquisitionError.NOT_USER_INITIATED)
+        val metered = runCatching {
+            LocalModelAcquisitionPolicy.authorizeCatalogDownload(
+                model, model.expectedBytes,
+                ModelAcquisitionConsent(userInitiated = true, licenseAccepted = true, networkMetered = true, allowMeteredNetwork = false),
+            )
+        }.exceptionOrNull()
+        check((metered as? ModelAcquisitionException)?.code == ModelAcquisitionError.METERED_NETWORK_NOT_ALLOWED)
+        val noSpace = runCatching {
+            LocalModelAcquisitionPolicy.authorizeCatalogDownload(
+                model, model.expectedBytes - 1,
+                ModelAcquisitionConsent(userInitiated = true, licenseAccepted = true, networkMetered = false, allowMeteredNetwork = false),
+            )
+        }.exceptionOrNull()
+        check((noSpace as? ModelAcquisitionException)?.code == ModelAcquisitionError.INSUFFICIENT_STORAGE)
+        val permitted = LocalModelAcquisitionPolicy.authorizeCatalogDownload(
+            model, model.expectedBytes,
+            ModelAcquisitionConsent(userInitiated = true, licenseAccepted = true, networkMetered = false, allowMeteredNetwork = false),
+        )
+        check(permitted.expectedSha256 == model.expectedSha256 && permitted.requiredBytes == model.expectedBytes)
+        check(permitted.downloadUrl == "https://huggingface.co/ggml-org/Qwen3-0.6B-GGUF/resolve/afe8ad3/Qwen3-0.6B-Q4_0.gguf")
+
+        val gemma = LocalModelCatalog.gemma3OneBInt4
+        val noLicense = runCatching {
+            LocalModelAcquisitionPolicy.authorizeCatalogDownload(
+                gemma, gemma.expectedBytes,
+                ModelAcquisitionConsent(userInitiated = true, licenseAccepted = false, networkMetered = false, allowMeteredNetwork = false),
+            )
+        }.exceptionOrNull()
+        check((noLicense as? ModelAcquisitionException)?.code == ModelAcquisitionError.LICENSE_NOT_ACCEPTED)
+        val unverifiedGemma = runCatching {
+            LocalModelAcquisitionPolicy.authorizeCatalogDownload(
+                gemma, gemma.expectedBytes,
+                ModelAcquisitionConsent(userInitiated = true, licenseAccepted = true, networkMetered = false, allowMeteredNetwork = false),
+            )
+        }.exceptionOrNull()
+        check((unverifiedGemma as? ModelAcquisitionException)?.code == ModelAcquisitionError.UNVERIFIED_SOURCE)
+    }
+
+    private fun runtimeRejectsUnsupportedModelFormatBeforeLoading() {
+        val dir = Files.createTempDirectory("jarvis-local-ai-format").toFile()
+        val gguf = LocalModelCatalog.qwen3ZeroPointSixBQ4.copy(
+            expectedBytes = 3,
+            expectedSha256 = MessageDigest.getInstance("SHA-256").digest("abc".toByteArray())
+                .joinToString("") { "%02x".format(it) },
+        )
+        try {
+            val store = LocalModelStore(dir)
+            store.importSelectedModel(gguf, ByteArrayInputStream("abc".toByteArray()), licenseAccepted = false)
+            val backend = TestBackend()
+            val runtime = LocalAiRuntime(store, backend)
+            val failure = runCatching { runtime.loadModel(gguf) }.exceptionOrNull()
+            check((failure as? LocalAiException)?.code == LocalAiErrorCode.UNSUPPORTED_MODEL_FORMAT)
+            check(backend.loadCount == 0)
+            runtime.close()
+        } finally { dir.deleteRecursively() }
+    }
+
     private fun descriptor(bytes: ByteArray, requiresLicenseAcceptance: Boolean = true): LocalModelDescriptor {
         val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
         return LocalModelDescriptor(
@@ -125,11 +198,13 @@ object LocalAiRuntimeChecks {
 
     private class TestBackend : LocalInferenceBackend {
         override val runtimeId = "test-only-fake"
+        override val supportedFormats = setOf(LocalModelFormat.LITERT_LM)
         var lastPrompt: String? = null
         var cancelOnGenerate = false
         var unloadCount = 0
+        var loadCount = 0
         private val canceled = AtomicBoolean(false)
-        override fun load(model: InstalledLocalModel) { canceled.set(false) }
+        override fun load(model: InstalledLocalModel) { loadCount++; canceled.set(false) }
         override fun generate(prompt: String, cancellation: LocalCancellationToken, onText: (String) -> Unit): String {
             lastPrompt = prompt
             if (cancelOnGenerate) {

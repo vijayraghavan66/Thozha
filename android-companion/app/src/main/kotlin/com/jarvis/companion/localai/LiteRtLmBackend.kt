@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicReference
 /** Real LiteRT-LM adapter. It has no network, shell or tool-execution capability. */
 class LiteRtLmBackend : LocalInferenceBackend {
     override val runtimeId = "litert-lm-0.16.1-cpu"
+    override val supportedFormats = setOf(LocalModelFormat.LITERT_LM)
     private val lock = Any()
     private val activeGeneration = AtomicReference<Job?>(null)
     private var engine: Engine? = null
