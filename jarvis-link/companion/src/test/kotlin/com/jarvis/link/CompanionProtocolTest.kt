@@ -34,6 +34,7 @@ object CompanionProtocolTest {
         inboxPersistenceBeforeAck(host, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
         localTaskHistoryIsRestartSafe()
+        staleProgressCannotReopenTerminalTask()
         concurrentLocalStateAndOutbox(hostCertificate, hostRoot, companion, now)
         relayClientRequiresHttpsAndCanonicalTenantIds()
         sharedFixtureInterop(args.firstOrNull() ?: System.getProperty("jarvis.fixture", "../fixtures/envelope-v1.test.json"))
@@ -387,6 +388,23 @@ object CompanionProtocolTest {
         check(entry["state"] == "COMPLETED")
         check(entry["summary"] == "Java is a programming language.")
         directory.deleteRecursively()
+    }
+
+    private fun staleProgressCannotReopenTerminalTask() {
+        val dir = java.nio.file.Files.createTempDirectory("link-terminal-order").toFile()
+        val runtime = LinkRuntime(SoftwareTestKeyProvider(File(dir, "keys.json")), FileLinkStateStore(File(dir, "state.json")), dir, now = { 1_800_000_000_000L })
+        val requestId = "ef".repeat(16)
+        val taskId = "ab".repeat(16)
+        runtime.recordLocalTaskRequest(requestId, "test ordering", "telegram")
+        val expiry = 1_800_000_030_000L
+        check(runtime.persistInboxEvent("11".repeat(16), expiry, CompanionEvent.TaskUpdate(taskId, "COMPLETED", "real result", requestId)))
+        check(runtime.persistInboxEvent("22".repeat(16), expiry, CompanionEvent.TaskUpdate(taskId, "running", "old progress", requestId)))
+        check(runtime.persistInboxEvent("33".repeat(16), expiry, CompanionEvent.TaskUpdate(taskId, "PLANNING", "older progress", "")))
+        val entry = runtime.conversation().single()
+        check(entry["state"] == "COMPLETED" && entry["summary"] == "real result") { "stale progress reopened completed task" }
+        check(runtime.recentUpdates().size == 1) { "stale progress appeared in recent updates" }
+        check(!runtime.persistInboxEvent("22".repeat(16), expiry, CompanionEvent.TaskUpdate(taskId, "RUNNING", "old progress", requestId)))
+        dir.deleteRecursively()
     }
 
     private fun concurrentLocalStateAndOutbox(hostCert: DeviceCertificate, hostRoot: TrustedHostRoot, phone: SigningIdentity, now: Long) {

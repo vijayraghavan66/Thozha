@@ -82,7 +82,14 @@ class LinkRuntime(
      */
     private val transportFactory: ((String) -> RelayTransport?)? = null,
 ) {
-    companion object { private val stateLock = Any(); private val syncLock = Any() }
+    companion object {
+        private val stateLock = Any()
+        private val syncLock = Any()
+        private val terminalStates = setOf("COMPLETED", "FAILED", "CANCELLED", "REJECTED")
+    }
+
+    private fun isStaleAfterTerminal(entry: Map<String, Any>, newState: String): Boolean =
+        (entry["state"] as? String)?.uppercase() in terminalStates && newState.uppercase() !in terminalStates
 
     private fun load(): Map<String, Any> = synchronized(stateLock) { state.read()?.let { LinkJson.parseObject(it) } ?: emptyMap() }
 
@@ -305,7 +312,7 @@ class LinkRuntime(
 
     private fun applyToConversation(messageId: String, taskId: String, state: String, summary: String) = synchronized(stateLock) {
         val entries = conversation().map { entry ->
-            if (entry["message_id"] == messageId && !(entry["state"] in setOf("COMPLETED", "FAILED", "CANCELLED", "REJECTED") && state in setOf("SENT", "QUEUED", "RUNNING"))) LinkedHashMap(entry).apply {
+            if (entry["message_id"] == messageId && !isStaleAfterTerminal(entry, state)) LinkedHashMap(entry).apply {
                 put("state", state); put("summary", summary); put("task_id", taskId); put("updated_at_unix_ms", now())
             } else entry
         }
@@ -315,7 +322,7 @@ class LinkRuntime(
     /** Approval/continuation replies may reference the decision envelope; task ID is the stable fallback. */
     private fun applyToConversationTask(taskId: String, state: String, summary: String) = synchronized(stateLock) {
         val entries = conversation().map { entry ->
-            if (entry["task_id"] == taskId) LinkedHashMap(entry).apply {
+            if (entry["task_id"] == taskId && !isStaleAfterTerminal(entry, state)) LinkedHashMap(entry).apply {
                 put("state", state); put("summary", summary); put("updated_at_unix_ms", now())
             } else entry
         }
@@ -353,11 +360,13 @@ class LinkRuntime(
                     approvals.add(event.review)
                 }
                 is CompanionEvent.TaskUpdate -> {
-                    updates.add(linkedMapOf("task_id" to event.taskId, "state" to event.state, "summary" to event.summary, "received_at_unix_ms" to now()))
+                    fun matches(entry: Map<String, Any>): Boolean = if (event.inReplyTo.isNotBlank())
+                        entry["message_id"] == event.inReplyTo else event.taskId.isNotBlank() && entry["task_id"] == event.taskId
+                    val matching = entries.filter(::matches)
+                    val stale = matching.isNotEmpty() && matching.all { isStaleAfterTerminal(it, event.state) }
+                    if (!stale) updates.add(linkedMapOf("task_id" to event.taskId, "state" to event.state, "summary" to event.summary, "received_at_unix_ms" to now()))
                     entries = entries.map { entry ->
-                        val matches = if (event.inReplyTo.isNotBlank()) entry["message_id"] == event.inReplyTo
-                            else event.taskId.isNotBlank() && entry["task_id"] == event.taskId
-                        if (matches) LinkedHashMap(entry).apply {
+                        if (matches(entry) && !isStaleAfterTerminal(entry, event.state)) LinkedHashMap(entry).apply {
                             put("state", event.state); put("summary", event.summary)
                             if (event.taskId.isNotBlank()) put("task_id", event.taskId)
                             put("updated_at_unix_ms", now())
