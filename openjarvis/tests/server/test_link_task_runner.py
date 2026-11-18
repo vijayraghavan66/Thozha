@@ -216,6 +216,38 @@ def test_fast_task_status_is_owner_bound_and_does_not_call_agent(link_client):
     assert agent.calls == []
 
 
+def test_fast_task_status_reports_approval_expiry_without_running_the_operation(link_client):
+    client, store, agent = link_client
+    task = store.create_link_task(
+        "Open Calculator on the Mac", capability_scope=["assistant"],
+        idempotency_key="fast-status-expiry-owner-0001", owner_actor="device:" + "a" * 32,
+    )
+    task_id = task["task_id"]
+    store.start_link_task(
+        task_id, objective_digest=task["objective_digest"], objective_text_digest=task["objective_digest"],
+        capability_scope=["assistant"], idempotency_key=task["idempotency_key"],
+    )
+    approval_id, _ = store.create_approval(
+        task_id, "mcp:jarvis_mac:open_app", "Calculator", {"name": "Calculator"},
+        "Exact app opening requires approval.", ttl_seconds=600,
+    )
+    store.mark_link_task_waiting_approval(task_id, approval_id)
+    store.expire_approval(approval_id)
+
+    response = client.post(
+        "/v1/jarvis/link/fast-command",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json={"command": "task.status", "requester": "a" * 32, "task_id": task_id},
+    )
+    assert response.status_code == 200
+    assert response.json()["state"] == "EXPIRED"
+    assert "expired" in response.json()["summary"].lower()
+    # Status inspection does not rewrite task history, consume approval, or execute Calculator.
+    assert store.get_task(task_id)["state"] == "WAITING_APPROVAL"
+    assert store.approval(approval_id)["status"] == "EXPIRED"
+    assert agent.calls == []
+
+
 def test_fast_calculator_creates_exact_approval_without_invoking_agent(link_client):
     client, store, agent = link_client
     headers = {"Authorization": "Bearer link-test-admin-key"}

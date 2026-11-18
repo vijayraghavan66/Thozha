@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from openjarvis.server.fcm_notifications import FCMRegistrationStore
-from openjarvis.tasks.supervisor import bounded_result_text, get_supervisor_store
+from openjarvis.tasks.supervisor import bounded_result_text, get_supervisor_store, utc_now
 
 router = APIRouter(prefix="/v1/jarvis", tags=["jarvis-supervisor"])
 logger = logging.getLogger(__name__)
@@ -722,6 +722,41 @@ async def get_link_task_events(
             "next_seq": rows[-1]["seq"] if rows else after_seq}
 
 
+def _link_task_status_label(store: Any, task: dict[str, Any]) -> tuple[str, str]:
+    """Report approval expiry/decision state without mutating the underlying task history."""
+    state = str(task.get("state") or "UNKNOWN")
+    if state != "WAITING_APPROVAL":
+        return state, ""
+    task_id = str(task.get("id") or "")
+    approval_id = None
+    for event in reversed(store.events(task_id)):
+        if event.get("event_type") != "link_task.waiting_approval":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        value = payload.get("approval_id")
+        if isinstance(value, str) and value:
+            approval_id = value
+            break
+    approval = store.approval(approval_id) if approval_id else None
+    if approval is None:
+        return "UNKNOWN", "No approval record is available for this waiting task."
+    if approval.get("status") in {"PENDING", "APPROVED"} and approval.get("expires_at", "") <= utc_now():
+        store.expire_approval(approval_id, reason="expired_during_task_status")
+        approval = store.approval(approval_id) or approval
+    status = approval.get("status")
+    if status == "PENDING":
+        return "WAITING_APPROVAL", "Waiting for your approval."
+    if status == "APPROVED":
+        return "APPROVED", "Approval received; the Mac is continuing the task."
+    if status == "CONSUMED":
+        return "RUNNING", "The approved operation was authorized and consumed."
+    if status == "REJECTED":
+        return "REJECTED", "The operation was rejected and will not run."
+    if status == "EXPIRED":
+        return "EXPIRED", "Approval expired; the operation did not run."
+    return "UNKNOWN", "Approval state is unavailable."
+
+
 @router.post("/link/fast-command")
 async def run_link_fast_command(request: Request) -> dict[str, Any]:
     """Handle exact deterministic commands without invoking the agent."""
@@ -759,12 +794,12 @@ async def run_link_fast_command(request: Request) -> dict[str, Any]:
         if metadata.get("source") != "jarvis_link" or metadata.get("owner_actor") != "device:" + requester:
             raise HTTPException(status_code=403, detail="Task belongs to another companion")
         run = store.link_task_run(task_id) or {}
-        state = task.get("state", "UNKNOWN")
+        state, approval_summary = _link_task_status_label(store, task)
         return {
             "command": command,
             "task_id": task_id,
             "state": state,
-            "summary": str(run.get("result_summary") or "") if state == "COMPLETED" else "",
+            "summary": str(run.get("result_summary") or "") if state == "COMPLETED" else approval_summary,
             "result_text": (run.get("result_text") or run.get("result_summary") or "") if state == "COMPLETED" else None,
         }
 
