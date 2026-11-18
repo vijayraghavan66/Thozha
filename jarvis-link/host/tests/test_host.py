@@ -65,6 +65,27 @@ def test_encrypted_safe_task_uses_supervisor_port():
     assert "command" not in supervisor.calls[0][1]
 
 
+def test_typed_fast_mac_status_bypasses_task_submission():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"command": "mac.status", "version": 1}, kind="fast.command")
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert result["result"] == {"kind": "fast.result", "command": "mac.status", "online": True}
+    assert supervisor.calls == []
+
+
+def test_fast_command_rejects_extra_fields_and_unallowlisted_app():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    for payload in (
+        {"command": "mac.status", "version": 1, "shell": "anything"},
+        {"command": "app.open", "version": 1, "app": "Terminal"},
+    ):
+        env = task_envelope(host, phone, host_id, phone_id, host_cert, payload, kind="fast.command")
+        with pytest.raises(TaskEnvelopeError, match="unsupported typed fast command"):
+            hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert supervisor.calls == []
+
+
 def test_assistant_scope_is_forwarded_to_supervisor_without_executable_fields():
     hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
     env = task_envelope(

@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-KIND_RE = re.compile(r"^(task\.submit|task\.progress|task\.result|approval\.request|approval\.decision|task\.cancel)$")
+KIND_RE = re.compile(r"^(task\.submit|task\.progress|task\.result|approval\.request|approval\.decision|task\.cancel|fast\.command)$")
 MAX_TTL_MS = 24 * 60 * 60 * 1000
 FUTURE_SKEW_MS = 5 * 60 * 1000
 MAX_CERT_TTL_MS = 90 * 24 * 60 * 60 * 1000

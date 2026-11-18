@@ -178,6 +178,29 @@ class JarvisLinkHost:
         )
 
     def _dispatch(self, envelope: LinkEnvelope, payload: dict[str, Any], *, now_ms: int) -> dict[str, Any]:
+        if envelope.kind == "fast.command":
+            if not isinstance(payload, dict) or payload.get("version") != 1:
+                raise TaskEnvelopeError("fast command version is invalid")
+            command = payload.get("command")
+            handler = getattr(self.supervisor, "fast_command", None)
+            if command == "mac.status" and set(payload) == {"command", "version"}:
+                # A response from this authenticated host is the live reachability proof.
+                return {"kind": "fast.result", "command": command, "online": True}
+            if command == "task.status" and set(payload) == {"command", "task_id", "version"}:
+                task_id = payload.get("task_id")
+                if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
+                    raise TaskEnvelopeError("fast task status ID is invalid")
+                self._require_task_owner(envelope.from_device_id, task_id)
+                if handler is None:
+                    raise TaskEnvelopeError("typed task status is unavailable")
+                return {"kind": "fast.result", "command": command, **handler(command=command, task_id=task_id)}
+            if command == "app.open" and set(payload) == {"app", "command", "version"} and payload.get("app") == "Calculator":
+                if handler is None:
+                    raise TaskEnvelopeError("supervisor fast command approval is unavailable")
+                # Supervisor creates the exact operation approval; host never launches the app here.
+                return {"kind": "fast.result", "command": command, **handler(command=command, app="Calculator", requester=envelope.from_device_id)}
+            raise TaskEnvelopeError("unsupported typed fast command")
+
         if envelope.kind == "task.submit":
             objective, capabilities = _task_submit_payload(payload)
             if "development" in capabilities and (capabilities != ["development"] or envelope.from_device_id not in development_companions()):

@@ -82,6 +82,24 @@ data class TaskSubmission(
     }
 }
 
+/** Versioned typed requests; callers cannot serialize arbitrary commands or shell text. */
+sealed interface FastCommandRequest {
+    fun toJson(): String
+
+    data object MacStatus : FastCommandRequest {
+        override fun toJson() = "{\"command\":\"mac.status\",\"version\":1}"
+    }
+
+    data class TaskStatus(val taskId: String) : FastCommandRequest {
+        init { require(taskId.matches(Regex("^[0-9a-f]{32}$"))) }
+        override fun toJson() = "{\"command\":\"task.status\",\"task_id\":${FlatJson.quote(taskId)},\"version\":1}"
+    }
+
+    data object OpenCalculator : FastCommandRequest {
+        override fun toJson() = "{\"app\":\"Calculator\",\"command\":\"app.open\",\"version\":1}"
+    }
+}
+
 data class RelayInvitation(
     val tenantId: String,
     val invitationId: String,
@@ -381,6 +399,15 @@ class JarvisLinkCompanion(
             "task.submit", submission.toJson(), nowUnixMs = now(),
             ttlMs = ttlMs ?: (15 * 60 * 1000L),
             messageId = submission.clientRequestId,
+        )
+        return sendOrQueue(envelope)
+    }
+
+    fun submitFastCommand(command: FastCommandRequest, ttlMs: Long? = null): DeliveryResult {
+        val envelope = LinkCrypto.createEnvelope(
+            tenantId, signingIdentity, hostCertificate, hostRoot,
+            "fast.command", command.toJson(), nowUnixMs = now(),
+            ttlMs = ttlMs ?: (2 * 60 * 1000L),
         )
         return sendOrQueue(envelope)
     }
