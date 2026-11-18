@@ -11,6 +11,8 @@ import com.jarvis.companion.link.LinkService
 import com.jarvis.companion.link.LinkSettings
 import com.jarvis.companion.fastpath.FastCommand
 import com.jarvis.companion.fastpath.FastCommandClassifier
+import com.jarvis.companion.localai.LocalAiManager
+import com.jarvis.companion.localai.LocalAiPhase
 import com.jarvis.companion.localai.LocalAiRequestMode
 import com.jarvis.companion.localai.RequestRoute
 import com.jarvis.companion.localai.RequestRoutingPolicy
@@ -42,6 +44,8 @@ class JarvisStore(private val app: Context) {
     private val main = Handler(Looper.getMainLooper())
     private val lanes = ExecutionLanes()
     private val sessions = ChatSessions(app)
+    private val localHistory = LocalAiConversationHistory(app)
+    private val localAi = LocalAiManager.get(app)
     private var destroyed = false
 
     var tab by mutableStateOf(Tab.HOME)
@@ -66,6 +70,9 @@ class JarvisStore(private val app: Context) {
 
     var reduceMotion by mutableStateOf(app.getSharedPreferences("jarvis_ui", Context.MODE_PRIVATE).getBoolean("reduce_motion", false))
     var aiRequestMode by mutableStateOf(loadAiRequestMode())
+    var localAiSnapshot by mutableStateOf(localAi.status())
+    var localAiRequestRunning by mutableStateOf(false)
+    @Volatile private var localAiRequestId: String? = null
 
     private fun loadAiRequestMode(): LocalAiRequestMode = runCatching {
         LocalAiRequestMode.valueOf(app.getSharedPreferences("jarvis_ai_routing", Context.MODE_PRIVATE).getString("mode", null) ?: "AUTO")
@@ -74,6 +81,61 @@ class JarvisStore(private val app: Context) {
     fun updateAiRequestMode(mode: LocalAiRequestMode) = ui {
         app.getSharedPreferences("jarvis_ai_routing", Context.MODE_PRIVATE).edit().putString("mode", mode.name).apply()
         aiRequestMode = mode
+    }
+
+    fun importLocalModel(uri: android.net.Uri, licenseAccepted: Boolean) = ui {
+        if (!licenseAccepted || submitting) return@ui
+        submitting = true
+        notice = "Importing and loading the selected model in app-private storage…"
+        background(lanes.local) {
+            val result = runCatching {
+                val stream = app.contentResolver.openInputStream(uri) ?: error("The selected model file could not be opened.")
+                stream.use { localAi.importSelectedModel(it, licenseAccepted = true) }
+            }
+            ui {
+                submitting = false
+                localAiSnapshot = localAi.status()
+                notice = result.fold(
+                    onSuccess = { "Local model imported and loaded. Exact Mac actions still use the supervisor approval system." },
+                    onFailure = { localModelError(it) },
+                )
+            }
+        }
+    }
+
+    fun loadLocalModel() = ui {
+        if (submitting) return@ui
+        submitting = true
+        notice = "Loading the local model…"
+        background(lanes.local) {
+            val result = runCatching { localAi.loadInstalledModel() }
+            ui {
+                submitting = false
+                localAiSnapshot = localAi.status()
+                notice = result.fold(
+                    onSuccess = { "Local model is loaded on this phone." },
+                    onFailure = { localModelError(it) },
+                )
+            }
+        }
+    }
+
+    fun unloadLocalModel() = ui {
+        val result = runCatching { localAi.unload() }
+        localAiSnapshot = localAi.status()
+        notice = result.fold({ "Local model unloaded from memory." }, { localModelError(it) })
+    }
+
+    fun cancelLocalAi() = ui {
+        if (!localAiRequestRunning) return@ui
+        localAi.cancel()
+        localAiRequestId?.let { id ->
+            localHistory.recordResult(id, "CANCELLED", "", "Cancelled on this phone.", System.currentTimeMillis())
+        }
+        localAiRequestRunning = false
+        localAiRequestId = null
+        entries = mergeEntries(entries, localHistory.all())
+        notice = "On-device request cancelled."
     }
 
     fun updateReduceMotion(value: Boolean) {
@@ -93,9 +155,13 @@ class JarvisStore(private val app: Context) {
             ?.get("text") as? String ?: ""
 
     /** Whether any request is still open on the Mac or waiting to be delivered. */
-    fun hasActiveWork(): Boolean = entries.any { (it["state"] as? String) in ActiveStates }
+    fun hasActiveWork(): Boolean = entries.any {
+        it["transport"] != "local" && (it["state"] as? String) in ActiveStates
+    }
 
-    fun hasRunningWork(): Boolean = entries.any { (it["state"] as? String) in setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING") }
+    fun hasRunningWork(): Boolean = entries.any {
+        it["transport"] != "local" && (it["state"] as? String) in setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING")
+    }
 
     fun refreshLocal() = background {
         val runtime = LinkService.runtime(app)
@@ -105,7 +171,8 @@ class JarvisStore(private val app: Context) {
         val (syncAt, syncError) = runtime.lastSync()
         val snapshot = TelegramSession.controller?.snapshot()
         ui {
-            entries = conversation
+            entries = mergeEntries(conversation, localHistory.all())
+            localAiSnapshot = localAi.status()
             approvals = pending
             linkStatus = status
             lastSyncMs = syncAt
@@ -139,13 +206,13 @@ class JarvisStore(private val app: Context) {
         }
         val requestId = UUID.randomUUID().toString().replace("-", "")
         val fastCommand = FastCommandClassifier.classify(text)
+        val selectedAiMode = aiRequestMode
         val route = RequestRoutingPolicy.route(
             requestId = requestId,
             prompt = text,
-            mode = aiRequestMode,
+            mode = selectedAiMode,
             // A model must be loaded and verified before AUTO may use the local backend.
-            // This build has no user-imported model manager yet, so it remains false.
-            localModelReady = false,
+            localModelReady = localAi.status().phase == LocalAiPhase.READY,
             isExactFastCommand = fastCommand != null,
         )
         if (route is RequestRoute.Rejected) {
@@ -163,7 +230,120 @@ class JarvisStore(private val app: Context) {
         submitting = true
         draft = ""
         notice = ""
-        background(lanes.send) {
+        background(if (route is RequestRoute.Local) lanes.local else lanes.send) {
+            if (route is RequestRoute.Local) {
+                val requestStored = runCatching { localHistory.recordRequest(requestId, text, System.currentTimeMillis()) }
+                if (requestStored.isFailure) {
+                    ui {
+                        submitting = false
+                        draft = text
+                        notice = "Jarvis could not save this on-device request."
+                    }
+                    return@background
+                }
+                localAiRequestId = requestId
+                ui {
+                    localAiRequestRunning = true
+                    entries = mergeEntries(entries, localHistory.all())
+                }
+                val localOutputProduced = java.util.concurrent.atomic.AtomicBoolean(false)
+                val outcome = runCatching {
+                    localAi.generate(text) { chunk -> if (chunk.isNotEmpty()) localOutputProduced.set(true) }
+                }
+                val fallback = if (
+                    outcome.isFailure &&
+                    localAi.status().phase != LocalAiPhase.CANCELLED
+                ) {
+                    RequestRoutingPolicy.routeAfterLocalFailure(
+                        requestId,
+                        selectedAiMode,
+                        partialOutputProduced = localOutputProduced.get(),
+                    )
+                } else null
+                if (fallback is RequestRoute.Mac) {
+                    // No local output escaped, so AUTO can safely retry the same
+                    // request ID through the paired Mac path without a duplicate bubble.
+                    val removed = runCatching { localHistory.remove(requestId) }.isSuccess
+                    if (removed) {
+                        localAiRequestId = null
+                        ui {
+                            localAiRequestRunning = false
+                            localAiSnapshot = localAi.status()
+                            entries = mergeEntries(entries, localHistory.all())
+                            notice = "Local inference was unavailable before producing an answer. Sending this request to the Mac."
+                        }
+                        val runtime = LinkService.runtime(app)
+                        val stored = runCatching { runtime.recordLocalTaskRequest(requestId, text, transport = transport) }
+                        if (stored.isFailure) {
+                            ui {
+                                submitting = false
+                                draft = text
+                                notice = "Jarvis could not save the fallback request on your phone."
+                            }
+                            return@background
+                        }
+                        val delivery = runCatching {
+                            runtime.submit(
+                                LinkSettings(app).relayUrl,
+                                TaskSubmission(text, setOf(SafeCapability.ASSISTANT), clientRequestId = requestId),
+                                null,
+                            )
+                        }
+                        delivery.onSuccess { result ->
+                            runtime.recordLocalTaskResult(
+                                requestId,
+                                result.messageId,
+                                if (result.queuedOffline) "QUEUED" else "SENT",
+                                "",
+                            )
+                        }.onFailure { failure ->
+                            val unresolved = failure is ApiException && failure.statusCode == null
+                            runtime.recordLocalTaskResult(
+                                requestId,
+                                "",
+                                if (unresolved) "RUNNING" else "FAILED",
+                                deliveryError(failure),
+                            )
+                        }
+                        ui { submitting = false }
+                        refreshLocal()
+                        syncNow()
+                        return@background
+                    }
+                }
+                val persisted = outcome.fold(
+                    onSuccess = { answer ->
+                        runCatching { localHistory.recordResult(requestId, "COMPLETED", answer, answer.take(400), System.currentTimeMillis()) }
+                        ui { notice = "Answered on this phone using the loaded local model." }
+                        "COMPLETED"
+                    },
+                    onFailure = { failure ->
+                        val cancelled = localAi.status().phase == LocalAiPhase.CANCELLED
+                        runCatching {
+                            localHistory.recordResult(
+                                requestId,
+                                if (cancelled) "CANCELLED" else "FAILED",
+                                "",
+                                if (cancelled) "Cancelled on this phone." else localModelError(failure),
+                                System.currentTimeMillis(),
+                            )
+                        }
+                        if (!cancelled) ui { notice = localModelError(failure) }
+                        if (cancelled) "CANCELLED" else "FAILED"
+                    },
+                )
+                localAiRequestId = null
+                ui {
+                    localAiRequestRunning = false
+                    submitting = false
+                    localAiSnapshot = localAi.status()
+                    entries = mergeEntries(entries, localHistory.all())
+                    if (localHistory.all().firstOrNull { it["message_id"] == requestId }?.get("state") != persisted) {
+                        notice = "The local task finished, but its result could not be saved on this phone."
+                    }
+                }
+                return@background
+            }
             val runtime = LinkService.runtime(app)
             if (runCatching { runtime.recordLocalTaskRequest(requestId, text, transport = transport) }.isFailure) {
                 ui {
@@ -265,6 +445,7 @@ class JarvisStore(private val app: Context) {
     fun tick() = ui { now = System.currentTimeMillis() }
 
     fun destroy() {
+        if (localAiRequestRunning) localAi.cancel()
         destroyed = true
         lanes.close()
         main.removeCallbacksAndMessages(null)
@@ -302,4 +483,18 @@ class JarvisStore(private val app: Context) {
         }
         else -> "Jarvis could not deliver this request. Check the connection, then send it again."
     }
+
+    private fun localModelError(failure: Throwable): String = when (failure) {
+        is com.jarvis.companion.localai.LocalAiException -> failure.message ?: "Local inference could not run."
+        is com.jarvis.companion.localai.LocalModelException -> failure.message ?: "The selected model could not be imported."
+        else -> "The local model could not be used (${failure.javaClass.simpleName})."
+    }
+
+    private fun mergeEntries(
+        remote: List<Map<String, Any>>,
+        local: List<Map<String, Any>>,
+    ): List<Map<String, Any>> = (remote + local)
+        .associateBy { it["message_id"] as? String ?: "" }
+        .values
+        .sortedBy { (it["created_at_unix_ms"] as? Number)?.toLong() ?: 0L }
 }

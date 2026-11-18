@@ -1,6 +1,8 @@
 package com.jarvis.companion.ui
 
 import android.Manifest
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -30,14 +32,21 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.jarvis.companion.AdvancedActivity
+import com.jarvis.companion.localai.LocalAiManager
+import com.jarvis.companion.localai.LocalAiPhase
+import com.jarvis.companion.localai.LocalModelCatalog
 import com.jarvis.companion.link.LinkAlerts
 import com.jarvis.companion.link.LinkSettings
 import com.jarvis.companion.telegram.TelegramActivity
@@ -47,6 +56,12 @@ import com.jarvis.companion.telegram.TelegramActivity
 fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
     val context = LocalContext.current
     val settings = remember(context) { LinkSettings(context) }
+    val modelPreflight = remember(context) { LocalAiManager.get(context).preflight() }
+    val modelNetwork = remember(context) { modelNetworkLabel(context) }
+    var modelTermsAccepted by remember { mutableStateOf(false) }
+    val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) store.importLocalModel(uri, modelTermsAccepted)
+    }
     val telegram = store.telegram
     Column(Modifier.fillMaxSize().statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -103,6 +118,59 @@ fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
                             style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
                         )
                     }
+                }
+            }
+
+            item { SectionLabel("On-device model") }
+            item {
+                val descriptor = LocalModelCatalog.gemma3OneBInt4
+                val snapshot = store.localAiSnapshot
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FactCard(
+                        listOf(
+                            "Runtime" to "LiteRT-LM CPU",
+                            "Model" to descriptor.displayName,
+                            "Model file" to "584 MB · ${if (modelPreflight.enoughSpace) "space and memory available" else "device space or memory is below the published minimum"}",
+                            "State" to when (snapshot.phase) {
+                                LocalAiPhase.READY -> "Loaded on this phone"
+                                LocalAiPhase.LOADING -> "Loading"
+                                LocalAiPhase.GENERATING -> "Generating"
+                                LocalAiPhase.CANCELLING -> "Cancelling"
+                                LocalAiPhase.CANCELLED -> "Cancelled"
+                                LocalAiPhase.FAILED -> "Unavailable: ${snapshot.error}"
+                                else -> "Not loaded"
+                            },
+                        ),
+                    )
+                    SurfaceCard {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                BasicText("I reviewed the Gemma terms", style = JarvisType.Section.copy(color = JarvisColor.Text))
+                                BasicText("Required before importing this gated model.", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+                            }
+                            Toggle(on = modelTermsAccepted) { modelTermsAccepted = !modelTermsAccepted }
+                        }
+                    }
+                    TextAction("Read Gemma terms", filled = false, modifier = Modifier.fillMaxWidth()) {
+                        context.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(descriptor.licenseUrl)))
+                    }
+                    TextAction(
+                        "Choose model file (no automatic download)",
+                        filled = true,
+                        enabled = modelTermsAccepted && modelPreflight.enoughSpace && !store.submitting,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { modelPicker.launch(arrayOf("application/octet-stream", "application/x-binary", "*/*")) }
+                    if (snapshot.phase == LocalAiPhase.READY) {
+                        TextAction("Unload model from memory", filled = false, modifier = Modifier.fillMaxWidth()) { store.unloadLocalModel() }
+                    } else {
+                        TextAction("Load already imported model", filled = false, enabled = !store.submitting, modifier = Modifier.fillMaxWidth()) {
+                            store.loadLocalModel()
+                        }
+                    }
+                    BasicText(
+                        "Current network: $modelNetwork. Selecting a cloud file may transfer up to 584 MB; use a local file or Wi-Fi if you do not want cellular data used. Jarvis checks file size and records SHA-256 after import, but does not verify the publisher's signature. Use the pinned official artifact ${descriptor.sourceRevision.take(12)} from ${descriptor.sourcePage}.",
+                        style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
+                    )
                 }
             }
 
@@ -194,6 +262,18 @@ private fun notificationPermissionLabel(context: Context): String {
         "Allowed"
     } else {
         "Not allowed. Approvals still appear in Approvals."
+    }
+}
+
+private fun modelNetworkLabel(context: Context): String {
+    val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return "unknown"
+    val network = manager.activeNetwork ?: return "offline"
+    val caps = manager.getNetworkCapabilities(network) ?: return "unknown"
+    return when {
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "mobile data"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+        else -> "another network"
     }
 }
 

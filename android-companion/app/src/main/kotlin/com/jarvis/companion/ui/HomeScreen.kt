@@ -360,11 +360,20 @@ private fun Composer(
                 .size(48.dp)
                 .clip(CircleShape)
                 .background(if (canSend || store.submitting) JarvisColor.Sage else JarvisColor.SurfaceRaised)
-                .semantics { contentDescription = "Send" }
-                .clickable(enabled = canSend, role = Role.Button) { store.submit() },
+                .semantics { contentDescription = if (store.localAiRequestRunning) "Cancel on-device response" else "Send" }
+                .clickable(enabled = canSend || store.localAiRequestRunning, role = Role.Button) {
+                    if (store.localAiRequestRunning) store.cancelLocalAi() else store.submit()
+                },
             contentAlignment = Alignment.Center,
         ) {
-            if (store.submitting) {
+            if (store.localAiRequestRunning) {
+                Image(
+                    painter = rememberVectorPainter(JarvisIcons.Close),
+                    contentDescription = null,
+                    colorFilter = ColorFilter.tint(JarvisColor.Background),
+                    modifier = Modifier.size(22.dp),
+                )
+            } else if (store.submitting) {
                 Spinner(color = JarvisColor.Background)
             } else {
                 Image(
