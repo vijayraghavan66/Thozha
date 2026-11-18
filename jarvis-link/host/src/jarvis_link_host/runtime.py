@@ -232,11 +232,12 @@ class HostRelayRuntime:
 
             raise EnvelopeError("sender certificate changed before dispatch")
 
-    def poll_once(self, *, limit: int = 20, now_ms: int | None = None) -> dict[str, int]:
+    def poll_once(self, *, limit: int = 20, now_ms: int | None = None, records: list[dict] | None = None) -> dict[str, int]:
         """Poll, dispatch, durably cache encrypted replies, then ACK once deliverable."""
         if self.relay.device_id != self.host.device_id or self.relay.tenant_id != self.host.tenant_id:
             raise ValueError("relay client identity does not match host")
-        records = self.relay.inbox(device_id=self.host.device_id, limit=limit)
+        if records is None:
+            records = self.relay.inbox(device_id=self.host.device_id, limit=limit)
         counts = {"received": 0, "rejected": 0, "replied": 0}
         for record in records:
             envelope = record.get("envelope")

@@ -28,6 +28,7 @@ import json
 import os
 import stat
 import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -91,10 +92,16 @@ def _host(state: dict, identity: DeviceIdentity, supervisor) -> JarvisLinkHost:
 
 TASK_WATCH_PATH = TEST_DIR / "task-watch.json"
 TERMINAL_TASK_STATES = {"COMPLETED", "FAILED", "CANCELLED"}
+_WATCH_LOCK = threading.RLock()
 
 
 def _record_task_watch(*, task_id: str, idempotency_key: str, companion_id: str) -> None:
     """Remember which companion submitted a task, so its final state can be published back to that companion."""
+    with _WATCH_LOCK:
+        _record_task_watch_locked(task_id=task_id, idempotency_key=idempotency_key, companion_id=companion_id)
+
+
+def _record_task_watch_locked(*, task_id: str, idempotency_key: str, companion_id: str) -> None:
     entries = json.loads(TASK_WATCH_PATH.read_text()) if TASK_WATCH_PATH.is_file() else []
     if any(entry["task_id"] == task_id for entry in entries):
         return
@@ -106,6 +113,11 @@ def _record_task_watch(*, task_id: str, idempotency_key: str, companion_id: str)
 
 def _publish_task_updates(state, client, identity, adapter, runtime) -> int:
     """Announce new pending approvals of watched tasks, and publish each terminal state, to the submitting companion."""
+    with _WATCH_LOCK:
+        return _publish_task_updates_locked(state, client, identity, adapter, runtime)
+
+
+def _publish_task_updates_locked(state, client, identity, adapter, runtime) -> int:
     if not TASK_WATCH_PATH.is_file() or not hasattr(adapter, "task_status"):
         return 0
     entries = json.loads(TASK_WATCH_PATH.read_text())
@@ -271,11 +283,11 @@ def _process_requests(state, client, identity, store, adapter) -> list[dict]:
     return created
 
 
-def _cycle(state, client, identity, store, adapter, response_outbox=None) -> dict:
+def _cycle(state, client, identity, store, adapter, response_outbox=None, dispatcher=None) -> dict:
     """One supervisor cycle: create queued requests, receive relay messages, resume approved tasks, publish results."""
     created = _process_requests(state, client, identity, store, adapter)
-    runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client, response_outbox=response_outbox)
-    counts = runtime.poll_once()
+    runtime = dispatcher.runtime if dispatcher else HostRelayRuntime(host=_host(state, identity, adapter), relay=client, response_outbox=response_outbox)
+    counts = dispatcher.poll_once() if dispatcher else runtime.poll_once()
     published = _publish_task_updates(state, client, identity, adapter, runtime)
     report = []
     for record in (_pending_records() if store is not None else []):
@@ -321,16 +333,25 @@ async def _serve(args, path: Path) -> None:
         # Real engine path. The OpenJarvis server owns the supervisor database; this process never opens it,
         # so its restart recovery cannot pause tasks that the running server is executing.
         from jarvis_link_host.openjarvis_api_adapter import OpenJarvisApiSupervisorAdapter
-        store, adapter = None, OpenJarvisApiSupervisorAdapter()
+        store, adapter = None, OpenJarvisApiSupervisorAdapter(
+            submission_ledger=TEST_DIR / "submission-ledger.json" if args.concurrent_dispatch else None,
+        )
     else:
         store, adapter = _open_supervisor()
     response_outbox = HostResponseOutbox(TEST_DIR / "response-outbox.db")
+    dispatcher = None
+    if args.concurrent_dispatch:
+        if args.engine != "api":
+            raise ValueError("concurrent dispatch requires the API supervisor")
+        from jarvis_link_host.concurrent_dispatch import ConcurrentRelayDispatch
+        runtime = HostRelayRuntime(host=_host(state, identity, adapter), relay=client, response_outbox=response_outbox)
+        dispatcher = ConcurrentRelayDispatch(runtime)
     ws_url = args.relay.replace("http", "ws", 1) + f"/v1/devices/{host_id}/stream"
     backoff = 2.0
     try:
         while True:
             try:
-                cycle = await asyncio.to_thread(_cycle, state, client, identity, store, adapter, response_outbox)
+                cycle = await asyncio.to_thread(_cycle, state, client, identity, store, adapter, response_outbox, dispatcher)
                 print(json.dumps({"event": "cycle", "at": time.strftime("%H:%M:%S"), **cycle}), flush=True)
             except Exception as failure:  # keep the loop alive; report only the exception class
                 print(json.dumps({"event": "cycle_error", "error": type(failure).__name__}), flush=True)
@@ -352,6 +373,8 @@ async def _serve(args, path: Path) -> None:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
     finally:
+        if dispatcher is not None:
+            await asyncio.to_thread(dispatcher.close)
         if store is not None:
             store.close()
         response_outbox.close()
@@ -381,6 +404,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--message", default="JARVIS_SIMULATED_APPROVAL_1")
     parser.add_argument("--approval-ttl", type=int, default=300)
     parser.add_argument("--interval", type=float, default=60.0, help="serve: fallback cycle interval (s)")
+    parser.add_argument("--concurrent-dispatch", action="store_true", help="experimental bounded relay dispatch; relay retains unacknowledged requests")
     parser.add_argument("--engine", choices=["api", "store"], default="api",
                         help="serve: 'api' dispatches to the running OpenJarvis server (real AI engine); "
                              "'store' is the legacy local-store path that records tasks without executing them")

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import stat
+import threading
 import tomllib
 import time
 from datetime import datetime, timezone
@@ -56,6 +57,7 @@ class _SubmissionLedger:
 
     def __init__(self, path: Path | None) -> None:
         self.path = path
+        self._lock = threading.RLock()
         self._entries: dict[str, dict[str, Any]] = {}
         if path is not None and path.exists():
             try:
@@ -67,15 +69,29 @@ class _SubmissionLedger:
             self._entries = loaded
 
     def get(self, key: str) -> dict[str, Any] | None:
-        return self._entries.get(key)
+        with self._lock:
+            return self._entries.get(key)
+
+    def reserve(self, key: str, digest: str) -> dict[str, Any] | None:
+        """Bind a key to one digest atomically before any network request."""
+        with self._lock:
+            known = self._entries.get(key)
+            if known is not None and known.get("digest") != digest:
+                raise SupervisorRefused("task idempotency key was already used for a different request")
+            if known is None:
+                self._entries[key] = {"digest": digest, "task_id": None}
+                self._save()
+            return known
 
     def put(self, key: str, entry: dict[str, Any]) -> None:
-        self._entries[key] = entry
-        self._save()
+        with self._lock:
+            self._entries[key] = entry
+            self._save()
 
     def discard(self, key: str) -> None:
-        if self._entries.pop(key, None) is not None:
-            self._save()
+        with self._lock:
+            if self._entries.pop(key, None) is not None:
+                self._save()
 
     def _save(self) -> None:
         if self.path is None:
@@ -185,11 +201,8 @@ class OpenJarvisApiSupervisorAdapter:
         if not _IDEMPOTENCY_RE.fullmatch(idempotency_key):
             raise SupervisorRefused("task idempotency key is invalid")
         digest = _submission_digest(objective.strip(), capability_scope)
-        known = self._ledger.get(idempotency_key)
-        if known is not None and known.get("digest") != digest:
-            raise SupervisorRefused("task idempotency key was already used for a different request")
-        # Record the digest before posting, so a retry after a lost response can prove it is the same request.
-        self._ledger.put(idempotency_key, {"digest": digest, "task_id": known.get("task_id") if known else None})
+        # Bind the key before posting, including when multiple workers race.
+        known = self._ledger.reserve(idempotency_key, digest)
         status, data = self._request("POST", "/v1/jarvis/link/tasks", {
             "objective": objective.strip(),
             "capability_scope": capability_scope,
