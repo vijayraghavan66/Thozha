@@ -25,6 +25,16 @@ fun main(args: Array<String>) {
     rateGate.awaitSlot()
     check(waits.last() == 500L, "Telegram flood wait defers queued tunnel frames")
 
+    var delayedNow = 0L
+    val delayedWaits = mutableListOf<Long>()
+    val delayedGate = TelegramSendRateGate(1_000_000_000L, { delayedNow }, { wait -> delayedWaits += wait; delayedNow += wait })
+    delayedGate.deferForNanos(120_000_000_000L)
+    check(!delayedGate.tryAwaitSlot(30_000_000_000L), "long Retry-After defers the signed request without waiting or sending stale auth")
+    check(delayedWaits.isEmpty(), "long flood wait does not block the send executor")
+    delayedNow = 90_000_000_000L
+    check(delayedGate.tryAwaitSlot(30_000_000_000L), "request can reserve a safe slot once the signed freshness budget is met")
+    check(delayedWaits == listOf(30_000_000_000L), "remaining safe delay is respected")
+
     val fixture = LinkJson.parseObject(File(args[0]).readText(Charsets.UTF_8))
     val requestFrames = (fixture["request_frames"] as List<*>).map { it as String }
     val responseFrames = (fixture["response_frames"] as List<*>).map { it as String }
@@ -99,6 +109,27 @@ fun main(args: Array<String>) {
     check(sent.isNotEmpty() && !sent.joinToString("").contains("leak"), "only allowlisted headers leave the phone")
     check(diagnostics.size == 3 && diagnostics.all { !it.contains("exchange-id-0001") && !it.contains("/v1/") && !it.contains("leak") }, "diagnostics avoid raw ids, paths and headers")
     check(diagnostics.any { it.contains("tunnel_finish") && it.contains("outcome=response") }, "successful exchange records timing outcome")
+
+    val authFrames = mutableListOf<String>()
+    val authDiagnostics = mutableListOf<String>()
+    val authTunnel = TelegramRelayTunnel(
+        sendFrame = { authFrames += it }, timeoutMs = 5_000, idSource = { "auth-401-req-001" },
+        log = { authDiagnostics += it },
+    )
+    val authRequestId = "01234567-89ab-cdef-0123-456789abcdef"
+    val authWorker = thread(start = true) {
+        while (authFrames.isEmpty()) Thread.sleep(1)
+        val requestId = LinkJson.parseObject(authFrames.single().removePrefix(TunnelFrames.PREFIX))["id"] as String
+        val errorBody = LinkJson.encode(mapOf("error" to mapOf(
+            "code" to "TIMESTAMP_SKEW", "request_id" to authRequestId, "message" to "not logged",
+        )))
+        authTunnel.onText(TunnelFrames.encode(mapOf("t" to "res", "id" to requestId, "s" to 401L, "b" to errorBody), requestId).single())
+    }
+    val authResponse = authTunnel.exchange("GET", "/v1/devices/d1/inbox", emptyMap(), ByteArray(0))
+    authWorker.join()
+    val authDiagnostic = authDiagnostics.single { it.startsWith("relay_rejected") }
+    check(authResponse.status == 401 && authDiagnostic.contains("code=TIMESTAMP_SKEW"), "401 rejection code is traced through the tunnel")
+    check(authDiagnostic.contains("request_id=01234567") && "not logged" !in authDiagnostic, "auth diagnostics include only a truncated correlation ID, never response text")
 
     // --- timeout is an IOException, not a silent success -------------------------------------------------------
     val slow = TelegramRelayTunnel(sendFrame = { }, timeoutMs = 50, idSource = { "timeout-id-0001" })

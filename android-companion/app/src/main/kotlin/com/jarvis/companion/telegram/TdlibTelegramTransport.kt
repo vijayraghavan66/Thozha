@@ -77,14 +77,19 @@ class TdlibTelegramTransport(
     fun sendText(text: String) {
         val chatId = botChatId
         if (chatId == 0L) throw java.io.IOException("Bot chat is not ready")
-        // Home submission and background inbox sync use separate executors; pace their shared bot chat.
-        tunnelSendGate.awaitSlot()
         val trace = runCatching {
             val frame = com.jarvis.link.LinkJson.parseObject(text.removePrefix(TunnelFrames.PREFIX))
             val id = frame["id"] as? String ?: ""
             java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8))
                 .take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
         }.getOrDefault("unknown")
+        // Relay signatures have a strict 60s skew window. If Telegram's Retry-After exceeds
+        // this safe wait budget, leave the encrypted Link envelope in its durable outbox instead
+        // of sending a request whose signature will be stale by the time Telegram forwards it.
+        if (!tunnelSendGate.tryAwaitSlot(MAX_SIGNED_REQUEST_WAIT_NANOS)) {
+            android.util.Log.i(TAG, "telegram_send_deferred trace=$trace reason=retry_after")
+            throw java.io.IOException("Telegram retry window exceeds signed-request freshness budget")
+        }
         val started = System.nanoTime()
         android.util.Log.i(TAG, "tdlib_send_start trace=$trace")
         val content = TdApi.InputMessageText().apply {
@@ -229,6 +234,7 @@ class TdlibTelegramTransport(
     companion object {
         const val BOT_USERNAME = "JarvisMac0w0507bot"
         const val TAG = "JarvisTelegram"
+        private val MAX_SIGNED_REQUEST_WAIT_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(30)
         private val ACK_RE = Regex("${TelegramStatus.ACK_PREFIX.trim()} ([A-Za-z0-9_-]{8,64})")
     }
 }

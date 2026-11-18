@@ -10,18 +10,33 @@ internal class TelegramSendRateGate(
 ) {
     private val lock = Any()
     private var nextSlotNanos = 0L
+    private var deferredUntilNanos = 0L
 
     fun awaitSlot() {
+        while (!tryAwaitSlot(Long.MAX_VALUE)) { /* A newer flood wait arrived during the wait; reserve again. */ }
+    }
+
+    /**
+     * Reserves a send slot only if waiting would keep a pre-signed relay request inside its freshness window.
+     * Returning false means the caller should leave the signed ciphertext queued and retry later with fresh auth.
+     */
+    fun tryAwaitSlot(maxWaitNanos: Long): Boolean {
+        require(maxWaitNanos >= 0) { "maximum wait must be non-negative" }
         val wait = synchronized(lock) {
             val now = nowNanos()
-            val slot = maxOf(now, nextSlotNanos)
-            nextSlotNanos = slot + intervalNanos
-            slot - now
-        }
+            val slot = maxOf(now, nextSlotNanos, deferredUntilNanos)
+            val delay = slot - now
+            if (delay > maxWaitNanos) null else {
+                nextSlotNanos = slot + intervalNanos
+                delay
+            }
+        } ?: return false
         pauseNanos(wait)
+        return synchronized(lock) { nowNanos() >= deferredUntilNanos }
     }
 
     fun deferForNanos(durationNanos: Long) = synchronized(lock) {
-        nextSlotNanos = maxOf(nextSlotNanos, nowNanos() + durationNanos.coerceIn(0L, 300_000_000_000L))
+        deferredUntilNanos = maxOf(deferredUntilNanos, nowNanos() + durationNanos.coerceIn(0L, 300_000_000_000L))
+        nextSlotNanos = maxOf(nextSlotNanos, deferredUntilNanos)
     }
 }

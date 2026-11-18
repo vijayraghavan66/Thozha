@@ -54,6 +54,14 @@ class TelegramRelayTunnel(
             frames.forEach(sendFrame)
             log("tunnel_enqueued trace=$trace elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)}")
             val response = queue.poll(timeoutMs, TimeUnit.MILLISECONDS)
+            if (response?.status == 401) {
+                val error = runCatching {
+                    (com.jarvis.link.LinkJson.parseObject(response.text)["error"] as? Map<*, *>)
+                }.getOrNull()
+                val code = (error?.get("code") as? String)?.takeIf { it.matches(Regex("^[A-Z0-9_]{1,48}$")) } ?: "unknown"
+                val requestId = (error?.get("request_id") as? String)?.takeIf { it.matches(Regex("^[0-9a-fA-F-]{36}$")) }?.take(8) ?: "none"
+                log("relay_rejected trace=$trace status=401 code=$code request_id=$requestId")
+            }
             log("tunnel_finish trace=$trace outcome=${if (response == null) "timeout" else "response"} elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)}")
             return response ?: throw IOException("relay tunnel timed out")
         } finally {

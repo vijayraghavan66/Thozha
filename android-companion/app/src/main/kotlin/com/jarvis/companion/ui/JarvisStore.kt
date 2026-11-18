@@ -17,6 +17,7 @@ import com.jarvis.companion.telegram.TelegramSnapshot
 import com.jarvis.link.ApprovalReview
 import com.jarvis.link.FastCommandRequest
 import com.jarvis.link.LinkStatus
+import com.jarvis.link.RelayHttpException
 import com.jarvis.link.SafeCapability
 import com.jarvis.link.TaskSubmission
 import java.util.UUID
@@ -167,7 +168,10 @@ class JarvisStore(private val app: Context) {
             }.onFailure { failure ->
                 val unresolved = failure is ApiException && failure.statusCode == null
                 val site = failure.stackTrace.firstOrNull()?.let { "${it.className.substringAfterLast('.')}.${it.methodName}" } ?: "unknown"
-                android.util.Log.w("JarvisStore", "submit_failed trace=$requestTrace type=${failure.javaClass.simpleName} site=$site status=${(failure as? ApiException)?.statusCode} elapsed_ms=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs)}")
+                val status = (failure as? ApiException)?.statusCode ?: (failure as? RelayHttpException)?.status
+                val code = (failure as? RelayHttpException)?.code ?: "none"
+                val relayRequestId = (failure as? RelayHttpException)?.requestId?.take(8) ?: "none"
+                android.util.Log.w("JarvisStore", "submit_failed trace=$requestTrace type=${failure.javaClass.simpleName} site=$site status=$status code=$code relay_request_id=$relayRequestId elapsed_ms=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs)}")
                 runtime.recordLocalTaskResult(requestId, "", if (unresolved) "RUNNING" else "FAILED", deliveryError(failure))
             }
             ui { submitting = false }
@@ -251,6 +255,12 @@ class JarvisStore(private val app: Context) {
     }
 
     private fun deliveryError(failure: Throwable): String = when (failure) {
+        is RelayHttpException -> when {
+            failure.status == 401 && failure.code == "TIMESTAMP_SKEW" -> "Telegram delayed this request. It is saved on this phone and will retry with fresh authentication."
+            failure.status == 401 -> "The saved pairing could not authenticate. Pairing data was kept; check the Mac connection in Settings."
+            failure.status == 429 -> "The relay is rate-limited right now. This request stays saved on your phone for retry."
+            else -> "Jarvis could not deliver this request. Check the connection, then send it again."
+        }
         is ApiException -> when (failure.statusCode) {
             401 -> "The saved pairing could not authenticate. Pairing data was kept; check the Mac connection in Settings."
             403 -> "The Mac blocked this request because it is outside the enabled assistant scope."
