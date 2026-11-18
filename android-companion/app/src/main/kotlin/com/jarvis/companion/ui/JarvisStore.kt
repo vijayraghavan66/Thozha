@@ -30,11 +30,13 @@ val ActiveStates = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING
  * Holds everything the Compose screens show. All values come from LinkRuntime, the Telegram session, and the
  * sync that LinkBackgroundSync performs. Nothing here fabricates a task state or an approval.
  *
- * Runtime calls run on one background thread; results are posted back to the main thread before state changes.
+ * Local state, outbound submissions, and sync use separate lanes; UI state changes stay on the main thread.
  */
 class JarvisStore(private val app: Context) {
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "jarvis-ui-io").apply { isDaemon = true } }
+    private val sendIo = Executors.newSingleThreadExecutor { r -> Thread(r, "jarvis-ui-send").apply { isDaemon = true } }
+    private val syncIo = Executors.newSingleThreadExecutor { r -> Thread(r, "jarvis-ui-sync").apply { isDaemon = true } }
     private val sessions = ChatSessions(app)
     private var destroyed = false
 
@@ -106,7 +108,7 @@ class JarvisStore(private val app: Context) {
     fun syncNow() = ui {
         if (syncing) return@ui
         syncing = true
-        background {
+        background(syncIo) {
             runCatching { LinkBackgroundSync.run(app) }
             ui { syncing = false }
             refreshLocal()
@@ -130,7 +132,7 @@ class JarvisStore(private val app: Context) {
         submitting = true
         draft = ""
         notice = ""
-        background {
+        background(sendIo) {
             val runtime = LinkService.runtime(app)
             if (runCatching { runtime.recordLocalTaskRequest(requestId, text, transport = transport) }.isFailure) {
                 ui {
@@ -217,6 +219,8 @@ class JarvisStore(private val app: Context) {
     fun destroy() {
         destroyed = true
         io.shutdownNow()
+        sendIo.shutdownNow()
+        syncIo.shutdownNow()
         main.removeCallbacksAndMessages(null)
     }
 
@@ -224,8 +228,8 @@ class JarvisStore(private val app: Context) {
         main.post { if (!destroyed) block() }
     }
 
-    private fun background(block: () -> Unit) {
-        io.execute {
+    private fun background(executor: java.util.concurrent.ExecutorService = io, block: () -> Unit) {
+        executor.execute {
             try {
                 block()
             } catch (failure: Throwable) {
