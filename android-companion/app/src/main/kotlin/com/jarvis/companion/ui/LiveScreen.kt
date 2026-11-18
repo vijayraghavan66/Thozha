@@ -241,7 +241,10 @@ private fun LiveVoiceControls(store: JarvisStore) {
                     when (state) {
                         VoiceControllerState.LISTENING, VoiceControllerState.PROCESSING -> voice.cancel()
                         VoiceControllerState.SPEAKING -> {
-                            if (!voice.startBargeInTurn()) {
+                            if (!JarvisVoiceController.hasMicrophonePermission(context)) {
+                                store.notice = "Allow microphone access before using voice interruption."
+                                store.permissionRequester?.invoke(Manifest.permission.RECORD_AUDIO)
+                            } else if (!voice.startBargeInTurn()) {
                                 store.notice = "The recognizer could not start an interruption. Tap Stop/Cancel or type your request."
                             }
                         }
