@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import ipaddress
+import json
 import logging
 import threading
 import uuid
@@ -166,6 +169,25 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         and not request_body.tools
         and (not request_body.stream or bool(getattr(agent, "_tools", None)))
     )
+    link_task_id = None
+    candidate_task_id = request.headers.get("X-OpenJarvis-Task")
+    if candidate_task_id:
+        from openjarvis.tasks.supervisor import get_supervisor_store
+
+        candidate_task = get_supervisor_store().get_task(candidate_task_id)
+        if candidate_task is not None:
+            try:
+                candidate_meta = json.loads(candidate_task.get("recovery_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                candidate_meta = {}
+            if candidate_meta.get("source") == "jarvis_link":
+                if not use_server_agent:
+                    raise HTTPException(status_code=503, detail="Link task execution requires the configured server agent")
+                link_objective = next(
+                    (message.content or "" for message in reversed(request_body.messages) if message.role == "user"),
+                    "",
+                )
+                link_task_id = _begin_supervised_request(request, link_objective)
 
     # Inject memory context into messages before dispatching
     config = getattr(request.app.state, "config", None)
@@ -298,6 +320,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                 memory_service=getattr(request.app.state, "memory_service", None),
             )
         if use_server_agent:
+            task_id = link_task_id or _begin_supervised_request(request, query_text_for_complexity)
             return await _handle_agent_stream(
                 agent,
                 model,
@@ -306,6 +329,8 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                 trace_store=getattr(request.app.state, "trace_store", None),
                 bus=getattr(request.app.state, "bus", None),
                 memory_service=getattr(request.app.state, "memory_service", None),
+                supervisor_task_id=task_id,
+                supervisor_approval_id=request.headers.get("X-OpenJarvis-Approval"),
             )
         return await _handle_stream(
             engine,
@@ -339,8 +364,11 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     # worker thread so a slow/wedged non-streaming request can't stall the
     # event loop and every other concurrent request with it.
     if use_server_agent:
+        task_id = link_task_id or _begin_supervised_request(request, query_text_for_complexity)
         response = await asyncio.to_thread(
-            _handle_agent,
+            _run_supervised_agent,
+            task_id,
+            request.headers.get("X-OpenJarvis-Approval"),
             agent,
             model,
             request_body,
@@ -378,6 +406,140 @@ def _response_content(response) -> str:
     if choices:
         content = getattr(choices[0].message, "content", "") or ""
     return content
+
+
+def _begin_supervised_request(request: Request, user_text: str) -> str:
+    """Create a durable task or explicitly resume an approved paused task."""
+    from openjarvis.tasks.supervisor import get_supervisor_store
+
+    store = get_supervisor_store()
+    task_id = request.headers.get("X-OpenJarvis-Task")
+    approval_id = request.headers.get("X-OpenJarvis-Approval")
+    if task_id:
+        task = store.get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Supervisor task not found")
+        try:
+            task_metadata = json.loads(task.get("recovery_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            task_metadata = {}
+        if task_metadata.get("source") == "jarvis_link":
+            client_host = request.client.host if request.client else ""
+            try:
+                local_client = ipaddress.ip_address(client_host).is_loopback
+            except ValueError:
+                local_client = client_host.lower() == "localhost"
+            if not local_client:
+                raise HTTPException(status_code=403, detail="Link tasks may be executed only from this Mac")
+            from openjarvis.server.supervisor_routes import authorize_supervisor_request
+
+            authorize_supervisor_request(request)
+            if approval_id:
+                raise HTTPException(status_code=400, detail="Link tasks cannot resume with an approval header")
+            supplied_digest = request.headers.get("X-OpenJarvis-Objective-Digest", "")
+            idempotency_key = request.headers.get("Idempotency-Key", "")
+            body_digest = hashlib.sha256(user_text.encode("utf-8")).hexdigest()
+            if supplied_digest != task["request_digest"] or body_digest != task["request_digest"]:
+                raise HTTPException(status_code=409, detail="Link objective digest does not match the stored task")
+            scope = task_metadata.get("capability_scope")
+            from openjarvis.tasks.supervisor import is_link_scope
+            if not isinstance(scope, list) or not is_link_scope(scope):
+                raise HTTPException(status_code=403, detail="Link task scope is not enabled")
+            try:
+                link_run = store.start_link_task(
+                    task_id,
+                    objective_digest=supplied_digest,
+                    objective_text_digest=body_digest,
+                    capability_scope=scope,
+                    idempotency_key=idempotency_key,
+                )
+            except (PermissionError, RuntimeError, ValueError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if link_run.get("replay"):
+                raise HTTPException(
+                    status_code=409,
+                    detail={"status": "COMPLETED", "result_digest": link_run.get("result_digest")},
+                )
+            return task_id
+        if approval_id:
+            from openjarvis.server.supervisor_routes import authorize_supervisor_request
+
+            authorize_supervisor_request(request)
+        if task["state"] == "PAUSED":
+            if not approval_id:
+                raise HTTPException(status_code=409, detail="Paused task requires explicit approved continuation")
+            if not store.resume_approved_task(task_id, approval_id):
+                raise HTTPException(status_code=409, detail="Task cannot resume with this approval")
+        elif task["state"] == "CREATED":
+            store.transition(task_id, "RUNNING")
+        elif task["state"] != "WAITING_APPROVAL":
+            raise HTTPException(status_code=409, detail=f"Task cannot continue from state {task['state']}")
+        return task_id
+    task_id = store.create_task(user_text or "OpenJarvis supervised request", metadata={"source": "agent_chat"})
+    store.transition(task_id, "RUNNING")
+    return task_id
+
+
+def _run_supervised_agent(task_id: str, approval_id: str | None, agent, model, req, complexity_info=None, **kwargs):
+    """Run an agent with an unforgeable server-side task context and persist outcome."""
+    from openjarvis.tasks.supervisor import bind_task, get_supervisor_store
+
+    store = get_supervisor_store()
+    task = store.get_task(task_id)
+    try:
+        metadata = json.loads(task.get("recovery_json") or "{}") if task else {}
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    is_link_task = metadata.get("source") == "jarvis_link"
+    link_scope = metadata.get("capability_scope") if is_link_task else None
+    scope_name = link_scope[0] if isinstance(link_scope, list) and len(link_scope) == 1 else ""
+    link_capabilities = None
+    if is_link_task:
+        from openjarvis.tasks.supervisor import LINK_SCOPE_CAPABILITIES
+
+        link_capabilities = LINK_SCOPE_CAPABILITIES.get(scope_name, frozenset())
+    try:
+        with bind_task(
+            task_id,
+            approval_id,
+            source="jarvis_link" if is_link_task else str(metadata.get("source") or ""),
+            scope=scope_name,
+            allowed_capabilities=link_capabilities,
+        ):
+            result = _handle_agent(agent, model, req, complexity_info, **kwargs)
+        task = store.get_task(task_id)
+        if task and task["state"] == "CANCELLED":
+            store.record_event(task_id, "task.execution_returned_after_cancellation", {})
+            return result
+        if task and task["state"] == "RUNNING":
+            store.transition(task_id, "VERIFYING", step="response_verification")
+            task = store.get_task(task_id)
+        if is_link_task:
+            text = _response_content(result)
+            if task and task["state"] == "WAITING_APPROVAL":
+                pending = [item for item in store.pending_approvals(100) if item["task_id"] == task_id]
+                if not pending:
+                    raise RuntimeError("Link task entered approval state without a pending approval record")
+                store.mark_link_task_waiting_approval(task_id, pending[-1]["id"])
+            else:
+                store.finish_link_task(task_id, result_text=text)
+                task = store.get_task(task_id)
+        if task and task["state"] == "VERIFYING":
+            store.transition(task_id, "COMPLETED", evidence={"response_returned": True})
+        return result
+    except Exception as exc:
+        task = store.get_task(task_id)
+        if is_link_task:
+            try:
+                store.finish_link_task(task_id, error=type(exc).__name__)
+            except Exception:
+                pass
+        if task and task["state"] in {"RUNNING", "VERIFYING", "PLANNING"}:
+            try:
+                store.transition(task_id, "FAILED", error=type(exc).__name__)
+            except Exception:
+                logging.getLogger("openjarvis.server").exception("Failed to persist supervisor task failure")
+        raise
 
 
 def _record_completed_exchange(
@@ -453,7 +615,7 @@ def _uses_direct_cloud_router(engine: Any, model: str) -> bool:
     """Whether *model* should bypass the configured engine for direct cloud."""
     from openjarvis.server.cloud_router import is_cloud_model
 
-    return is_cloud_model(model) and _engine_key_for_model(engine, model) != "litellm"
+    return is_cloud_model(model) and _engine_key_for_model(engine, model) not in {"litellm", "codex_sdk"}
 
 
 def _handle_direct(
@@ -680,6 +842,8 @@ async def _handle_agent_stream(
     trace_store=None,
     bus=None,
     memory_service=None,
+    supervisor_task_id: str | None = None,
+    supervisor_approval_id: str | None = None,
 ):
     """Run the configured agent and return its result as an SSE response.
 
@@ -708,15 +872,28 @@ async def _handle_agent_stream(
         yield f"data: {first_chunk.model_dump_json()}\n\n"
 
         try:
-            response = await asyncio.to_thread(
-                _handle_agent,
-                agent,
-                model,
-                req,
-                complexity_info,
-                trace_store=trace_store,
-                bus=bus,
-            )
+            if supervisor_task_id:
+                response = await asyncio.to_thread(
+                    _run_supervised_agent,
+                    supervisor_task_id,
+                    supervisor_approval_id,
+                    agent,
+                    model,
+                    req,
+                    complexity_info,
+                    trace_store=trace_store,
+                    bus=bus,
+                )
+            else:
+                response = await asyncio.to_thread(
+                    _handle_agent,
+                    agent,
+                    model,
+                    req,
+                    complexity_info,
+                    trace_store=trace_store,
+                    bus=bus,
+                )
         except Exception as exc:
             logging.getLogger("openjarvis.server").error(
                 "Agent stream error: %s",
@@ -991,7 +1168,7 @@ async def _handle_stream(
                     _inner = getattr(engine, "_inner", engine)
                     if isinstance(_inner, MultiEngine):
                         _routed = _inner._engine_for(model)
-                        if _routed is not None and getattr(_routed, "is_cloud", False):
+                        if _routed is not None and getattr(_routed, "is_cloud", False) and _engine_key_for_model(engine, model) != "codex_sdk":
                             _use_local_fallback = True
                 except Exception:
                     pass
@@ -1122,7 +1299,7 @@ async def list_models(request: Request) -> ModelListResponse:
     model_ids = [
         m
         for m in all_ids
-        if not is_cloud_model(m) or _engine_key_for_model(engine, m) == "litellm"
+        if not is_cloud_model(m) or _engine_key_for_model(engine, m) in {"litellm", "codex_sdk"}
     ]
     if not model_ids:
         model_ids = await list_local_models()

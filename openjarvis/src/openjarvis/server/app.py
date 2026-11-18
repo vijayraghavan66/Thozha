@@ -287,6 +287,7 @@ def create_app(
     # Defense in depth: a literal "*" with credentials is unsafe. Refuse it.
     _origins = [o for o in _origins if o != "*"]
     # Store dependencies in app state
+    app.state.cors_origins = list(_origins)
     app.state.engine = engine
     app.state.model = model
     app.state.agent = agent
@@ -319,6 +320,39 @@ def create_app(
     app.state._managed_workers: set[threading.Thread] = set()
     app.state._managed_runtime_stopping = False
     app.state.session_start = time.time()
+    app.state.link_task_runner = None
+
+    @app.on_event("startup")
+    async def _start_durable_link_task_runner() -> None:
+        agent_for_link = getattr(app.state, "agent", None)
+        engine_for_link = getattr(app.state, "engine", None)
+        model_for_link = getattr(app.state, "model", "") or getattr(agent_for_link, "_model", "")
+        if agent_for_link is None or engine_for_link is None or not model_for_link:
+            return
+        try:
+            from openjarvis.server.routes import _engine_key_for_model
+
+            if _engine_key_for_model(engine_for_link, model_for_link) != "codex_sdk":
+                return
+            from openjarvis.server.link_task_runner import LinkTaskExecutionRunner
+
+            link_runner = LinkTaskExecutionRunner(
+                app=app,
+                store=app.state.supervisor_store,
+                concurrency=int(os.environ.get("OPENJARVIS_LINK_TASK_WORKERS", "2")),
+            )
+            app.state.link_task_runner = link_runner
+            await link_runner.start()
+        except (TypeError, ValueError):
+            logger.exception("Durable Link task runner configuration is invalid")
+
+    @app.on_event("shutdown")
+    async def _stop_durable_link_task_runner() -> None:
+        link_runner = getattr(app.state, "link_task_runner", None)
+        if link_runner is not None:
+            await link_runner.stop()
+            app.state.link_task_runner = None
+
     # Exposed so WebSocket handlers can authenticate the handshake (the HTTP
     # AuthMiddleware never sees WS upgrade requests). Empty = auth disabled.
     app.state.api_key = api_key

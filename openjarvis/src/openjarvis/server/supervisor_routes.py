@@ -464,6 +464,12 @@ async def run_link_task(request: Request) -> JSONResponse:
     """Create/execute one authenticated, loopback-only, supervisor-gated Codex task."""
     _require_loopback(request)
     actor = authorize_supervisor_request(request)
+    mode = request.query_params.get("mode", "")
+    if mode not in {"", "async"}:
+        raise HTTPException(status_code=422, detail="mode must be async when supplied")
+    task_runner = getattr(request.app.state, "link_task_runner", None)
+    if mode == "async" and task_runner is None:
+        raise HTTPException(status_code=503, detail="Durable Link task worker is not running")
     try:
         body = await request.json()
     except Exception as exc:
@@ -525,12 +531,39 @@ async def run_link_task(request: Request) -> JSONResponse:
                 "summary": "Waiting for your approval to continue." if status == "WAITING_APPROVAL" else "",
                 "idempotent_replay": True,
             })
+        if mode == "async" and status == "CREATED":
+            task = store.get_task(task_id) or {}
+            if task.get("state") == "CREATED":
+                if not run.get("objective_text"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This queued task predates durable prompt storage; resubmit it with a new request ID",
+                    )
+                task_runner.wake()
+                return JSONResponse(status_code=202, content={
+                    "task_id": task_id,
+                    "state": "CREATED",
+                    "summary": "Queued for execution.",
+                    "idempotent_replay": True,
+                })
         if status == "FAILED":
             raise HTTPException(status_code=409, detail="This Link task already failed; create a new idempotency key")
         if status == "REJECTED":
             raise HTTPException(status_code=409, detail="This Link task was rejected; create a new request to continue")
         if status == "CANCELLED":
             raise HTTPException(status_code=409, detail="This Link task was cancelled; create a new request to continue")
+
+    if mode == "async":
+        # create_link_task commits both the task row and durable prompt before
+        # the runner is woken. The worker, not this HTTP request, atomically
+        # claims and executes the task.
+        task_runner.wake()
+        return JSONResponse(status_code=202, content={
+            "task_id": task_id,
+            "state": "CREATED",
+            "summary": "Queued for execution.",
+            "idempotent_replay": False,
+        })
 
     objective_digest = hashlib.sha256(objective.strip().encode("utf-8")).hexdigest()
     try:
@@ -629,6 +662,64 @@ async def get_link_task_status(idempotency_key: str, request: Request) -> dict[s
         "result_text": (record.get("result_text") or record.get("result_summary") or "") if state == "COMPLETED" else None,
         "result_digest": record.get("result_digest") if state == "COMPLETED" else None,
     }
+
+
+@router.get("/link/tasks/{idempotency_key}/events")
+async def get_link_task_events(
+    idempotency_key: str,
+    request: Request,
+    after_seq: int = 0,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Read a bounded, owner-authorized progress feed without model content."""
+    _require_loopback(request)
+    actor = authorize_supervisor_request(request)
+    if not re.fullmatch(r"[A-Za-z0-9._~-]{16,128}", idempotency_key):
+        raise HTTPException(status_code=422, detail="Invalid Link task identifier")
+    if after_seq < 0 or not 1 <= limit <= 200:
+        raise HTTPException(status_code=422, detail="Invalid task event cursor")
+    store = get_supervisor_store()
+    record = store.link_task_run_by_idempotency_key(idempotency_key)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Link task not found")
+    task = store.get_task(record["task_id"]) or {}
+    try:
+        metadata = json.loads(task.get("recovery_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    owner = metadata.get("owner_actor")
+    if owner and actor != owner and not actor.startswith("api:"):
+        raise HTTPException(status_code=403, detail="This task belongs to another paired device")
+    try:
+        rows = store.events_after(record["task_id"], after_seq, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid task event cursor") from exc
+    allowed_types = {
+        "task.state", "task.recovered_paused", "task.cancelled", "task.explicit_resume",
+        "link_task.queued", "link_task.started", "link_task.waiting_approval",
+        "link_task.approval_consumed", "link_task.approval_rejected",
+        "link_task.completed", "link_task.failed", "approval.consumed",
+        "tool.mcp_approval_dispatch_claimed", "approval.execution_completed",
+        "approval.mac_mcp_dispatched",
+    }
+    safe_events = []
+    for event in rows:
+        if event["event_type"] not in allowed_types:
+            continue
+        payload = event.get("payload") or {}
+        safe_payload = {}
+        for key in ("from", "to", "step", "previous_state", "state"):
+            value = payload.get(key)
+            if isinstance(value, str) and len(value) <= 80:
+                safe_payload[key] = value
+        safe_events.append({
+            "seq": event["seq"],
+            "event_type": event["event_type"],
+            "created_at": event["created_at"],
+            "payload": safe_payload,
+        })
+    return {"task_id": record["task_id"], "events": safe_events,
+            "next_seq": rows[-1]["seq"] if rows else after_seq}
 
 
 @router.post("/link/fast-command")

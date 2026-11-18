@@ -238,7 +238,7 @@ class SupervisorStore:
             CREATE TABLE IF NOT EXISTS link_task_runs(
               task_id TEXT PRIMARY KEY REFERENCES tasks(id), idempotency_key TEXT NOT NULL UNIQUE,
               objective_digest TEXT NOT NULL, scope TEXT NOT NULL, scope_digest TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
-              result_digest TEXT, result_summary TEXT, created_at TEXT NOT NULL,
+              objective_text TEXT, result_digest TEXT, result_summary TEXT, created_at TEXT NOT NULL,
               started_at TEXT, completed_at TEXT, last_error TEXT
             );
             CREATE TABLE IF NOT EXISTS mcp_approval_dispatches(
@@ -269,6 +269,8 @@ class SupervisorStore:
             link_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(link_task_runs)")}
             if link_columns and "scope_digest" not in link_columns:
                 self._db.execute("ALTER TABLE link_task_runs ADD COLUMN scope_digest TEXT NOT NULL DEFAULT ''")
+            if link_columns and "objective_text" not in link_columns:
+                self._db.execute("ALTER TABLE link_task_runs ADD COLUMN objective_text TEXT")
             if link_columns and "result_text" not in link_columns:
                 # Canonical full answer. result_summary stays a 1000-character preview for Activity cards.
                 self._db.execute("ALTER TABLE link_task_runs ADD COLUMN result_text TEXT")
@@ -387,11 +389,12 @@ class SupervisorStore:
                 (task_id, objective_digest, "CREATED", canonical_json(sorted(LINK_SCOPE_CAPABILITIES[scope])), canonical_json(metadata), now, now),
             )
             db.execute(
-                "INSERT INTO link_task_runs(task_id,idempotency_key,objective_digest,scope,scope_digest,status,created_at) VALUES(?,?,?,?,?,?,?)",
-                (task_id, idempotency_key, objective_digest, scope_json, scope_digest, "CREATED", now),
+                "INSERT INTO link_task_runs(task_id,idempotency_key,objective_digest,scope,scope_digest,status,objective_text,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (task_id, idempotency_key, objective_digest, scope_json, scope_digest, "CREATED", objective, now),
             )
             self._event(db, task_id, "task.created", {"request_digest": objective_digest, "source": "jarvis_link", "scope": scope})
             self._event(db, task_id, "link_task.created", {"idempotency_key": idempotency_key, "scope": scope})
+            self._event(db, task_id, "link_task.queued", {"state": "CREATED", "scope": scope})
         return {"task_id": task_id, "idempotency_key": idempotency_key, "objective_digest": objective_digest, "scope": scope, "status": "CREATED", "created": True}
 
     def start_link_task(self, task_id: str, *, objective_digest: str, objective_text_digest: str, capability_scope: list[str], idempotency_key: str) -> dict[str, Any]:
@@ -419,8 +422,8 @@ class SupervisorStore:
             run = db.execute("SELECT * FROM link_task_runs WHERE task_id=?", (task_id,)).fetchone()
             if run is None:
                 db.execute(
-                    "INSERT INTO link_task_runs(task_id,idempotency_key,objective_digest,scope,scope_digest,status,created_at) VALUES(?,?,?,?,?,?,?)",
-                    (task_id, idempotency_key, objective_digest, scope_json, scope_digest, "CREATED", now),
+                    "INSERT INTO link_task_runs(task_id,idempotency_key,objective_digest,scope,scope_digest,status,objective_text,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (task_id, idempotency_key, objective_digest, scope_json, scope_digest, "CREATED", "", now),
                 )
                 status = "CREATED"
             else:
@@ -434,10 +437,54 @@ class SupervisorStore:
             if task["state"] != "CREATED":
                 raise RuntimeError("Link task is not in CREATED state")
             db.execute("UPDATE tasks SET state='RUNNING',updated_at=?,current_step='codex_link' WHERE id=? AND state='CREATED'", (now, task_id))
-            db.execute("UPDATE link_task_runs SET status='RUNNING',started_at=? WHERE task_id=? AND status='CREATED'", (now, task_id))
+            # Clear the queued prompt in the same transaction that claims execution.
+            # If the process dies after this point, restart recovery pauses the task
+            # and does not replay an operation whose execution may have started.
+            db.execute("UPDATE link_task_runs SET status='RUNNING',started_at=?,objective_text=NULL WHERE task_id=? AND status='CREATED'", (now, task_id))
             self._event(db, task_id, "task.state", {"from": "CREATED", "to": "RUNNING", "step": "codex_link"})
             self._event(db, task_id, "link_task.started", {"scope": scope, "objective_digest": objective_digest})
         return {"task_id": task_id, "idempotency_key": idempotency_key, "objective_digest": objective_digest, "scope": scope, "capability_scope": capability_scope, "scope_digest": scope_digest, "status": "RUNNING", "replay": False}
+
+    def queued_link_tasks(self, limit: int = 32) -> list[dict[str, Any]]:
+        """Return persisted, not-yet-claimed Link submissions in FIFO order.
+
+        Only tasks still in CREATED are returned. On restart, in-flight tasks
+        are paused by recover_after_restart and are deliberately not replayed.
+        """
+        if not 1 <= limit <= 128:
+            raise ValueError("queued Link task limit must be between 1 and 128")
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT r.task_id,r.idempotency_key,r.objective_digest,r.scope,
+                          r.scope_digest,r.objective_text,r.created_at
+                   FROM link_task_runs AS r JOIN tasks AS t ON t.id=r.task_id
+                   WHERE r.status='CREATED' AND t.state='CREATED' AND r.objective_text IS NOT NULL
+                   ORDER BY r.created_at,r.task_id LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def fail_queued_link_task(self, task_id: str, *, error_code: str) -> bool:
+        """Fail a corrupt/unrunnable queued task without claiming or replaying it."""
+        if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", error_code):
+            raise ValueError("invalid queued task error code")
+        now = utc_now()
+        with self._tx() as db:
+            task = db.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
+            run = db.execute("SELECT status FROM link_task_runs WHERE task_id=?", (task_id,)).fetchone()
+            if task is None or run is None or task["state"] != "CREATED" or run["status"] != "CREATED":
+                return False
+            db.execute(
+                "UPDATE tasks SET state='FAILED',current_step='dispatch_failed',updated_at=?,last_error=? WHERE id=? AND state='CREATED'",
+                (now, error_code, task_id),
+            )
+            db.execute(
+                "UPDATE link_task_runs SET status='FAILED',objective_text=NULL,completed_at=?,last_error=? WHERE task_id=? AND status='CREATED'",
+                (now, error_code, task_id),
+            )
+            self._event(db, task_id, "link_task.failed", {"error": error_code})
+            self._event(db, task_id, "task.state", {"from": "CREATED", "to": "FAILED", "step": "dispatch_failed", "error": error_code})
+        return True
 
     def finish_link_task(self, task_id: str, *, result_text: str | None = None, error: str | None = None) -> None:
         now = utc_now()
@@ -502,7 +549,7 @@ class SupervisorStore:
                 raise RuntimeError("Link task is not waiting for this approval")
             if approval["task_id"] != task_id or approval["status"] != "REJECTED":
                 raise PermissionError("Supervisor did not record this task approval as rejected")
-            db.execute("UPDATE link_task_runs SET status='REJECTED',last_error='approval_rejected' WHERE task_id=?", (task_id,))
+            db.execute("UPDATE link_task_runs SET status='REJECTED',objective_text=NULL,last_error='approval_rejected' WHERE task_id=?", (task_id,))
             self._event(db, task_id, "link_task.approval_rejected", {"approval_id": approval_id})
 
     def link_task_run(self, task_id: str) -> dict[str, Any] | None:
@@ -562,7 +609,7 @@ class SupervisorStore:
                 (task_id,),
             )
             db.execute(
-                "UPDATE link_task_runs SET status='CANCELLED',completed_at=?,last_error='cancelled_by_user' WHERE task_id=? AND status NOT IN ('COMPLETED','FAILED','REJECTED','CANCELLED')",
+                "UPDATE link_task_runs SET status='CANCELLED',objective_text=NULL,completed_at=?,last_error='cancelled_by_user' WHERE task_id=? AND status NOT IN ('COMPLETED','FAILED','REJECTED','CANCELLED')",
                 (now, task_id),
             )
             self._event(db, task_id, "task.cancelled", {
@@ -747,6 +794,17 @@ class SupervisorStore:
         with self._lock:
             rows = self._db.execute("SELECT seq,event_type,created_at,payload_json FROM task_events WHERE task_id=? ORDER BY seq", (task_id,)).fetchall()
         return [{"seq":r["seq"],"event_type":r["event_type"],"created_at":r["created_at"],"payload":json.loads(r["payload_json"])} for r in rows]
+
+    def events_after(self, task_id: str, after_seq: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        if after_seq < 0 or not 1 <= limit <= 200:
+            raise ValueError("event cursor or limit is invalid")
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT seq,event_type,created_at,payload_json FROM task_events WHERE task_id=? AND seq>? ORDER BY seq LIMIT ?",
+                (task_id, after_seq, limit),
+            ).fetchall()
+        return [{"seq": r["seq"], "event_type": r["event_type"], "created_at": r["created_at"],
+                 "payload": json.loads(r["payload_json"])} for r in rows]
 
     def approval(self, approval_id: str) -> dict[str, Any] | None:
         with self._lock:
