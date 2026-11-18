@@ -21,6 +21,7 @@ class TdlibTelegramTransport(
     @Volatile private var client: Client? = null
     @Volatile private var botChatId: Long = 0L
     @Volatile private var online: Boolean = false
+    private val tunnelSendGate = TelegramSendRateGate()
 
     override fun start(credentials: ApiCredentials, sink: TelegramEvents) {
         this.credentials = credentials
@@ -76,14 +77,29 @@ class TdlibTelegramTransport(
     fun sendText(text: String) {
         val chatId = botChatId
         if (chatId == 0L) throw java.io.IOException("Bot chat is not ready")
+        // Home submission and background inbox sync use separate executors; pace their shared bot chat.
+        tunnelSendGate.awaitSlot()
+        val trace = runCatching {
+            val frame = com.jarvis.link.LinkJson.parseObject(text.removePrefix(TunnelFrames.PREFIX))
+            val id = frame["id"] as? String ?: ""
+            java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8))
+                .take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        }.getOrDefault("unknown")
+        val started = System.nanoTime()
+        android.util.Log.i(TAG, "tdlib_send_start trace=$trace")
         val content = TdApi.InputMessageText().apply {
             this.text = TdApi.FormattedText(text, arrayOf())
             clearDraft = false
         }
-        request(TdApi.SendMessage().apply {
+        val c = client ?: throw java.io.IOException("Telegram client is not ready")
+        c.send(TdApi.SendMessage().apply {
             this.chatId = chatId
             inputMessageContent = content
-        })
+        }) { result ->
+            val elapsed = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            if (result is TdApi.Error) android.util.Log.w(TAG, "tdlib_send_error trace=$trace kind=${result.code} elapsed_ms=$elapsed")
+            else android.util.Log.i(TAG, "tdlib_send_ack trace=$trace elapsed_ms=$elapsed")
+        }
     }
 
     // --- updates -------------------------------------------------------------------------
@@ -96,6 +112,17 @@ class TdlibTelegramTransport(
                 online = update.state is TdApi.ConnectionStateReady
                 TelegramSession.tunnelReady = online && botChatId != 0L
                 sink?.onConnectionChanged(online)
+            }
+            is TdApi.UpdateMessageSendSucceeded -> logTunnelSendState(update.message, "sent", 0)
+            is TdApi.UpdateMessageSendFailed -> {
+                if (update.error.code == 429) {
+                    val seconds = Regex("(?:FLOOD_WAIT_|retry after )(\\d+)", RegexOption.IGNORE_CASE)
+                        .find(update.error.message ?: "")?.groupValues?.getOrNull(1)?.toLongOrNull()
+                        ?.coerceIn(1L, 300L) ?: 5L
+                    tunnelSendGate.deferForNanos(java.util.concurrent.TimeUnit.SECONDS.toNanos(seconds))
+                    android.util.Log.w(TAG, "telegram_rate_limited retry_after_s=$seconds")
+                }
+                logTunnelSendState(update.message, "failed", update.error.code)
             }
             is TdApi.UpdateNewMessage -> onMessage(update.message)
             else -> Unit
@@ -171,6 +198,23 @@ class TdlibTelegramTransport(
         }
         val match = ACK_RE.matchEntire(text) ?: return
         sink?.onPingAck(match.groupValues[1])
+    }
+
+    /** TDLib's SendMessage callback only means the request entered TDLib; this update is server-side send completion. */
+    private fun logTunnelSendState(message: TdApi.Message?, outcome: String, errorCode: Int) {
+        if (message == null || message.chatId != botChatId || botChatId == 0L) return
+        val content = message.content as? TdApi.MessageText ?: return
+        val text = content.text.text
+        if (!text.startsWith(TunnelFrames.PREFIX)) return
+        val trace = runCatching {
+            val frame = com.jarvis.link.LinkJson.parseObject(text.removePrefix(TunnelFrames.PREFIX))
+            val id = frame["id"] as? String ?: ""
+            java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8))
+                .take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        }.getOrDefault("unknown")
+        val serverDateMs = message.date.toLong() * 1000L
+        if (outcome == "sent") android.util.Log.i(TAG, "tdlib_server_sent trace=$trace server_date_ms=$serverDateMs")
+        else android.util.Log.w(TAG, "tdlib_server_send_failed trace=$trace code=$errorCode server_date_ms=$serverDateMs")
     }
 
     // --- helpers ----------------------------------------------------------------------------

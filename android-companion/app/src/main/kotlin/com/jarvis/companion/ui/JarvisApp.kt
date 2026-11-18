@@ -69,12 +69,14 @@ fun JarvisApp(store: JarvisStore) {
     val reduced = reducedMotion(systemScale, store.reduceMotion)
     val imeVisible = WindowInsets.isImeVisible
 
-    // Keep the Mac's status current: fast while work is open, slow otherwise. Each step is a real sync.
+    // Telegram carries each sync as a user message and a bot response. Five-second polling caused
+    // TDLib flood waits when send and sync shared the same bot chat; 10s keeps active work responsive
+    // while staying below Telegram's per-chat message rate after accounting for both directions.
     LaunchedEffect(Unit) {
         store.refreshLocal()
         while (true) {
             store.syncNow()
-            delay(if (store.hasActiveWork()) 5_000L else 30_000L)
+            delay(if (store.hasActiveWork()) 10_000L else 30_000L)
         }
     }
     LaunchedEffect(Unit) {

@@ -14,6 +14,17 @@ private fun check(condition: Boolean, message: String) {
 
 /** args[0]: path to telegram_adapter/tunnel-v1.fixture.json produced by the Python (Mac) encoder. */
 fun main(args: Array<String>) {
+    var fakeNow = 0L
+    val waits = mutableListOf<Long>()
+    val rateGate = TelegramSendRateGate(100L, { fakeNow }, { wait -> waits += wait; fakeNow += wait })
+    rateGate.awaitSlot()
+    rateGate.awaitSlot()
+    rateGate.awaitSlot()
+    check(waits == listOf(0L, 100L, 100L), "concurrent tunnel frames reserve paced send slots")
+    rateGate.deferForNanos(500L)
+    rateGate.awaitSlot()
+    check(waits.last() == 500L, "Telegram flood wait defers queued tunnel frames")
+
     val fixture = LinkJson.parseObject(File(args[0]).readText(Charsets.UTF_8))
     val requestFrames = (fixture["request_frames"] as List<*>).map { it as String }
     val responseFrames = (fixture["response_frames"] as List<*>).map { it as String }
