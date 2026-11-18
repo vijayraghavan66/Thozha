@@ -296,6 +296,7 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
                 authorization = adapter.authorize_write(
                     capability_id, op_id=uuid.uuid4().hex, rel_path=path, content=content,
                 )
+                _record_task_event("development.operation_started", {"operation": "write_file"})
                 receipt = workspace.write_text(path, content)
             except CapabilityError as exc:
                 return _text(f"Development capability refused this write ({exc.code}).", True)
@@ -348,6 +349,7 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
                 argv = adapter.authorize_test(capability_id, op_id=uuid.uuid4().hex, command="unittest-tests")
             except CapabilityError as exc:
                 return _text(f"Development capability refused this test run ({exc.code}).", True)
+            _record_task_event("development.operation_started", {"operation": "run_tests"})
             result = dw.run_bounded(list(argv), cwd=workspace.root, timeout_s=min(600, dw.TEST_TIMEOUT_S))
             result.update(dw.parse_unittest_summary(result["output"]))
             _record_task_event("development.tests_completed", {
@@ -391,6 +393,7 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         paths = args.get("paths")
         if not isinstance(capability_id, str) or not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
             return _text("A capability ID and explicit relative artifact paths are required.", True)
+        _record_task_event("development.operation_started", {"operation": "artifact_manifest"})
         try:
             manifest = adapter.artifact_manifest(capability_id, op_id=uuid.uuid4().hex, rel_paths=paths)
         except CapabilityError as exc:
