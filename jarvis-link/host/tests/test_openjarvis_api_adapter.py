@@ -62,6 +62,44 @@ def test_submit_and_approval_decision_use_only_authenticated_loopback(tmp_path):
     client.close()
 
 
+def test_fast_command_adapter_sends_only_typed_loopback_requests(tmp_path):
+    key = _key(tmp_path / "api-key")
+    requests = []
+    approval = {
+        "approval_id": "a" * 32,
+        "task_id": "b" * 32,
+        "operation": "mcp:jarvis_mac:open_app",
+        "target": "Calculator",
+        "canonical_arguments_digest": "c" * 64,
+        "expires_at": "2026-11-18T12:00:00+00:00",
+        "summary": "Open Calculator after approval.",
+    }
+    def handler(request):
+        requests.append(request)
+        body = json.loads(request.content)
+        if body["command"] == "mac.status":
+            return httpx.Response(200, json={"command":"mac.status", "state":"ONLINE", "ai_available":True})
+        if body["command"] == "task.status":
+            return httpx.Response(200, json={"command":"task.status", "state":"COMPLETED", "task_id":body["task_id"], "summary":"done"})
+        return httpx.Response(200, json={"command":"app.open", "state":"WAITING_APPROVAL", "task_id":approval["task_id"], "approval":approval})
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    requester = "d" * 32
+    assert adapter.fast_command(command="mac.status", requester=requester) == {
+        "state":"ONLINE", "ai_available":True,
+    }
+    assert adapter.fast_command(command="task.status", requester=requester, task_id="b" * 32)["summary"] == "done"
+    result = adapter.fast_command(command="app.open", requester=requester,
+                                  idempotency_key="e" * 32, app="Calculator")
+    assert result["state"] == "WAITING_APPROVAL"
+    assert result["approval"]["operation"] == "mcp:jarvis_mac:open_app"
+    assert all(r.url == "http://127.0.0.1:8000/v1/jarvis/link/fast-command" for r in requests)
+    assert all(r.headers["authorization"] == "Bearer test-local-supervisor-key" for r in requests)
+    with pytest.raises(SupervisorRefused):
+        adapter.fast_command(command="app.open", requester=requester, idempotency_key="f" * 32, app="Terminal")
+    client.close()
+
+
 def test_pending_approval_response_is_reduced_to_encrypted_protocol_fields(tmp_path):
     key = _key(tmp_path / "api-key")
 

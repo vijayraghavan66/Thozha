@@ -193,12 +193,19 @@ class JarvisLinkHost:
                 self._require_task_owner(envelope.from_device_id, task_id)
                 if handler is None:
                     raise TaskEnvelopeError("typed task status is unavailable")
-                return {"kind": "fast.result", "command": command, **handler(command=command, task_id=task_id)}
+                return {"kind": "fast.result", "command": command, **handler(command=command, task_id=task_id, requester=envelope.from_device_id)}
             if command == "app.open" and set(payload) == {"app", "command", "version"} and payload.get("app") == "Calculator":
                 if handler is None:
                     raise TaskEnvelopeError("supervisor fast command approval is unavailable")
                 # Supervisor creates the exact operation approval; host never launches the app here.
-                return {"kind": "fast.result", "command": command, **handler(command=command, app="Calculator", requester=envelope.from_device_id)}
+                result = handler(command=command, app="Calculator", requester=envelope.from_device_id,
+                                 idempotency_key=envelope.message_id)
+                task_id = result.get("task_id") if isinstance(result, dict) else None
+                observer = getattr(self, "task_observer", None)
+                if isinstance(task_id, str) and observer is not None:
+                    observer(task_id=task_id, idempotency_key=envelope.message_id,
+                             companion_id=envelope.from_device_id)
+                return {"kind": "fast.result", "command": command, **result}
             raise TaskEnvelopeError("unsupported typed fast command")
 
         if envelope.kind == "task.submit":

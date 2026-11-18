@@ -276,6 +276,64 @@ class OpenJarvisApiSupervisorAdapter:
             raise SupervisorRefused("OpenJarvis supervisor returned an invalid task status")
         return {"task_id": task_id, "state": state.upper(), "summary": str(data.get("summary") or "")[:1000], "result_text": _result_text(data), "result_digest": data.get("result_digest"), "http_status": status}
 
+    def fast_command(self, *, command: str, requester: str, idempotency_key: str | None = None,
+                     task_id: str | None = None, app: str | None = None) -> dict[str, Any]:
+        """Use the authenticated loopback supervisor for fixed, non-LLM operations only."""
+        if not re.fullmatch(r"[0-9a-f]{32}", requester or ""):
+            raise SupervisorRefused("fast command requester is invalid")
+        body: dict[str, Any] = {"command": command, "requester": requester}
+        if command == "task.status":
+            if not re.fullmatch(r"[0-9a-f]{32}", task_id or ""):
+                raise SupervisorRefused("fast task ID is invalid")
+            body["task_id"] = task_id
+        elif command == "app.open" and app == "Calculator":
+            if not re.fullmatch(r"[0-9a-f]{32}", idempotency_key or ""):
+                raise SupervisorRefused("fast command idempotency key is invalid")
+            body.update({"app": app, "idempotency_key": idempotency_key})
+        elif command != "mac.status":
+            raise SupervisorRefused("fast command is not supported")
+        _, data = self._request("POST", "/v1/jarvis/link/fast-command", body)
+        if data.get("command") != command or not isinstance(data.get("state"), str):
+            raise SupervisorRefused("OpenJarvis returned an invalid fast command result")
+        if command == "app.open":
+            approval = data.get("approval")
+            task = data.get("task_id")
+            if (not isinstance(task, str) or not _ID_RE.fullmatch(task) or data["state"] != "WAITING_APPROVAL"
+                    or not isinstance(approval, dict) or approval.get("task_id") != task
+                    or approval.get("operation") != "mcp:jarvis_mac:open_app"
+                    or approval.get("target") != "Calculator"):
+                raise SupervisorRefused("OpenJarvis returned an invalid Calculator approval")
+        return {k: data[k] for k in ("state", "online", "ai_available", "task_id", "summary", "approval") if k in data}
+
+    def fast_command(self, *, command: str, requester: str, idempotency_key: str | None = None,
+                     task_id: str | None = None, app: str | None = None) -> dict[str, Any]:
+        """Dispatch only the versioned, allowlisted deterministic command contract to loopback."""
+        if not re.fullmatch(r"[0-9a-f]{32}", requester or ""):
+            raise SupervisorRefused("fast command requester is invalid")
+        body: dict[str, Any] = {"command": command, "requester": requester}
+        if command == "task.status":
+            if not re.fullmatch(r"[0-9a-f]{32}", task_id or ""):
+                raise SupervisorRefused("fast task ID is invalid")
+            body["task_id"] = task_id
+        elif command == "app.open" and app == "Calculator":
+            if not re.fullmatch(r"[0-9a-f]{32}", idempotency_key or ""):
+                raise SupervisorRefused("fast command idempotency key is invalid")
+            body.update({"app": app, "idempotency_key": idempotency_key})
+        elif command != "mac.status":
+            raise SupervisorRefused("fast command is not supported")
+        _, data = self._request("POST", "/v1/jarvis/link/fast-command", body)
+        if data.get("command") != command or not isinstance(data.get("state"), str):
+            raise SupervisorRefused("OpenJarvis returned an invalid fast command result")
+        if command == "app.open":
+            task = data.get("task_id")
+            approval = data.get("approval")
+            if (not isinstance(task, str) or not _ID_RE.fullmatch(task) or data["state"] != "WAITING_APPROVAL"
+                    or not isinstance(approval, dict) or approval.get("task_id") != task
+                    or approval.get("operation") != "mcp:jarvis_mac:open_app"
+                    or approval.get("target") != "Calculator"):
+                raise SupervisorRefused("OpenJarvis returned an invalid Calculator approval")
+        return {k: data[k] for k in ("state", "online", "ai_available", "task_id", "summary", "approval") if k in data}
+
     def list_pending_approvals(self, task_id: str) -> list[dict[str, Any]]:
         if not _ID_RE.fullmatch(task_id):
             raise SupervisorRefused("task ID is invalid")
