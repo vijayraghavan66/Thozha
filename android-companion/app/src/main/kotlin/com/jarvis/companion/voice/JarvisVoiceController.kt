@@ -19,6 +19,8 @@ import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.UUID
 
+private enum class CaptureMode { PUSH_TO_TALK, AUTOMATIC_ENDPOINTER }
+
 /** Stable, UI-agnostic voice states for a lead-owned Compose or Activity control. */
 enum class VoiceControllerState { IDLE, LISTENING, PROCESSING, SPEAKING, ERROR }
 
@@ -51,6 +53,8 @@ class JarvisVoiceController(
 ) : AutoCloseable {
     interface Listener {
         fun onStateChanged(state: VoiceControllerState) {}
+        fun onRecognitionProvider(provider: VoiceRecognitionProvider) {}
+        fun onOutputVoiceSelected(profile: VoiceOutputProfile) {}
         fun onPartialText(text: String) {}
         fun onFinalText(text: String) {}
         fun onError(error: VoiceControllerError) {}
@@ -61,14 +65,19 @@ class JarvisVoiceController(
     private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var recognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
+    private var ttsInitialized = false
     private var ttsReady = false
     private var pendingSpeech: String? = null
     private var state = VoiceControllerState.IDLE
     private var closed = false
+    private var activeRecognitionProvider = VoiceRecognitionProvider.SYSTEM_FALLBACK
+    private val sessionGeneration = VoiceSessionGeneration()
+    private var captureMode: CaptureMode? = null
+    private var activeUtteranceId: String? = null
     private var focusRequest: AudioFocusRequest? = null
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        if (change <= AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-            // Do not continue recording or speaking after another app takes exclusive audio focus.
+        if (VoiceFocusPolicy.shouldStop(change)) {
+            // Stop on transient, duck, and permanent loss; do not leave the mic/speaker active.
             cancel()
         }
     }
@@ -79,12 +88,12 @@ class JarvisVoiceController(
             main.post {
                 if (closed) return@post
                 val engine = textToSpeech
+                ttsInitialized = true
                 ttsReady = status == TextToSpeech.SUCCESS && engine != null && configureTts(engine)
-                if (!ttsReady) {
-                    pendingSpeech = null
-                    fail(VoiceControllerError.SYNTHESIS_UNAVAILABLE)
-                } else {
-                    pendingSpeech?.also { pendingSpeech = null; speakNow(it) }
+                val queued = pendingSpeech
+                pendingSpeech = null
+                if (queued != null) {
+                    if (ttsReady) speakNow(queued) else fail(VoiceControllerError.SYNTHESIS_UNAVAILABLE)
                 }
             }
         }
@@ -93,38 +102,47 @@ class JarvisVoiceController(
     val currentState: VoiceControllerState get() = state
 
     /** Call only after the Activity/Compose permission launcher has granted RECORD_AUDIO. */
-    fun startPushToTalk(): Boolean {
+    fun startPushToTalk(): Boolean = startCapture(CaptureMode.PUSH_TO_TALK)
+
+    /** One natural speech turn; the platform endpointer closes the utterance at a pause. Still never auto-submits. */
+    fun startVoiceTurn(): Boolean = startCapture(CaptureMode.AUTOMATIC_ENDPOINTER)
+
+    private fun startCapture(mode: CaptureMode): Boolean {
         checkMainThread()
         if (closed) return false
         if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             fail(VoiceControllerError.PERMISSION_REQUIRED)
             return false
         }
-        if (state == VoiceControllerState.LISTENING) return true
+        if (state == VoiceControllerState.LISTENING) return captureMode == mode
         if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
             fail(VoiceControllerError.RECOGNIZER_UNAVAILABLE)
             return false
         }
         if (state == VoiceControllerState.SPEAKING) stopSpeaking()
-        if (state == VoiceControllerState.LISTENING) cancel()
+        if (recognizer != null) cancelRecognition()
         if (!requestFocus()) {
             fail(VoiceControllerError.MICROPHONE_UNAVAILABLE)
             return false
         }
         return try {
             val speechRecognizer = createRecognizer()
+            val generation = sessionGeneration.begin()
             recognizer = speechRecognizer
-            speechRecognizer.setRecognitionListener(recognitionListener)
+            captureMode = mode
+            speechRecognizer.setRecognitionListener(recognitionListener(speechRecognizer, generation))
+            post { if (sessionGeneration.isCurrent(generation)) listener.onRecognitionProvider(activeRecognitionProvider) }
             speechRecognizer.startListening(recognitionIntent())
-            setState(VoiceControllerState.LISTENING)
+            setState(VoiceControllerState.LISTENING, generation)
             true
         } catch (_: SecurityException) {
+            cancelRecognition()
             abandonFocus()
             fail(VoiceControllerError.PERMISSION_REQUIRED)
             false
         } catch (_: RuntimeException) {
             abandonFocus()
-            destroyRecognizer()
+            cancelRecognition()
             fail(VoiceControllerError.MICROPHONE_UNAVAILABLE)
             false
         }
@@ -133,13 +151,19 @@ class JarvisVoiceController(
     /** Release event for hold-to-talk; the speech service finalizes the current utterance. */
     fun releasePushToTalk() {
         checkMainThread()
-        if (closed || state != VoiceControllerState.LISTENING) return
-        setState(VoiceControllerState.PROCESSING)
+        if (closed || state != VoiceControllerState.LISTENING || captureMode != CaptureMode.PUSH_TO_TALK) return
+        val generation = sessionGeneration.value
+        setState(VoiceControllerState.PROCESSING, generation)
         try {
             recognizer?.stopListening()
         } catch (_: RuntimeException) {
+            val failedGeneration = sessionGeneration.invalidate()
+            val old = recognizer
+            recognizer = null
+            captureMode = null
+            try { old?.cancel(); old?.destroy() } catch (_: RuntimeException) { }
             abandonFocus()
-            fail(VoiceControllerError.MICROPHONE_UNAVAILABLE)
+            fail(VoiceControllerError.MICROPHONE_UNAVAILABLE, failedGeneration)
         }
     }
 
@@ -147,9 +171,9 @@ class JarvisVoiceController(
     fun cancel() {
         checkMainThread()
         if (closed) return
-        try { recognizer?.cancel() } catch (_: RuntimeException) { }
-        destroyRecognizer()
+        cancelRecognition()
         try { textToSpeech?.stop() } catch (_: RuntimeException) { }
+        activeUtteranceId = null
         pendingSpeech = null
         abandonFocus()
         setState(VoiceControllerState.IDLE)
@@ -161,10 +185,11 @@ class JarvisVoiceController(
         if (closed) return
         val safeText = text.trim().take(MAX_SPEECH_CHARS)
         if (safeText.isEmpty()) return
-        if (!ttsReady) {
+        if (!ttsInitialized) {
             pendingSpeech = safeText
             return
         }
+        if (!ttsReady) { fail(VoiceControllerError.SYNTHESIS_UNAVAILABLE); return }
         speakNow(safeText)
     }
 
@@ -172,6 +197,7 @@ class JarvisVoiceController(
         checkMainThread()
         if (closed) return
         pendingSpeech = null
+        activeUtteranceId = null
         try { textToSpeech?.stop() } catch (_: RuntimeException) { }
         abandonFocus()
         if (state == VoiceControllerState.SPEAKING) setState(VoiceControllerState.IDLE)
@@ -181,19 +207,24 @@ class JarvisVoiceController(
         checkMainThread()
         if (closed) return
         closed = true
+        sessionGeneration.invalidate()
         try { recognizer?.cancel() } catch (_: RuntimeException) { }
         try { recognizer?.destroy() } catch (_: RuntimeException) { }
         recognizer = null
+        captureMode = null
         try { textToSpeech?.stop(); textToSpeech?.shutdown() } catch (_: RuntimeException) { }
         textToSpeech = null
+        activeUtteranceId = null
         pendingSpeech = null
         abandonFocus()
     }
 
     private fun createRecognizer(): SpeechRecognizer =
         if (android.os.Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)) {
+            activeRecognitionProvider = VoiceRecognitionProvider.ON_DEVICE
             SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
         } else {
+            activeRecognitionProvider = VoiceRecognitionProvider.SYSTEM_FALLBACK
             SpeechRecognizer.createSpeechRecognizer(appContext)
         }
 
@@ -206,41 +237,68 @@ class JarvisVoiceController(
         putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, appContext.packageName)
     }
 
-    private val recognitionListener = object : RecognitionListener {
+    private fun recognitionListener(owner: SpeechRecognizer, generation: Long) = object : RecognitionListener {
+        private fun current() = !closed && recognizer === owner && sessionGeneration.isCurrent(generation)
+
         override fun onReadyForSpeech(params: Bundle?) { }
         override fun onBeginningOfSpeech() { }
         override fun onRmsChanged(rmsdB: Float) { }
         override fun onBufferReceived(buffer: ByteArray?) { }
-        override fun onEndOfSpeech() { setState(VoiceControllerState.PROCESSING) }
+        override fun onEndOfSpeech() { if (current()) setState(VoiceControllerState.PROCESSING, generation) }
         override fun onEvent(eventType: Int, params: Bundle?) { }
 
         override fun onPartialResults(partialResults: Bundle?) {
-            partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-                ?.takeIf { it.isNotBlank() }?.let { post { listener.onPartialText(it) } }
+            val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                ?.takeIf { it.isNotBlank() } ?: return
+            postIfCurrent(generation) { listener.onPartialText(text) }
         }
 
         override fun onResults(results: Bundle?) {
+            if (!current()) return
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
+            val completedGeneration = sessionGeneration.invalidate()
+            recognizer = null
+            captureMode = null
+            try { owner.destroy() } catch (_: RuntimeException) { }
             abandonFocus()
             if (text.isNullOrEmpty()) {
-                fail(VoiceControllerError.NO_MATCH)
+                fail(VoiceControllerError.NO_MATCH, completedGeneration)
             } else {
-                setState(VoiceControllerState.IDLE)
-                post { listener.onFinalText(text) }
+                setState(VoiceControllerState.IDLE, completedGeneration)
+                postIfCurrent(completedGeneration) { listener.onFinalText(text) }
             }
-            destroyRecognizer()
         }
 
         override fun onError(error: Int) {
+            if (!current()) return
+            val completedGeneration = sessionGeneration.invalidate()
+            recognizer = null
+            captureMode = null
+            try { owner.destroy() } catch (_: RuntimeException) { }
             abandonFocus()
-            fail(mapRecognitionError(error))
-            destroyRecognizer()
+            fail(mapRecognitionError(error), completedGeneration)
         }
     }
 
     private fun configureTts(engine: TextToSpeech): Boolean {
-        val language = engine.setLanguage(locale)
-        if (language == TextToSpeech.LANG_MISSING_DATA || language == TextToSpeech.LANG_NOT_SUPPORTED) return false
+        val availableVoices = engine.voices.orEmpty()
+        val selected = VoicePolicy.bestOfflineVoice(
+            availableVoices.map { voice ->
+                VoiceCandidate(
+                    name = voice.name,
+                    localeTag = voice.locale.toLanguageTag(),
+                    quality = voice.quality,
+                    latency = voice.latency,
+                    networkRequired = voice.isNetworkConnectionRequired,
+                    dataInstalled = TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED !in voice.features.orEmpty(),
+                )
+            },
+            locale,
+        ) ?: return false
+        val voice = availableVoices.firstOrNull { it.name == selected.name } ?: return false
+        if (engine.setVoice(voice) != TextToSpeech.SUCCESS) return false
+        val profile = selected.toProfile()
+        post { if (!closed) listener.onOutputVoiceSelected(profile) }
         engine.setAudioAttributes(
             AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_ASSISTANT)
@@ -250,19 +308,30 @@ class JarvisVoiceController(
         engine.setSpeechRate(1.0f)
         engine.setPitch(1.0f)
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) = post { setState(VoiceControllerState.SPEAKING) }
+            override fun onStart(utteranceId: String?) = post {
+                if (!closed && utteranceId != null && utteranceId == activeUtteranceId) setState(VoiceControllerState.SPEAKING)
+            }
             override fun onDone(utteranceId: String?) = post {
-                abandonFocus()
-                setState(VoiceControllerState.IDLE)
+                if (!closed && utteranceId != null && utteranceId == activeUtteranceId) {
+                    activeUtteranceId = null
+                    abandonFocus()
+                    setState(VoiceControllerState.IDLE)
+                }
             }
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) = post {
-                abandonFocus()
-                fail(VoiceControllerError.SYNTHESIS_FAILED)
+                if (!closed && utteranceId != null && utteranceId == activeUtteranceId) {
+                    activeUtteranceId = null
+                    abandonFocus()
+                    fail(VoiceControllerError.SYNTHESIS_FAILED)
+                }
             }
             override fun onError(utteranceId: String?, errorCode: Int) = post {
-                abandonFocus()
-                fail(VoiceControllerError.SYNTHESIS_FAILED)
+                if (!closed && utteranceId != null && utteranceId == activeUtteranceId) {
+                    activeUtteranceId = null
+                    abandonFocus()
+                    fail(VoiceControllerError.SYNTHESIS_FAILED)
+                }
             }
         })
         return true
@@ -271,10 +340,13 @@ class JarvisVoiceController(
     private fun speakNow(text: String) {
         val engine = textToSpeech ?: run { fail(VoiceControllerError.SYNTHESIS_UNAVAILABLE); return }
         if (!requestFocus()) { fail(VoiceControllerError.SYNTHESIS_FAILED); return }
+        val utteranceId = "jarvis-${UUID.randomUUID()}"
+        activeUtteranceId = utteranceId
         val result = try {
-            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis-${UUID.randomUUID()}")
+            engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
         } catch (_: RuntimeException) { TextToSpeech.ERROR }
         if (result == TextToSpeech.ERROR) {
+            activeUtteranceId = null
             abandonFocus()
             fail(VoiceControllerError.SYNTHESIS_FAILED)
         } else {
@@ -314,22 +386,35 @@ class JarvisVoiceController(
         else -> VoiceControllerError.UNKNOWN
     }
 
-    private fun destroyRecognizer() {
-        val old = recognizer ?: return
+    private fun cancelRecognition() {
+        sessionGeneration.invalidate()
+        val old = recognizer
         recognizer = null
-        try { old.destroy() } catch (_: RuntimeException) { }
+        captureMode = null
+        if (old != null) {
+            try { old.cancel() } catch (_: RuntimeException) { }
+            try { old.destroy() } catch (_: RuntimeException) { }
+        }
     }
 
-    private fun setState(next: VoiceControllerState) {
+    private fun setState(next: VoiceControllerState, generation: Long? = null) {
         if (closed || state == next) return
         state = next
-        post { listener.onStateChanged(next) }
+        post {
+            if (!closed && (generation == null || sessionGeneration.isCurrent(generation))) listener.onStateChanged(next)
+        }
     }
 
-    private fun fail(error: VoiceControllerError) {
-        if (closed) return
-        setState(VoiceControllerState.ERROR)
-        post { listener.onError(error) }
+    private fun fail(error: VoiceControllerError, generation: Long? = null) {
+        if (closed || (generation != null && !sessionGeneration.isCurrent(generation))) return
+        setState(VoiceControllerState.ERROR, generation)
+        post {
+            if (!closed && (generation == null || sessionGeneration.isCurrent(generation))) listener.onError(error)
+        }
+    }
+
+    private fun postIfCurrent(generation: Long, block: () -> Unit) {
+        post { if (!closed && sessionGeneration.isCurrent(generation)) block() }
     }
 
     private fun post(block: () -> Unit) {
