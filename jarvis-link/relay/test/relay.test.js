@@ -60,9 +60,9 @@ async function keyPair() { return crypto.subtle.generateKey({ name: "ECDSA", nam
 async function ecdhPair() { return crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]); }
 async function publicB64(pair) { return b64url(new Uint8Array(await crypto.subtle.exportKey("spki", pair.publicKey))); }
 async function deviceIdFromPair(pair) { return Buffer.from((await sha256(new Uint8Array(await crypto.subtle.exportKey("spki", pair.publicKey)))).slice(0, 16)).toString("hex"); }
-async function postRequest({ path, tenant = TENANT, deviceId, pair, body = null, bootstrapSecret = null, method = "POST", nonce = b64url(crypto.getRandomValues(new Uint8Array(32))) }) {
+async function postRequest({ path, tenant = TENANT, deviceId, pair, body = null, bootstrapSecret = null, method = "POST", nonce = b64url(crypto.getRandomValues(new Uint8Array(32))), timestampOffsetMs = 0 }) {
   const bodyBytes = body === null ? new Uint8Array() : te.encode(JSON.stringify(body));
-  const timestamp = String(Date.now());
+  const timestamp = String(Date.now() + timestampOffsetMs);
   const bodyHash = await shaHex(bodyBytes);
   const signed = `JARVIS-LINK-REQUEST-V1\n${tenant}\n${deviceId}\n${timestamp}\n${nonce}\n${method}\n${path}\n${bodyHash}`;
   const headers = { "X-Jarvis-Link-Tenant": tenant };
@@ -166,6 +166,40 @@ async function enrollCompanion(ctx) {
   res = await relay.fetch(req, ctx.env); assert.equal(res.status, 200, await res.clone().text());
   return { companionSign, companionEcdh, companionId, certificate: candidateCert };
 }
+
+test("stale signed requests remain rejected with a distinct retryable timestamp code", async () => {
+  const ctx = await setupTenant();
+  const path = `/v1/devices/${ctx.hostId}/inbox?limit=5`;
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (line) => warnings.push(JSON.parse(line));
+  let stale;
+  try {
+    stale = await relay.fetch(await postRequest({
+      path, method: "GET", deviceId: ctx.hostId, pair: ctx.hostSign, timestampOffsetMs: -60_001,
+    }), ctx.env);
+  } finally { console.warn = originalWarn; }
+  assert.equal(stale.status, 401);
+  const staleBody = await stale.json();
+  assert.equal(staleBody.error.code, "TIMESTAMP_SKEW");
+  assert.match(staleBody.error.request_id, /^[0-9a-f-]{36}$/);
+  assert.deepEqual(warnings[0], {
+    event: "relay_auth_rejected", request_id: staleBody.error.request_id,
+    method: "GET", route: "/v1/devices/:id/inbox", code: "TIMESTAMP_SKEW",
+  });
+
+  const unsigned = await relay.fetch(new Request(`https://relay.test${path}`, {
+    method: "GET", headers: { "X-Jarvis-Link-Tenant": TENANT },
+  }), ctx.env);
+  assert.equal(unsigned.status, 401);
+  assert.equal((await unsigned.json()).error.code, "UNAUTHORIZED");
+
+  // A fresh, newly signed retry with a new nonce still succeeds. The skew window is not widened.
+  const retried = await relay.fetch(await postRequest({
+    path, method: "GET", deviceId: ctx.hostId, pair: ctx.hostSign,
+  }), ctx.env);
+  assert.equal(retried.status, 200, await retried.clone().text());
+});
 
 test("host bootstrap, one-use enrollment, encrypted queue, ACK, revoke, and replay controls", async () => {
   const ctx = await setupTenant();

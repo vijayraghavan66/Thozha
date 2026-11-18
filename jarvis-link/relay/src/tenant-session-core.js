@@ -23,6 +23,7 @@ export class TenantSessionCore {
   }
 
   async fetch(request) {
+    const requestId = crypto.randomUUID();
     try {
     const tenant = request.headers.get("X-Jarvis-Link-Resolved-Tenant") || "";
     if (!TENANT_RE.test(tenant)) return fail("INVALID_ENVELOPE", 400, "Invalid tenant route");
@@ -54,8 +55,16 @@ export class TenantSessionCore {
     if (ackMatch && request.method === "POST") return await this.ack(request, ackMatch[1]);
     return fail("NOT_FOUND", 404, "Relay route not found");
     } catch (exc) {
-      if (exc instanceof RelayError) return fail(exc.code, exc.status, exc.message);
-      return fail("INTERNAL", 500, "Relay request failed safely");
+      if (exc instanceof RelayError) {
+        if (exc.status === 401) {
+          const path = new URL(request.url).pathname.replace(/\/[0-9a-f]{32}(?=\/|$)/g, "/:id").slice(0, 120);
+          // Log only a random correlation ID, method, route template, and stable error code.
+          // Never log headers, device IDs, nonces, signatures, bodies or encrypted payloads.
+          console.warn(JSON.stringify({ event: "relay_auth_rejected", request_id: requestId, method: request.method, route: path, code: exc.code }));
+        }
+        return fail(exc.code, exc.status, exc.message, requestId);
+      }
+      return fail("INTERNAL", 500, "Relay request failed safely", requestId);
     }
   }
 
@@ -449,7 +458,9 @@ export class TenantSessionCore {
     if (!DEVICE_ID_RE.test(deviceId) || tenant !== this.tenantId || !/^\d{13}$/.test(timestampText) || !NONCE_RE.test(nonce) || !signature) throw new RelayError("UNAUTHORIZED", 401, "Signed device request headers are required");
     const timestamp = Number(timestampText);
     const now = Date.now();
-    if (Math.abs(now - timestamp) > REQUEST_SKEW_MS) throw new RelayError("UNAUTHORIZED", 401, "Signed request timestamp is outside the accepted window");
+    // Keep the strict skew window, but name this retryable condition separately:
+    // a Telegram tunnel can delay a correctly signed request behind a server flood wait.
+    if (Math.abs(now - timestamp) > REQUEST_SKEW_MS) throw new RelayError("TIMESTAMP_SKEW", 401, "Signed request timestamp is outside the accepted window");
     const device = await this.get(`device:${deviceId}`);
     if (!device?.active || device.revoked_at || device.tenant_id !== this.tenantId) throw new RelayError("DEVICE_REVOKED", 401, "Device is not active");
     const bytes = bodyBytes || new Uint8Array(await request.clone().arrayBuffer());
@@ -614,8 +625,8 @@ function ok(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
 }
 
-function fail(code, status, message) {
-  return new Response(JSON.stringify({ error: { code, message, request_id: crypto.randomUUID() } }), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+function fail(code, status, message, requestId = crypto.randomUUID()) {
+  return new Response(JSON.stringify({ error: { code, message, request_id: requestId } }), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
 }
 
 function b64url(bytes) { return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""); }

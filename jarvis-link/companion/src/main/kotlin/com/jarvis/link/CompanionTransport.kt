@@ -507,7 +507,11 @@ class JarvisLinkCompanion(
             lastErrorCode = null
             return PollResult(events, cursor)
         } catch (failure: Exception) {
-            connectionState = if (failure is SecurityException || (failure is RelayHttpException && failure.status == 401)) LinkConnectionState.REAUTH_REQUIRED else LinkConnectionState.OFFLINE
+            connectionState = when {
+                failure is SecurityException -> LinkConnectionState.REAUTH_REQUIRED
+                failure is RelayHttpException && failure.status == 401 && failure.code != "TIMESTAMP_SKEW" -> LinkConnectionState.REAUTH_REQUIRED
+                else -> LinkConnectionState.OFFLINE
+            }
             lastErrorCode = classify(failure)
             throw failure
         }
@@ -532,6 +536,13 @@ class JarvisLinkCompanion(
                 lastErrorCode = failure.code
                 outbox.remove(envelope.header.messageId)
                 throw failure
+            }
+            if (failure is RelayHttpException && failure.status == 401 && failure.code == "TIMESTAMP_SKEW") {
+                // Keep the exact encrypted envelope. The next flush creates a fresh HTTP timestamp,
+                // nonce and signature; the relay's strict skew window remains unchanged.
+                connectionState = LinkConnectionState.OFFLINE
+                lastErrorCode = "REQUEST_STALE_RETRY"
+                return DeliveryResult(envelope.header.messageId, queuedOffline = true, receipt = null)
             }
             if (failure is SecurityException || (failure is RelayHttpException && failure.status == 401)) {
                 connectionState = LinkConnectionState.REAUTH_REQUIRED
@@ -577,7 +588,8 @@ class JarvisLinkCompanion(
 
     private fun classify(failure: Exception): String = when (failure) {
         is SecurityException -> "AUTH_FAILED"
-        is RelayHttpException -> if (failure.status == 429) "RATE_LIMITED" else "RELAY_ERROR"
+        is RelayHttpException -> if (failure.status == 401 && failure.code == "TIMESTAMP_SKEW") "REQUEST_STALE_RETRY"
+            else if (failure.status == 429) "RATE_LIMITED" else "RELAY_ERROR"
         is IOException -> "NETWORK_UNAVAILABLE"
         else -> "PROTOCOL_ERROR"
     }

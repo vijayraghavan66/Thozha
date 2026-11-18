@@ -31,6 +31,7 @@ object CompanionProtocolTest {
         typedFastCommandEnvelopeIsAllowed(companion, hostCertificate, hostRoot, now)
         endToEndEnvelopeRoundTrip(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
+        staleTimestampRetryKeepsAuthenticatedEnvelopeQueued(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         crashAfterRelayAcceptancePreservesExactEnvelope(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         inboxPersistenceBeforeAck(host, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
@@ -288,6 +289,47 @@ object CompanionProtocolTest {
         check(relay.acks.size == 2) { "redelivery should be ACKed without a second event" }
     }
 
+    private fun staleTimestampRetryKeepsAuthenticatedEnvelopeQueued(
+        hostCertificate: DeviceCertificate,
+        companion: SigningIdentity,
+        companionEnc: EncryptionIdentity,
+        companionCertificate: DeviceCertificate,
+        hostRoot: TrustedHostRoot,
+        initialNow: Long,
+    ) {
+        var now = initialNow
+        val relay = MemoryRelay(companion).apply { staleTimestampOnce = true }
+        val outbox = MemoryMessageOutbox()
+        val client = JarvisLinkCompanion(
+            tenantId = "tenant_sim",
+            signingIdentity = companion,
+            encryptionIdentity = companionEnc,
+            companionCertificate = companionCertificate,
+            hostRoot = hostRoot,
+            hostCertificate = hostCertificate,
+            relay = relay,
+            outbox = outbox,
+            inbox = MemoryMessageInbox(),
+            now = { now },
+        )
+        client.setOnline(true)
+        val requestId = "cd".repeat(16)
+        val submitted = client.submitTask(TaskSubmission("safe read-only question", setOf(SafeCapability.READ_ONLY), requestId))
+        check(submitted.queuedOffline && outbox.list().size == 1) { "timestamp skew must retain the encrypted request for retry" }
+        check(client.connectionState == LinkConnectionState.OFFLINE && client.lastErrorCode == "REQUEST_STALE_RETRY") {
+            "a stale signed timestamp must not require device re-pairing"
+        }
+        val persistedEnvelope = outbox.list().single()
+        now += 70_000
+        client.setOnline(true)
+        val receipts = client.flushOutbox()
+        check(receipts.size == 1 && outbox.list().isEmpty()) { "freshly signed retry should deliver the persisted envelope" }
+        check(relay.requestTimestamps.size == 2 && relay.requestTimestamps[1] - relay.requestTimestamps[0] == 70_000L) {
+            "retry must use a fresh request timestamp"
+        }
+        check(relay.queued.single() == persistedEnvelope) { "retry must preserve the exact encrypted message bytes" }
+    }
+
     private fun inboxPersistenceBeforeAck(
         host: SigningIdentity, hostCert: DeviceCertificate, phone: SigningIdentity, phoneEnc: EncryptionIdentity,
         phoneCert: DeviceCertificate, hostRoot: TrustedHostRoot, now: Long,
@@ -497,11 +539,18 @@ private class MemoryRelay(
     val queued = mutableListOf<String>()
     var crashAfterPost = false
     var crashBeforeAck = false
+    var staleTimestampOnce = false
+    val requestTimestamps = mutableListOf<Long>()
     val incoming = mutableListOf<InboxItem>()
     val acks = mutableListOf<Pair<String, AckStatus>>()
 
     override fun postMessage(envelopeJson: String, headers: Map<String, String>): RelayReceipt {
+        requestTimestamps += headers.getValue("X-Jarvis-Link-Timestamp").toLong()
         verifyRequest(headers, "POST", "/v1/messages", envelopeJson.toByteArray(UTF_8), companion)
+        if (staleTimestampOnce) {
+            staleTimestampOnce = false
+            throw RelayHttpException(401, "TIMESTAMP_SKEW")
+        }
         val envelope = LinkEnvelope.parse(envelopeJson)
         queued += envelopeJson
         if (crashAfterPost) throw AssertionError("simulated process death after relay acceptance")

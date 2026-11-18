@@ -6,7 +6,7 @@ import java.net.URI
 import java.nio.charset.StandardCharsets.UTF_8
 
 /** A relay HTTP rejection. [code] is the relay's stable error code; relay text is never surfaced. */
-class RelayHttpException(val status: Int, val code: String) : IOException("relay HTTP $status ($code)")
+class RelayHttpException(val status: Int, val code: String, val requestId: String? = null) : IOException("relay HTTP $status ($code)")
 
 /** Raw result of one relay exchange, independent of how the bytes travelled. */
 data class RelayRawResponse(val status: Int, val text: String)
@@ -122,11 +122,14 @@ class HttpJarvisLinkRelay(
         if (method == "POST" || method == "PUT") headers["Content-Type"] = "application/json"
         val response = transport.exchange(method, pathAndQuery, headers, body)
         if (response.status !in 200..299) {
-            val code = runCatching {
+            val error = runCatching {
                 @Suppress("UNCHECKED_CAST")
-                ((LinkJson.parseObject(response.text)["error"] as? Map<String, Any>)?.get("code") as? String)
-            }.getOrNull() ?: "relay_error"
-            throw RelayHttpException(response.status, code)
+                LinkJson.parseObject(response.text)["error"] as? Map<String, Any>
+            }.getOrNull()
+            val code = error?.get("code") as? String ?: "relay_error"
+            val requestId = (error?.get("request_id") as? String)
+                ?.takeIf { it.matches(Regex("^[0-9a-fA-F-]{36}$")) }
+            throw RelayHttpException(response.status, code, requestId)
         }
         return LinkJson.parseObject(response.text)
     }
