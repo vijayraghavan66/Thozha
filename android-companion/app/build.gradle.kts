@@ -92,6 +92,28 @@ tasks.register<JavaExec>("verifyAssistantFormatting") {
     mainClass.set("com.jarvis.companion.AssistantTextFormatterTest")
 }
 
+tasks.register<JavaExec>("verifyFullAnswers") {
+    group = "verification"
+    description = "Runs full-answer regression checks: SHA-256 body verification, cut notices, and bubble text."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.link.FullAnswerChecksKt")
+}
+
+tasks.register<JavaExec>("verifyPresentation") {
+    group = "verification"
+    description = "Runs presentation checks for states, conversation bubbles, voice, and motion policy."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.presentation.PresentationChecksKt")
+}
+
 tasks.register<JavaExec>("verifyDebugTaskPayload") {
     group = "verification"
     description = "Verifies exact UTF-8 preservation for the debug-only Base64URL ADB task input."

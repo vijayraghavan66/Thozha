@@ -20,6 +20,8 @@ object ConversationPresentation {
     private const val WAITING_TEXT = "Waiting for your approval before Jarvis continues."
     private const val RUNNING_NO_TEXT = "Working on it."
     private const val SENT_TEXT = "Sent. Waiting for Jarvis to pick it up."
+    private const val INTEGRITY_TEXT =
+        "Jarvis received the answer, but it did not pass its integrity check, so it is not shown. Ask again, or read it on the Mac."
 
     /**
      * Projects conversation records (as returned by LinkRuntime.conversation()) into bubbles, oldest first.
@@ -49,7 +51,9 @@ object ConversationPresentation {
                     isProgress = false,
                 )
             }
-            val reply = replyFor(state, tone, summary) ?: continue
+            val body = (record["body"] as? String).orEmpty()
+            val integrityFailed = record["body_integrity_failed"] == true
+            val reply = replyFor(state, tone, summary, body, integrityFailed) ?: continue
             out += ConversationItem(
                 id = "$messageId:jarvis",
                 speaker = Speaker.JARVIS,
@@ -64,8 +68,19 @@ object ConversationPresentation {
     }
 
     /** Returns (text, isProgress) for the assistant side, or null when there is nothing honest to show. */
-    internal fun replyFor(state: String?, tone: TaskTone, summary: String): Pair<String, Boolean>? = when (tone) {
-        TaskTone.COMPLETED -> (summary.ifBlank { COMPLETED_NO_TEXT }) to false
+    internal fun replyFor(
+        state: String?,
+        tone: TaskTone,
+        summary: String,
+        body: String = "",
+        integrityFailed: Boolean = false,
+    ): Pair<String, Boolean>? = when (tone) {
+        // The verified full answer is the message. The summary is a card preview and is never shown in its place.
+        TaskTone.COMPLETED -> when {
+            body.isNotBlank() -> body to false
+            integrityFailed -> INTEGRITY_TEXT to false
+            else -> (summary.ifBlank { COMPLETED_NO_TEXT }) to false
+        }
         TaskTone.FAILED -> (summary.ifBlank { FAILED_NO_TEXT }) to false
         TaskTone.CANCELLED -> CANCELLED_TEXT to false
         TaskTone.WAITING -> WAITING_TEXT to true
