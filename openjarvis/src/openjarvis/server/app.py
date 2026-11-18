@@ -251,6 +251,11 @@ def create_app(
         description="OpenAI-compatible API server for OpenJarvis",
         version="0.1.0",
     )
+    # Recover supervisor state before registering/serving any execution route.
+    # The store pauses in-flight tasks and never replays pending operations.
+    from openjarvis.tasks.supervisor import get_supervisor_store
+
+    app.state.supervisor_store = get_supervisor_store()
 
     from fastapi.middleware.cors import CORSMiddleware
 
@@ -482,6 +487,9 @@ def create_app(
     app.include_router(upload_router)
     app.include_router(research_router)
     app.include_router(analytics_router)
+    from openjarvis.server.supervisor_routes import router as supervisor_router
+
+    app.include_router(supervisor_router)
     include_all_routes(app)
 
     # Restore SendBlue channel bindings from database on startup
