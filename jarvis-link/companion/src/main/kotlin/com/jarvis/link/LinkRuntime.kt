@@ -150,9 +150,7 @@ class LinkRuntime(
 
     /** Polls the relay and keeps approval requests and task updates in local (non-secret) state until decided. */
     fun poll(relayUrl: String, limit: Int = 20): PollResult {
-        val page = companion(relayUrl).pollInbox(limit)
-        recordEvents(page.events)
-        return page
+        return companion(relayUrl).pollInbox(limit, ::persistInboxEvent)
     }
 
     /** Approval requests not yet decided and not expired, exactly as the Mac sent them. */
@@ -176,7 +174,7 @@ class LinkRuntime(
         }
         val newlyPending = mutableListOf<ApprovalReview>()
         try {
-            recordEvents(companion(relayUrl).pollInbox(20).events)
+            companion(relayUrl).pollInbox(20, ::persistInboxEvent)
             val announced = announcedIds()
             pendingApprovals().filter { it.approvalId !in announced }.forEach { newlyPending.add(it) }
             markAnnounced(newlyPending.map { it.approvalId })
@@ -330,9 +328,24 @@ class LinkRuntime(
         return ((values["last_sync_ms"] as? Long) ?: 0L) to ((values["last_sync_error"] as? String) ?: "")
     }
 
+    /** Persists a received event and its replay ID in one state write before the relay is acknowledged. */
+    internal fun persistInboxEvent(messageId: String, expiresAt: Long, event: CompanionEvent): Boolean = synchronized(stateLock) {
+        val received = ((load()["received_event_ids"] as? Map<String, Long>) ?: emptyMap())
+            .filterValues { it > now() }.toMutableMap()
+        if (messageId in received) return@synchronized false
+        received[messageId] = expiresAt
+        recordEventsLocked(listOf(event), received)
+        true
+    }
+
     internal fun recordEvents(events: List<CompanionEvent>) = synchronized(stateLock) {
+        recordEventsLocked(events, null)
+    }
+
+    private fun recordEventsLocked(events: List<CompanionEvent>, received: Map<String, Long>?) {
         var approvals = storedApprovals().toMutableList()
         val updates = ((load()["updates"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
+        var entries = conversation()
         for (event in events) {
             when (event) {
                 is CompanionEvent.ApprovalPending -> {
@@ -340,22 +353,23 @@ class LinkRuntime(
                     approvals.add(event.review)
                 }
                 is CompanionEvent.TaskUpdate -> {
-                    updates.add(linkedMapOf(
-                        "task_id" to event.taskId, "state" to event.state, "summary" to event.summary, "received_at_unix_ms" to now(),
-                    ))
-                    if (event.inReplyTo.isNotBlank()) {
-                        applyToConversation(event.inReplyTo, event.taskId, event.state, event.summary)
-                    } else if (event.taskId.isNotBlank()) {
-                        applyToConversationTask(event.taskId, event.state, event.summary)
+                    updates.add(linkedMapOf("task_id" to event.taskId, "state" to event.state, "summary" to event.summary, "received_at_unix_ms" to now()))
+                    entries = entries.map { entry ->
+                        val matches = if (event.inReplyTo.isNotBlank()) entry["message_id"] == event.inReplyTo
+                            else event.taskId.isNotBlank() && entry["task_id"] == event.taskId
+                        if (matches) LinkedHashMap(entry).apply {
+                            put("state", event.state); put("summary", event.summary)
+                            if (event.taskId.isNotBlank()) put("task_id", event.taskId)
+                            put("updated_at_unix_ms", now())
+                        } else entry
                     }
                 }
                 else -> Unit
             }
         }
-        save(mapOf(
-            "approvals" to approvals.map(::approvalMap),
-            "updates" to updates.takeLast(20),
-        ))
+        val changes = linkedMapOf<String, Any?>("approvals" to approvals.map(::approvalMap), "updates" to updates.takeLast(20), "conversation" to entries)
+        if (received != null) changes["received_event_ids"] = received
+        save(changes)
     }
 
     fun flush(relayUrl: String): Map<String, Any> {

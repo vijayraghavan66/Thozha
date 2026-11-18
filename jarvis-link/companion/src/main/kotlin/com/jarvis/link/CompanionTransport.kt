@@ -394,7 +394,7 @@ class JarvisLinkCompanion(
         return receipts
     }
 
-    fun pollInbox(limit: Int = 20): PollResult {
+    fun pollInbox(limit: Int = 20, persistEvent: ((String, Long, CompanionEvent) -> Boolean)? = null): PollResult {
         require(limit in 1..100)
         connectionState = LinkConnectionState.CONNECTING
         try {
@@ -412,19 +412,25 @@ class JarvisLinkCompanion(
                     safeAck(envelope.header.messageId, AckStatus.REJECTED, "")
                     continue
                 }
-                if (!inbox.recordIfNew(envelope.header.messageId, envelope.header.expiresAtUnixMs)) {
-                    safeAck(envelope.header.messageId, AckStatus.RECEIVED, "")
-                    continue
-                }
-                try {
+                val decoded = try {
                     val plaintext = LinkCrypto.decryptEnvelope(
                         envelope, encryptionIdentity, companionCertificate, item.senderCertificate, hostRoot, now(),
                     )
-                    events += decodeEvent(envelope.header.kind, plaintext)
-                    safeAck(envelope.header.messageId, AckStatus.RECEIVED, LinkCrypto.hex(LinkCrypto.sha256(plaintext.toByteArray(UTF_8))))
+                    Triple(decodeEvent(envelope.header.kind, plaintext), plaintext,
+                        LinkCrypto.hex(LinkCrypto.sha256(plaintext.toByteArray(UTF_8))))
                 } catch (_: Exception) {
                     safeAck(envelope.header.messageId, AckStatus.REJECTED, "")
+                    continue
                 }
+                // Persist decoded data and replay ID atomically before ACK. Persistence failures escape,
+                // leaving the message queued for safe redelivery instead of rejecting or losing it.
+                val isNew = if (persistEvent != null) {
+                    persistEvent(envelope.header.messageId, envelope.header.expiresAtUnixMs, decoded.first)
+                } else {
+                    inbox.recordIfNew(envelope.header.messageId, envelope.header.expiresAtUnixMs)
+                }
+                if (isNew) events += decoded.first
+                safeAck(envelope.header.messageId, AckStatus.RECEIVED, decoded.third)
             }
             cursor = page.nextCursor
             connectionState = LinkConnectionState.CONNECTED

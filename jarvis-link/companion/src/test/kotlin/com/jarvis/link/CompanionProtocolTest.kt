@@ -31,6 +31,7 @@ object CompanionProtocolTest {
         endToEndEnvelopeRoundTrip(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         crashAfterRelayAcceptancePreservesExactEnvelope(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
+        inboxPersistenceBeforeAck(host, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
         localTaskHistoryIsRestartSafe()
         concurrentLocalStateAndOutbox(hostCertificate, hostRoot, companion, now)
@@ -271,6 +272,45 @@ object CompanionProtocolTest {
         check(relay.acks.size == 2) { "redelivery should be ACKed without a second event" }
     }
 
+    private fun inboxPersistenceBeforeAck(
+        host: SigningIdentity, hostCert: DeviceCertificate, phone: SigningIdentity, phoneEnc: EncryptionIdentity,
+        phoneCert: DeviceCertificate, hostRoot: TrustedHostRoot, now: Long,
+    ) {
+        val directory = java.nio.file.Files.createTempDirectory("inbox-atomic").toFile()
+        val base = FileLinkStateStore(File(directory, "state.json"))
+        var failWrite = false
+        val state = object : LinkStateStore {
+            override fun read() = base.read()
+            override fun write(json: String) { if (failWrite) throw java.io.IOException("disk full") else base.write(json) }
+        }
+        fun runtime() = LinkRuntime(SoftwareTestKeyProvider(File(directory, "keys.json")), state, directory, now = { now })
+        val first = runtime()
+        val requestId = "ab".repeat(16)
+        val taskId = "cd".repeat(16)
+        first.recordLocalTaskRequest(requestId, "explain Java", "telegram")
+        val payload = LinkJson.encode(mapOf("task_id" to taskId, "state" to "COMPLETED", "summary" to "real answer", "in_reply_to" to requestId))
+        val incoming = LinkCrypto.createEnvelope("tenant_sim", host, phoneCert, hostRoot, "task.result", payload, nowUnixMs = now, ttlMs = 30_000)
+        val relay = MemoryRelay(phone)
+        relay.incoming += InboxItem(incoming, hostCert)
+        fun client() = JarvisLinkCompanion("tenant_sim", phone, phoneEnc, phoneCert, hostRoot, hostCert, relay,
+            MemoryMessageOutbox(), MemoryMessageInbox(), now = { now }).also { it.setOnline(true) }
+        failWrite = true
+        check(runCatching { client().pollInbox(persistEvent = first::persistInboxEvent) }.isFailure)
+        check(relay.acks.isEmpty()) { "failed persistence must never acknowledge" }
+        failWrite = false
+        relay.crashBeforeAck = true
+        check(client().pollInbox(persistEvent = first::persistInboxEvent).events.size == 1)
+        check(relay.acks.isEmpty())
+        val recovered = runtime()
+        check(recovered.conversation().single()["summary"] == "real answer")
+        check(recovered.recentUpdates().size == 1)
+        relay.crashBeforeAck = false
+        check(client().pollInbox(persistEvent = recovered::persistInboxEvent).events.isEmpty())
+        check(recovered.recentUpdates().size == 1) { "redelivery duplicated event" }
+        check(relay.acks.size == 1 && relay.acks[0].second == AckStatus.RECEIVED)
+        directory.deleteRecursively()
+    }
+
     private fun crashAfterRelayAcceptancePreservesExactEnvelope(
         hostCert: DeviceCertificate, phone: SigningIdentity, phoneEnc: EncryptionIdentity,
         phoneCert: DeviceCertificate, hostRoot: TrustedHostRoot, now: Long,
@@ -391,6 +431,7 @@ private class MemoryRelay(
 ) : JarvisLinkRelayApi {
     val queued = mutableListOf<String>()
     var crashAfterPost = false
+    var crashBeforeAck = false
     val incoming = mutableListOf<InboxItem>()
     val acks = mutableListOf<Pair<String, AckStatus>>()
 
@@ -408,6 +449,7 @@ private class MemoryRelay(
     }
 
     override fun acknowledge(messageId: String, bodyJson: String, headers: Map<String, String>) {
+        if (crashBeforeAck) throw AssertionError("simulated crash before ack")
         val body = bodyJson.toByteArray(UTF_8)
         verifyRequest(headers, "POST", "/v1/messages/$messageId/ack", body, companion)
         acks += messageId to (if (bodyJson.contains("\"received\"")) AckStatus.RECEIVED else AckStatus.REJECTED)
