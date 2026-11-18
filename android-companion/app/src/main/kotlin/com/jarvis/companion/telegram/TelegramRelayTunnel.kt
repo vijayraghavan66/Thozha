@@ -32,7 +32,10 @@ class TelegramRelayTunnel(
     override fun exchange(method: String, pathAndQuery: String, headers: Map<String, String>, body: ByteArray): RelayRawResponse {
         val id = idSource()
         val queue = ArrayBlockingQueue<RelayRawResponse>(1)
-        synchronized(lock) { waiting[id] = queue }
+        synchronized(lock) {
+            if (waiting.containsKey(id)) throw IOException("duplicate tunnel request id")
+            waiting[id] = queue
+        }
         try {
             val allowedHeaders = headers.filterKeys { it == "Accept" || it == "Content-Type" || it.startsWith("X-Jarvis-Link-") }
             val request = linkedMapOf<String, Any>(
@@ -74,6 +77,10 @@ class TelegramRelayTunnel(
 object TunnelFrames {
     const val PREFIX = "JLT1 "
     const val MAX_FRAME_CHARS = 3000
+    private const val MAX_WIRE_CHARS = 4096
+    // The piece is JSON-encoded again in the frame, so quotes and backslashes cost two bytes.
+    // Reserve ample room for the frame metadata, including a maximum-length id.
+    private const val MAX_ENCODED_PIECE_CHARS = 3900
     const val MAX_MESSAGE_CHARS = 262_144
     const val MAX_CHUNKS = 128
     private const val REASSEMBLY_TTL_MS = 60_000L
@@ -83,11 +90,25 @@ object TunnelFrames {
         require(ID.matches(id)) { "invalid message id" }
         val text = asciiEscape(LinkJson.encode(message))
         require(text.length <= MAX_MESSAGE_CHARS) { "message too large" }
-        val pieces = text.chunked(MAX_FRAME_CHARS).ifEmpty { listOf("") }
+        val pieces = mutableListOf<String>()
+        var start = 0
+        while (start < text.length) {
+            var end = start
+            var encodedSize = 0
+            while (end < text.length && end - start < MAX_FRAME_CHARS) {
+                val cost = if (text[end] == '\\' || text[end] == '"') 2 else 1
+                if (encodedSize + cost > MAX_ENCODED_PIECE_CHARS) break
+                encodedSize += cost
+                end++
+            }
+            pieces.add(text.substring(start, end))
+            start = end
+        }
+        if (pieces.isEmpty()) pieces.add("")
         require(pieces.size <= MAX_CHUNKS) { "too many chunks" }
         return pieces.mapIndexed { index, piece ->
             PREFIX + LinkJson.encode(linkedMapOf<String, Any>("id" to id, "n" to index.toLong(), "of" to pieces.size.toLong(), "d" to piece))
-        }
+        }.also { frames -> require(frames.all { it.length <= MAX_WIRE_CHARS }) { "frame too large" } }
     }
 
     /** Escapes every non-ASCII character as \\uXXXX so one character is one UTF-16 unit on the wire. */
@@ -100,26 +121,31 @@ object TunnelFrames {
     }
 
     class Reassembler(private val clock: () -> Long = { System.currentTimeMillis() }) {
-        private class Partial(val of: Int, val pieces: MutableMap<Int, String>, val at: Long)
+        private class Partial(val of: Int, val pieces: MutableMap<Int, String>, val at: Long, var size: Int = 0)
         private val parts = HashMap<String, Partial>()
 
-        fun add(text: String): Map<String, Any>? {
+        @Synchronized fun add(text: String): Map<String, Any>? {
             expire()
-            if (!text.startsWith(PREFIX)) return null
+            if (text.length > MAX_WIRE_CHARS || !text.startsWith(PREFIX)) return null
             val frame = runCatching { LinkJson.parseObject(text.substring(PREFIX.length)) }.getOrNull() ?: return null
             val id = frame["id"] as? String ?: return null
             val n = (frame["n"] as? Number)?.toInt() ?: return null
             val of = (frame["of"] as? Number)?.toInt() ?: return null
             val piece = frame["d"] as? String ?: return null
-            if (!ID.matches(id) || of !in 1..MAX_CHUNKS || n !in 0 until of) return null
+            if (!ID.matches(id) || of !in 1..MAX_CHUNKS || n !in 0 until of || piece.length > MAX_FRAME_CHARS) return null
+            if (!parts.containsKey(id) && parts.size >= 32) return null
             val partial = parts.getOrPut(id) { Partial(of, HashMap(), clock()) }
             if (partial.of != of) { parts.remove(id); return null }
+            val existing = partial.pieces[n]
+            if (existing != null && existing != piece) { parts.remove(id); return null }
+            if (existing == null) partial.size += piece.length
+            if (partial.size > MAX_MESSAGE_CHARS) { parts.remove(id); return null }
             partial.pieces[n] = piece
             if (partial.pieces.size < of) return null
             parts.remove(id)
             val joined = (0 until of).joinToString("") { partial.pieces.getValue(it) }
             if (joined.length > MAX_MESSAGE_CHARS) return null
-            return runCatching { LinkJson.parseObject(joined) }.getOrNull()
+            return runCatching { LinkJson.parseObject(joined) }.getOrNull()?.takeIf { it["id"] == id }
         }
 
         private fun expire() {

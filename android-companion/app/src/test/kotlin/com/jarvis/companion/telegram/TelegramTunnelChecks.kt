@@ -44,6 +44,23 @@ fun main(args: Array<String>) {
     val phoneFrames = TunnelFrames.encode(request, "phone-req-0001")
     check(phoneFrames.size >= 3, "a 7 KB body is split into several frames")
     check(phoneFrames.all { it.length <= 4096 && it.all { c -> c.code < 0x80 } }, "phone frames are ASCII and under 4096 characters")
+    val escapeHeavy = linkedMapOf<String, Any>("id" to "escape-test-0001", "b" to "😀\\\"".repeat(3000))
+    val escapedFrames = TunnelFrames.encode(escapeHeavy, "escape-test-0001")
+    check(escapedFrames.all { it.length <= 4096 }, "escape-heavy Unicode frames fit Telegram's wire limit")
+    val escapedDecoder = TunnelFrames.Reassembler()
+    check(escapedFrames.mapNotNull { escapedDecoder.add(it) }.single()["b"] == escapeHeavy["b"], "escape-heavy message round-trips")
+    val mismatch = TunnelFrames.encode(mapOf("id" to "different-id-001", "t" to "res"), "outer-id-000001")
+    check(TunnelFrames.Reassembler().add(mismatch.single()) == null, "frame id must match message id")
+    val conflicting = TunnelFrames.Reassembler()
+    val firstFrame = LinkJson.parseObject(escapedFrames.first().removePrefix(TunnelFrames.PREFIX)).toMutableMap()
+    check(conflicting.add(escapedFrames.first()) == null, "partial frame held")
+    firstFrame["d"] = "tampered"
+    check(conflicting.add(TunnelFrames.PREFIX + LinkJson.encode(firstFrame)) == null, "conflicting duplicate frame rejected")
+    val concurrentDecoder = TunnelFrames.Reassembler()
+    val results = java.util.Collections.synchronizedList(mutableListOf<Map<String, Any>>())
+    val workers = escapedFrames.map { frame -> thread { concurrentDecoder.add(frame)?.let { results.add(it) } } }
+    workers.forEach { it.join() }
+    check(results.size == 1 && results.single()["b"] == escapeHeavy["b"], "concurrent frame callbacks reassemble once")
     val phoneReassembler = TunnelFrames.Reassembler()
     val shuffled = phoneFrames.reversed() + phoneFrames.first()
     val completed = shuffled.mapNotNull { phoneReassembler.add(it) }
