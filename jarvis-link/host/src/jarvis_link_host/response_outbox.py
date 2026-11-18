@@ -153,6 +153,15 @@ class HostResponseOutbox:
             ).fetchone()
         return row[0] if row else None
 
+    def owns_task(self, *, task_id: str, companion_id: str) -> bool:
+        """Only an unambiguous persisted task-to-sender binding grants control."""
+        with self._lock:
+            owners = self._db.execute(
+                "SELECT DISTINCT sender_device_id FROM relay_response_outbox WHERE task_id=?",
+                (task_id,),
+            ).fetchall()
+        return len(owners) == 1 and owners[0][0] == companion_id
+
     def approvals_checked(self, envelope: Mapping[str, Any]) -> bool:
         tenant, sender, message_id, _expiry, request_digest = self._canonical_request(envelope)
         with self._lock:

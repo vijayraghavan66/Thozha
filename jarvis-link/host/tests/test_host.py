@@ -36,6 +36,8 @@ def setup_host():
         tenant_id=TENANT, device_id=host_id, identity=host,
         host_certificate=host_cert, supervisor=supervisor, replay_cache=ReplayCache(),
     )
+    # Synthetic tests below model a single authorized companion.
+    processor.task_authorizer = lambda **_: True
     return processor, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert
 
 
@@ -192,3 +194,41 @@ def test_envelope_to_key_id_uses_verified_recipient_certificate():
         expected_role="companion", expected_issuer_device_id=host_id, now_ms=now,
     )
     assert verified == phone_cert
+
+
+def test_certified_other_companion_cannot_decide_or_cancel_owned_task():
+    processor, supervisor, host, owner, host_id, owner_id, host_cert, owner_cert = setup_host()
+    other = DeviceIdentity.generate()
+    other_id = device_id_for_signing_key(other.signing_public_der)
+    other_cert = issue_device_certificate(host=host, tenant_id=TENANT, host_device_id=host_id,
+        signing_public_b64u=other.signing_public_b64u, encryption_public_b64u=other.encryption_public_b64u)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    now = int(time.time() * 1000)
+    supervisor.tasks[task_id] = {"state": "RUNNING"}
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "mcp:jarvis_mac:open_app", "Calculator", digest, now + 60_000))
+    processor.task_authorizer = lambda *, task_id, companion_id: companion_id == owner_id
+    decision = {"task_id": task_id, "approval_id": approval_id, "decision": "approve",
+                "operation_digest": digest, "idempotency_key": "decision-one"}
+    cancel = {"task_id": task_id, "idempotency_key": "cancel-one"}
+    for kind, payload in [("approval.decision", decision), ("task.cancel", cancel)]:
+        env = task_envelope(host, other, host_id, other_id, host_cert, payload, kind=kind)
+        with pytest.raises(TaskEnvelopeError, match="not owned"):
+            processor.receive(env.to_dict(), sender_certificate=other_cert, expected_sender_id=other_id)
+    assert supervisor.calls == []
+    assert supervisor.approvals[approval_id].status == "PENDING"
+    env = task_envelope(host, owner, host_id, owner_id, host_cert, decision, kind="approval.decision")
+    assert processor.receive(env.to_dict(), sender_certificate=owner_cert, expected_sender_id=owner_id)["result"]["status"] == "APPROVED"
+    env = task_envelope(host, owner, host_id, owner_id, host_cert, cancel, kind="task.cancel")
+    assert processor.receive(env.to_dict(), sender_certificate=owner_cert, expected_sender_id=owner_id)["result"]["state"] == "CANCELLED"
+
+
+def test_task_control_without_ownership_authorizer_fails_closed():
+    processor, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    del processor.task_authorizer
+    task_id = uuid.uuid4().hex
+    supervisor.tasks[task_id] = {"state": "RUNNING"}
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"task_id": task_id, "idempotency_key": "cancel-one"}, kind="task.cancel")
+    with pytest.raises(TaskEnvelopeError, match="not owned"):
+        processor.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert supervisor.calls == []

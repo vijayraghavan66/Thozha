@@ -72,6 +72,11 @@ class _SubmissionLedger:
         with self._lock:
             return self._entries.get(key)
 
+    def key_for_task(self, task_id: str) -> str | None:
+        with self._lock:
+            matches = [key for key, entry in self._entries.items() if entry.get("task_id") == task_id]
+            return matches[0] if len(matches) == 1 else None
+
     def reserve(self, key: str, digest: str) -> dict[str, Any] | None:
         """Bind a key to one digest atomically before any network request."""
         with self._lock:
@@ -117,6 +122,7 @@ class OpenJarvisApiSupervisorAdapter:
         base_url: str = "http://127.0.0.1:8000",
         http_client: httpx.Client | None = None,
         submission_ledger: str | Path | None = None,
+        strict_recovery: bool = False,
     ) -> None:
         parsed = urlsplit(base_url)
         try:
@@ -134,6 +140,7 @@ class OpenJarvisApiSupervisorAdapter:
             trust_env=False,
         )
         self._owned_client = http_client is None
+        self._strict_recovery = strict_recovery
         self._ledger = _SubmissionLedger(Path(submission_ledger).expanduser() if submission_ledger else None)
 
     def _api_key(self) -> str:
@@ -212,6 +219,12 @@ class OpenJarvisApiSupervisorAdapter:
             # The supervisor already holds this key. Accept it only when this ledger recorded the same digest before
             # posting, so the existing task is the one this request created. Otherwise the key is not ours: drop the
             # record made above and refuse.
+            if self._strict_recovery and (known is None or not known.get("task_id")):
+                # The local digest was recorded before POST, but a crash or
+                # conflicting request can occur before we learn the task ID.
+                # GET status does not prove the server bound that ID to these
+                # exact arguments, so leave the relay request unacknowledged.
+                raise SupervisorUnavailable("task submission outcome is uncertain; manual reconciliation is required")
             if known is None:
                 self._ledger.discard(idempotency_key)
                 raise SupervisorRefused("task idempotency key replay could not be verified")
@@ -343,7 +356,17 @@ class OpenJarvisApiSupervisorAdapter:
         }
 
     def cancel_task(self, task_id: str, idempotency_key: str) -> dict[str, Any]:
-        raise SupervisorRefused("remote task cancellation is not exposed by the OpenJarvis supervisor")
+        if not self._strict_recovery or not _ID_RE.fullmatch(task_id):
+            raise SupervisorRefused("remote task cancellation is not enabled")
+        submission_key = self._ledger.key_for_task(task_id)
+        if submission_key is None or not _IDEMPOTENCY_RE.fullmatch(submission_key):
+            raise SupervisorRefused("task submission mapping is unavailable")
+        _, data = self._request("POST", f"/v1/jarvis/link/tasks/{submission_key}/cancel")
+        if data.get("task_id") != task_id or not isinstance(data.get("state"), str):
+            raise SupervisorRefused("OpenJarvis supervisor returned an invalid cancellation record")
+        return {"task_id": task_id, "state": data["state"].upper(),
+                "summary": str(data.get("summary") or "")[:1000],
+                "action_may_have_started": data.get("action_may_have_started") is True}
 
     def report_progress(self, task_id: str, stage: str, result_digest: str = "") -> dict[str, Any]:
         if not _ID_RE.fullmatch(task_id):

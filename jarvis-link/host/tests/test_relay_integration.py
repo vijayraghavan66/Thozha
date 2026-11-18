@@ -95,6 +95,7 @@ class World:
         self.supervisor = MockSupervisor()
         self.host = JarvisLinkHost(tenant_id=self.tenant, device_id=self.host_id, identity=self.identity,
                                    host_certificate=cert, supervisor=self.supervisor)
+        self.host.task_authorizer = lambda **_: True  # single-companion simulation
         self.runtime = HostRelayRuntime(host=self.host, relay=self.relay)
         self.companion = self.enroll_companion() if sim_companion else None
         # The host reads its own certificate (it is active in its tenant), so no companion is required.

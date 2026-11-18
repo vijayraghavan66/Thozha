@@ -114,3 +114,57 @@ def test_submission_ledger_binds_a_key_to_one_digest():
     assert ledger.reserve("key", "a")["digest"] == "a"
     with pytest.raises(SupervisorRefused):
         ledger.reserve("key", "b")
+
+
+def test_control_behind_first_fifty_tasks_is_scheduled():
+    release = Event()
+    handled = Event()
+    messages = [{"envelope": {"from_device_id": "p", "message_id": str(n), "kind": "task.submit"}} for n in range(55)]
+    messages.append({"envelope": {"from_device_id": "p", "message_id": "cancel", "kind": "task.cancel"}})
+
+    class Relay:
+        def inbox(self, *, device_id, limit, control_only=False):
+            eligible = [m for m in messages if not control_only or m["envelope"]["kind"] == "task.cancel"]
+            return eligible[:limit]
+
+    class Runtime:
+        host = SimpleNamespace(device_id="host")
+        relay = Relay()
+        def poll_once(self, *, records):
+            if records[0]["envelope"]["message_id"] == "cancel":
+                handled.set()
+            else:
+                assert release.wait(5)
+
+    runner = ConcurrentRelayDispatch(Runtime(), task_workers=1)
+    try:
+        runner.poll_once()
+        assert handled.wait(2)
+    finally:
+        release.set()
+        runner.close()
+
+
+def test_task_owner_watch_restarts_fail_closed_and_rejects_rebinding(tmp_path, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    import pytest
+    path = Path(__file__).resolve().parents[1] / "scripts" / "link_host_admin.py"
+    spec = importlib.util.spec_from_file_location("isolated_link_host_admin", path)
+    admin = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(admin)
+    watch = tmp_path / "private" / "watch.json"
+    monkeypatch.setattr(admin, "TASK_WATCH_PATH", watch)
+    assert not admin._task_owned_by(task_id="a" * 32, companion_id="b" * 32)
+    admin._record_task_watch(task_id="a" * 32, idempotency_key="c" * 32, companion_id="b" * 32)
+    assert admin._task_owned_by(task_id="a" * 32, companion_id="b" * 32)
+    assert not admin._task_owned_by(task_id="a" * 32, companion_id="d" * 32)
+    with pytest.raises(ValueError, match="ownership conflict"):
+        admin._record_task_watch(task_id="a" * 32, idempotency_key="c" * 32, companion_id="d" * 32)
+    # A fresh module reads the persisted ownership without relying on RAM.
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    monkeypatch.setattr(fresh, "TASK_WATCH_PATH", watch)
+    assert fresh._task_owned_by(task_id="a" * 32, companion_id="b" * 32)
+    watch.write_text("invalid")
+    assert not fresh._task_owned_by(task_id="a" * 32, companion_id="b" * 32)

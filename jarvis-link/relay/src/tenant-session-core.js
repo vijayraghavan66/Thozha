@@ -328,6 +328,8 @@ export class TenantSessionCore {
     if (auth.device.id !== deviceId) return fail("NOT_RECIPIENT", 403, "Cannot read another device inbox");
     const limit = Number(url.searchParams.get("limit") || 20);
     if (!Number.isInteger(limit) || limit < 1 || limit > 50) return fail("INVALID_ENVELOPE", 422, "Invalid inbox limit");
+    const filter = url.searchParams.get("filter");
+    if (filter !== null && filter !== "control") return fail("INVALID_ENVELOPE", 422, "Invalid inbox filter");
     return this.atomic(async () => {
       const ids = await this.get(`inbox:${deviceId}`) || [];
       const messages = [];
@@ -344,6 +346,9 @@ export class TenantSessionCore {
           continue;
         }
         remaining.push(id);
+        // This is a scheduling hint only; the recipient must authenticate and
+        // validate the signed envelope before acting on its declared kind.
+        if (filter === "control" && !["task.cancel", "approval.decision"].includes(record.envelope.kind)) continue;
         if (messages.length >= limit) continue;
         record.status = "DELIVERED";
         record.delivered_at_unix_ms ||= Date.now();

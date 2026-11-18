@@ -87,6 +87,7 @@ def _host(state: dict, identity: DeviceIdentity, supervisor) -> JarvisLinkHost:
         host_certificate=DeviceCertificate.from_dict(state["host_certificate"]), supervisor=supervisor,
     )
     host.task_observer = _record_task_watch
+    host.task_authorizer = _task_owned_by
     return host
 
 
@@ -103,12 +104,23 @@ def _record_task_watch(*, task_id: str, idempotency_key: str, companion_id: str)
 
 def _record_task_watch_locked(*, task_id: str, idempotency_key: str, companion_id: str) -> None:
     entries = json.loads(TASK_WATCH_PATH.read_text()) if TASK_WATCH_PATH.is_file() else []
-    if any(entry["task_id"] == task_id for entry in entries):
-        return
+    for entry in entries:
+        if entry["task_id"] == task_id:
+            if entry["companion_id"] != companion_id or entry["idempotency_key"] != idempotency_key:
+                raise ValueError("task ownership conflict")
+            return
     entries.append({"task_id": task_id, "idempotency_key": idempotency_key, "companion_id": companion_id, "published": False})
-    tmp = TASK_WATCH_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(entries, indent=2))
-    tmp.replace(TASK_WATCH_PATH)
+    _save(TASK_WATCH_PATH, entries)
+
+
+def _task_owned_by(*, task_id: str, companion_id: str) -> bool:
+    with _WATCH_LOCK:
+        try:
+            entries = json.loads(TASK_WATCH_PATH.read_text())
+            matches = [entry for entry in entries if entry.get("task_id") == task_id]
+            return len(matches) == 1 and matches[0].get("companion_id") == companion_id
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False
 
 
 def _publish_task_updates(state, client, identity, adapter, runtime) -> int:
@@ -147,9 +159,7 @@ def _publish_task_updates_locked(state, client, identity, adapter, runtime) -> i
         )
         entry["published"] = True
         published += 1
-    tmp = TASK_WATCH_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(entries, indent=2))
-    tmp.replace(TASK_WATCH_PATH)
+    _save(TASK_WATCH_PATH, entries)
     return published
 
 
@@ -247,8 +257,10 @@ def cmd_request_approval(args, path: Path) -> dict:
 
 def _create_and_send(state, client, identity, store, adapter, item: dict) -> dict:
     message = item["message"]
+    submission_key = uuid.uuid4().hex
     task_id = adapter.submit_task(objective=f"Simulated echo: {message}", capability_scope=["read_only"],
-                                  idempotency_key=uuid.uuid4().hex)["task_id"]
+                                  idempotency_key=submission_key)["task_id"]
+    _record_task_watch(task_id=task_id, idempotency_key=submission_key, companion_id=item["device_id"])
     approval_id, digest = store.create_approval(
         task_id, SIMULATED_OPERATION, SIMULATED_TARGET, simulated_arguments(message),
         "Harmless simulated echo for the Jarvis Link approval test. No file or network effect.",
@@ -335,6 +347,7 @@ async def _serve(args, path: Path) -> None:
         from jarvis_link_host.openjarvis_api_adapter import OpenJarvisApiSupervisorAdapter
         store, adapter = None, OpenJarvisApiSupervisorAdapter(
             submission_ledger=TEST_DIR / "submission-ledger.json" if args.concurrent_dispatch else None,
+            strict_recovery=args.concurrent_dispatch,
         )
     else:
         store, adapter = _open_supervisor()

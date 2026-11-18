@@ -246,3 +246,21 @@ def test_pending_supervisor_approval_is_sent_as_a_separate_encrypted_relay_messa
     assert approval["target"] == "TextEdit"
     assert approval["canonical_arguments_digest"] == "c" * 64
     outbox.close()
+
+
+def test_persisted_owner_binding_fails_closed_for_unknown_and_ambiguous_tasks(tmp_path):
+    now = int(time.time() * 1000)
+    path = tmp_path / "outbox.db"
+    store = HostResponseOutbox(path)
+    request = {"tenant_id": "tenant", "from_device_id": "a" * 32, "message_id": "b" * 32,
+               "expires_at_unix_ms": now + 60_000}
+    store.put(request, [], task_id="c" * 32, now_ms=now)
+    store.close()
+    store = HostResponseOutbox(path)
+    assert store.owns_task(task_id="c" * 32, companion_id="a" * 32)
+    assert not store.owns_task(task_id="c" * 32, companion_id="d" * 32)
+    assert not store.owns_task(task_id="e" * 32, companion_id="a" * 32)
+    store.put({**request, "message_id": "f" * 32, "from_device_id": "d" * 32}, [], task_id="c" * 32, now_ms=now)
+    assert not store.owns_task(task_id="c" * 32, companion_id="a" * 32)
+    assert not store.owns_task(task_id="c" * 32, companion_id="d" * 32)
+    store.close()

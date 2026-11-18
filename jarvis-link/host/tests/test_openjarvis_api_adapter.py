@@ -173,3 +173,55 @@ def test_task_202_is_polled_until_supervisor_approval_state(tmp_path, monkeypatc
     assert [request.method for request in requests] == ["POST", "GET"]
     assert requests[-1].url.path.endswith("/link/tasks/link-message-id-0004")
     client.close()
+
+
+def test_strict_recovery_keeps_unknown_conflict_unacknowledged_after_restart(tmp_path):
+    key = _key(tmp_path / "key")
+    ledger = tmp_path / "ledger.json"
+    calls = []
+
+    def lost_response(request):
+        calls.append(request.method)
+        raise httpx.ReadTimeout("simulated lost response", request=request)
+
+    first_client = httpx.Client(transport=httpx.MockTransport(lost_response))
+    first = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=first_client,
+                                           submission_ledger=ledger, strict_recovery=True)
+    args = dict(objective="read safely", capability_scope=["read_only"], idempotency_key="lost-reply-unique-0001")
+    with pytest.raises(SupervisorUnavailable):
+        first.submit_task(**args)
+    first_client.close()
+
+    def conflict(request):
+        calls.append(request.method)
+        if request.method == "GET":
+            pytest.fail("unverified task status cannot establish matching arguments")
+        return httpx.Response(409, json={"detail": "conflict"})
+
+    second_client = httpx.Client(transport=httpx.MockTransport(conflict))
+    second = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=second_client,
+                                            submission_ledger=ledger, strict_recovery=True)
+    with pytest.raises(SupervisorUnavailable, match="uncertain"):
+        second.submit_task(**args)
+    assert calls == ["POST", "POST"]
+    second_client.close()
+
+
+def test_strict_cancel_uses_only_known_submission_mapping_and_checks_task_id(tmp_path):
+    key = _key(tmp_path / "api-key")
+    seen = []
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        if request.url.path.endswith("/cancel"):
+            return httpx.Response(200, json={"task_id": "a" * 32, "state": "CANCELLED", "action_may_have_started": False})
+        return httpx.Response(200, json={"task_id": "a" * 32, "state": "COMPLETED"})
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client, strict_recovery=True)
+    args = dict(objective="safe", capability_scope=["read_only"], idempotency_key="owned-submission-0001")
+    adapter.submit_task(**args)
+    assert adapter.cancel_task("a" * 32, "cancel-key")["state"] == "CANCELLED"
+    assert adapter.cancel_task("a" * 32, "cancel-key")["state"] == "CANCELLED"
+    assert seen[-1][1] == "/v1/jarvis/link/tasks/owned-submission-0001/cancel"
+    with pytest.raises(SupervisorRefused, match="mapping"):
+        adapter.cancel_task("b" * 32, "cancel-key")
+    client.close()

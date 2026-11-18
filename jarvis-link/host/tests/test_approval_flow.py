@@ -170,6 +170,7 @@ def test_approval_survives_supervisor_restart_and_continues_via_explicit_resume(
 def test_serve_cycle_creates_receives_resumes_and_publishes(flow, tmp_path, monkeypatch):
     admin = _admin()
     monkeypatch.setattr(admin, "TEST_DIR", tmp_path / "admin")
+    monkeypatch.setattr(admin, "TASK_WATCH_PATH", tmp_path / "admin" / "task-watch.json")
     host_state = {"tenant_id": flow.world.tenant, "host_device_id": flow.world.host_id,
                   "host_certificate": flow.world.host.host_certificate.to_dict()}
     client, identity = flow.world.relay, flow.world.identity

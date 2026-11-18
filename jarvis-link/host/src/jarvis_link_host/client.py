@@ -145,10 +145,13 @@ class RelayClient:
     def submit_envelope(self, envelope: Mapping[str, Any]) -> dict[str, Any]:
         return self._json(self.signed_request("POST", "/v1/messages", dict(envelope)))
 
-    def inbox(self, *, device_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    def inbox(self, *, device_id: str, limit: int = 20, control_only: bool = False) -> list[dict[str, Any]]:
         if not re.fullmatch(r"[0-9a-f]{32}", device_id) or not 1 <= limit <= 50:
             raise ValueError("invalid inbox recipient or limit")
-        path = f"/v1/devices/{device_id}/inbox?{urlencode({'limit': str(limit)})}"
+        params = {'limit': str(limit)}
+        if control_only:
+            params['filter'] = 'control'
+        path = f"/v1/devices/{device_id}/inbox?{urlencode(params)}"
         value = self._json(self.signed_request("GET", path))
         messages = value.get("messages")
         if not isinstance(messages, list) or any(not isinstance(item, dict) for item in messages):

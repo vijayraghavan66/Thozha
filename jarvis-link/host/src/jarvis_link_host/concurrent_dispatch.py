@@ -33,9 +33,16 @@ class ConcurrentRelayDispatch:
                     # No ACK is emitted by this coordinator. Relay redelivery is safe.
                     pass
                 del self._active[key]
-        records = self.runtime.relay.inbox(device_id=self.runtime.host.device_id, limit=limit)
         task_count = sum(is_task for _, is_task in self._active.values())
         control_count = len(self._active) - task_count
+        # Query controls separately to find them behind a full FIFO page of
+        # tasks. The relay filter is a hint, never an authorization decision.
+        controls = [] if control_count else self.runtime.relay.inbox(
+            device_id=self.runtime.host.device_id, limit=limit, control_only=True,
+        )
+        controls = [r for r in controls if isinstance(r.get("envelope"), dict)
+                    and r["envelope"].get("kind") in {"task.cancel", "approval.decision"}]
+        records = controls + self.runtime.relay.inbox(device_id=self.runtime.host.device_id, limit=limit)
         scheduled = 0
         for record in records:
             envelope = record.get("envelope")

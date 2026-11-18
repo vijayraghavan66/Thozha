@@ -86,7 +86,7 @@ function enrollmentBytes(p) {
 function envelopeHeader(e) {
   return `JARVIS-LINK-ENVELOPE-V1\n${e.tenant_id}\n${e.message_id}\n${e.from_device_id}\n${e.to_device_id}\n${e.to_key_id}\n${e.kind}\n${e.issued_at_unix_ms}\n${e.expires_at_unix_ms}\n${e.ephemeral_pubkey_b64url}\n${e.iv_b64url}`;
 }
-async function makeEnvelope({ tenant, from, to, sender, toKeyId, messageId = crypto.randomUUID().replaceAll("-", ""), text = "safe simulated task", issued = Date.now(), expires = issued + 60_000 }) {
+async function makeEnvelope({ tenant, from, to, sender, toKeyId, kind = "task.submit", messageId = crypto.randomUUID().replaceAll("-", ""), text = "safe simulated task", issued = Date.now(), expires = issued + 60_000 }) {
   const ephemeral = await ecdhPair();
   const ephemeralDer = new Uint8Array(await crypto.subtle.exportKey("spki", ephemeral.publicKey));
   const recipientDer = fromB64url(to.encryption_public_key_b64url);
@@ -99,7 +99,7 @@ async function makeEnvelope({ tenant, from, to, sender, toKeyId, messageId = cry
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const header = {
     v: 1, tenant_id: tenant, message_id: messageId, from_device_id: from, to_device_id: to.id,
-    to_key_id: toKeyId, kind: "task.submit", issued_at_unix_ms: issued, expires_at_unix_ms: expires,
+    to_key_id: toKeyId, kind, issued_at_unix_ms: issued, expires_at_unix_ms: expires,
     ephemeral_pubkey_b64url: b64url(ephemeralDer), iv_b64url: b64url(iv),
   };
   const aad = te.encode(envelopeHeader(header));
@@ -374,4 +374,35 @@ test("expired enrollment challenges and invitations are purged by the tenant ala
   await tenantDo.alarm();
   assert.equal(await tenantDo.state.storage.get(challengeKey), undefined);
   assert.equal(await tenantDo.state.storage.get(invitationKey), undefined);
+});
+
+test("control inbox reaches signed decisions behind a full task page without granting cross-device access", async () => {
+  const ctx = await setupTenant();
+  const companion = await enrollCompanion(ctx);
+  const args = { tenant: TENANT, from: companion.companionId,
+    to: { id: ctx.hostId, encryption_public_key_b64url: ctx.hostCert.encryption_public_key_b64url },
+    sender: companion.companionSign, toKeyId: ctx.hostCert.certificate_id };
+  for (let i = 0; i < 51; i++) {
+    const item = await makeEnvelope(args);
+    const sent = await relay.fetch(await postRequest({path: "/v1/messages", tenant: TENANT,
+      deviceId: companion.companionId, pair: companion.companionSign, body: item}), ctx.env);
+    assert.equal(sent.status, 200);
+  }
+  const control = await makeEnvelope({...args, kind: "task.cancel"});
+  assert.equal((await relay.fetch(await postRequest({path: "/v1/messages", tenant: TENANT,
+    deviceId: companion.companionId, pair: companion.companionSign, body: control}), ctx.env)).status, 200);
+  const path = `/v1/devices/${ctx.hostId}/inbox?limit=50&filter=control`;
+  const unauthorized = await relay.fetch(await postRequest({method: "GET", path, tenant: TENANT,
+    deviceId: companion.companionId, pair: companion.companionSign}), ctx.env);
+  assert.equal(unauthorized.status, 403);
+  const response = await relay.fetch(await postRequest({method: "GET", path, tenant: TENANT,
+    deviceId: ctx.hostId, pair: ctx.hostSign}), ctx.env);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.messages.length, 1);
+  assert.equal(body.messages[0].envelope.message_id, control.message_id);
+  const fifo = `/v1/devices/${ctx.hostId}/inbox?limit=50`;
+  const normal = await relay.fetch(await postRequest({method: "GET", path: fifo, tenant: TENANT,
+    deviceId: ctx.hostId, pair: ctx.hostSign}), ctx.env);
+  assert.equal((await normal.json()).messages.length, 50);
 });

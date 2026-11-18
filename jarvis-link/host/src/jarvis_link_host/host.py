@@ -205,6 +205,7 @@ class JarvisLinkHost:
             idem = payload["idempotency_key"]
             if not isinstance(idem, str) or not 1 <= len(idem) <= 128 or "\n" in idem or "\r" in idem:
                 raise TaskEnvelopeError("task.cancel idempotency key is invalid")
+            self._require_task_owner(envelope.from_device_id, task_id)
             result = self.supervisor.cancel_task(task_id, envelope.message_id)
             return {"kind": "task.cancelled", **result}
 
@@ -231,6 +232,7 @@ class JarvisLinkHost:
                 or len(continuation_objective.encode("utf-8")) > 4096
             ):
                 raise TaskEnvelopeError("approval continuation objective is invalid")
+            self._require_task_owner(envelope.from_device_id, task_id)
             approval = self.supervisor.get_approval(approval_id)
             if approval is None or approval.task_id != task_id:
                 raise TaskEnvelopeError("approval does not match task")
@@ -249,3 +251,9 @@ class JarvisLinkHost:
             return {"kind": "approval.decision_result", **result}
 
         raise TaskEnvelopeError(f"host does not accept message kind {envelope.kind}")
+
+    def _require_task_owner(self, companion_id: str, task_id: str) -> None:
+        """Fail closed unless the caller provides a durable ownership authorizer."""
+        authorizer = getattr(self, "task_authorizer", None)
+        if authorizer is None or not authorizer(task_id=task_id, companion_id=companion_id):
+            raise TaskEnvelopeError("task is not owned by this companion")
