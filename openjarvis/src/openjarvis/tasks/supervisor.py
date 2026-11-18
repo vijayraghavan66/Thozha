@@ -507,12 +507,20 @@ class SupervisorStore:
         with self._tx() as db:
             task = db.execute("SELECT state,recovery_json FROM tasks WHERE id=?", (task_id,)).fetchone()
             run = db.execute("SELECT status FROM link_task_runs WHERE task_id=?", (task_id,)).fetchone()
-            approval = db.execute("SELECT task_id,status FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
+            approval = db.execute("SELECT task_id,status,operation,target FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
             if task is None or run is None or approval is None:
                 raise KeyError("Link approval task record is missing")
             metadata = json.loads(task["recovery_json"] or "{}")
-            if metadata.get("source") != "jarvis_link" or metadata.get("scope") != "assistant":
-                raise PermissionError("Only assistant-scope Link tasks can wait for an approval")
+            allowed_approval = (
+                metadata.get("scope") == "assistant"
+                or (
+                    metadata.get("scope") == "development"
+                    and approval["operation"] == "mcp:jarvis_dev:approve_plan"
+                    and approval["target"].startswith("taskflow:plan:")
+                )
+            )
+            if metadata.get("source") != "jarvis_link" or not allowed_approval:
+                raise PermissionError("This Link task and approval type cannot enter the approval wait state")
             if task["state"] != "WAITING_APPROVAL" or approval["task_id"] != task_id or approval["status"] != "PENDING":
                 raise RuntimeError("Link task approval is not pending for this task")
             if run["status"] not in {"RUNNING", "WAITING_APPROVAL"}:
@@ -525,7 +533,7 @@ class SupervisorStore:
         with self._tx() as db:
             task = db.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
             run = db.execute("SELECT status FROM link_task_runs WHERE task_id=?", (task_id,)).fetchone()
-            approval = db.execute("SELECT task_id,status FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
+            approval = db.execute("SELECT task_id,status,operation,target FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
             if task is None or run is None or approval is None:
                 raise KeyError("Link approval task record is missing")
             if task["state"] != "RUNNING" or run["status"] != "WAITING_APPROVAL":
@@ -539,12 +547,20 @@ class SupervisorStore:
         with self._tx() as db:
             task = db.execute("SELECT state,recovery_json FROM tasks WHERE id=?", (task_id,)).fetchone()
             run = db.execute("SELECT status FROM link_task_runs WHERE task_id=?", (task_id,)).fetchone()
-            approval = db.execute("SELECT task_id,status FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
+            approval = db.execute("SELECT task_id,status,operation,target FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
             if task is None or run is None or approval is None:
                 raise KeyError("Link approval task record is missing")
             metadata = json.loads(task["recovery_json"] or "{}")
-            if metadata.get("source") != "jarvis_link" or metadata.get("scope") != "assistant":
-                raise PermissionError("Only assistant-scope Link tasks can record approval rejection")
+            allowed_approval = (
+                metadata.get("scope") == "assistant"
+                or (
+                    metadata.get("scope") == "development"
+                    and approval["operation"] == "mcp:jarvis_dev:approve_plan"
+                    and approval["target"].startswith("taskflow:plan:")
+                )
+            )
+            if metadata.get("source") != "jarvis_link" or not allowed_approval:
+                raise PermissionError("This Link task and approval type cannot record plan rejection")
             if task["state"] not in {"PAUSED", "WAITING_APPROVAL"} or run["status"] != "WAITING_APPROVAL":
                 raise RuntimeError("Link task is not waiting for this approval")
             if approval["task_id"] != task_id or approval["status"] != "REJECTED":

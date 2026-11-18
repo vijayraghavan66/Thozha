@@ -864,6 +864,30 @@ async def cancel_link_task(idempotency_key: str, request: Request) -> dict[str, 
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail="This task can no longer be cancelled") from exc
     if result["state"] == "CANCELLED":
+        capability_revoked = 0
+        try:
+            from openjarvis.tasks.dev_capability import CapabilityStore, capability_db_path
+
+            capability_path = Path(capability_db_path())
+            task = store.get_task(record["task_id"]) or {}
+            metadata = json.loads(task.get("recovery_json") or "{}")
+            owner_actor = metadata.get("owner_actor")
+            if capability_path.is_file() and isinstance(owner_actor, str):
+                capabilities = CapabilityStore(str(capability_path))
+                try:
+                    capability_revoked = capabilities.revoke_for_supervisor_task(
+                        store, task_id=record["task_id"], requester_actor=owner_actor,
+                    )
+                finally:
+                    capabilities.close()
+                store.record_event(record["task_id"], "development.capabilities_revoked", {
+                    "count": capability_revoked,
+                    "device_match": owner_actor == actor,
+                })
+        except Exception as exc:
+            # Task cancellation remains durable; every capability operation also checks task state.
+            logger.warning("Development capability revocation after cancellation failed (%s)", type(exc).__name__)
+        result["development_capabilities_revoked"] = capability_revoked
         result["summary"] = (
             "Task cancelled. A Mac action had already started; check its result before retrying."
             if result["action_may_have_started"]
@@ -983,6 +1007,16 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
         ):
             raise HTTPException(status_code=409, detail="Link task objective or scope digest does not match")
         link_capabilities = LINK_SCOPE_CAPABILITIES[link_scope[0]]
+        if (
+            decision == "approve"
+            and existing.get("operation") == "mcp:jarvis_dev:approve_plan"
+            and link_scope == ["development"]
+            and continuation_objective is None
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="The paired companion must include the original task text to resume its approved plan",
+            )
         if continuation_objective is not None:
             objective_digest = hashlib.sha256(continuation_objective.strip().encode("utf-8")).hexdigest()
             if objective_digest != task["request_digest"]:
@@ -1019,7 +1053,7 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
         mcp_tool = operation.removeprefix(f"mcp:{server}:")
         if server == "jarvis_dev":
             # Development operations exist only for a development Link task; nothing else may dispatch them.
-            allowed_mcp_tools = {"write_project_file", "run_project_tests"}
+            allowed_mcp_tools = {"approve_plan", "write_project_file", "run_project_tests"}
             source_ok = is_link_task and metadata.get("source") == "jarvis_link" and metadata.get("scope") == "development"
         else:
             allowed_mcp_tools = {"click", "type_text", "press_key", "scroll", "open_app", "open_browser_workspace"}
@@ -1034,6 +1068,37 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
             raise HTTPException(status_code=409, detail="Stored approved operation arguments are unavailable")
         if task and task["state"] == "PAUSED" and not store.resume_approved_task(task_id, approval_id):
             raise HTTPException(status_code=409, detail="Paused task could not be explicitly resumed")
+        if operation == "mcp:jarvis_dev:approve_plan":
+            # Reserve an inert capability issuance record before the supervisor's
+            # one-shot consume. If this API process crashes immediately afterward,
+            # the task-scoped MCP child can recover only this exact approved plan.
+            capabilities = None
+            try:
+                from openjarvis.tasks.dev_capability import CapabilityStore, capability_db_path
+                from openjarvis.tasks.dev_capability_adapter import DevelopmentCapabilityMCPAdapter
+
+                owner_actor = metadata.get("owner_actor", "")
+                workspace_root = Path(os.environ.get("JARVIS_DEV_WORKSPACE") or (
+                    Path.home() / "Documents" / "Jarvis-Lab" / "agent-evaluation" / "taskflow"
+                )).resolve()
+                capabilities = CapabilityStore(capability_db_path())
+                plan_adapter = DevelopmentCapabilityMCPAdapter(
+                    store,
+                    capabilities,
+                    task_id=task_id,
+                    user_id=owner_actor,
+                    workspace_root=str(workspace_root),
+                )
+                plan_adapter.prepare_approved_plan_issuance(approval_id)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The exact development plan could not be safely prepared for execution",
+                ) from exc
+            finally:
+                if capabilities is not None:
+                    capabilities.close()
+
         if not store.consume_approval(
             approval_id,
             task_id=task_id,

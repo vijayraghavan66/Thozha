@@ -434,6 +434,50 @@ class DevelopmentCapabilityMCPAdapter:
             requester_actor=owner,
         )
 
+    def prepare_approved_plan_issuance(self, approval_id: str) -> None:
+        """Persist an inert issuance intent before an outer dispatcher consumes the approval."""
+        _task, owner, device_id = self._task_binding(allow_waiting=True)
+        with self.capability_store._lock:
+            row = self.capability_store._db.execute(
+                "SELECT approval_id,spec_json FROM dev_plan_approval_bindings WHERE task_id=?",
+                (self.task_id,),
+            ).fetchone()
+        if row is None or row["approval_id"] != approval_id:
+            raise CapabilityError(
+                "APPROVAL_MISMATCH", "approval ID is not the plan registered for this task"
+            )
+        spec = self._decode_spec(row["spec_json"])
+        if (
+            spec.device_id != device_id
+            or spec.user_id != self.user_id
+            or spec.workspace_root != self.workspace_root
+        ):
+            raise CapabilityError(
+                "IDENTITY_MISMATCH", "plan identity or workspace changed before approval consumption"
+            )
+        approval = self.supervisor_store.approval(approval_id)
+        self._validate_approval(
+            approval, spec, plan_approval_target(spec),
+            operation_digest(
+                PLAN_APPROVAL_OPERATION,
+                plan_approval_target(spec),
+                plan_approval_arguments(spec),
+            ),
+            owner,
+            self.task_id,
+        )
+        if approval.get("status") != "APPROVED":
+            raise CapabilityError(
+                "SUPERVISOR_APPROVAL_REQUIRED", "plan approval is not ready for consumption"
+            )
+        self.capability_store._reserve_issuance_intent(
+            spec,
+            approval_id=approval_id,
+            task_id=self.task_id,
+            requester_actor=owner,
+            approved_by=owner,
+        )
+
     def _operation_context(self, capability_id: str) -> tuple[str, str, str]:
         _task, owner, device_id = self._task_binding()
         try:
@@ -516,6 +560,20 @@ class DevelopmentCapabilityMCPAdapter:
             supervisor_store=self.supervisor_store,
             op_id=op_id,
             rel_paths=rel_paths,
+        )
+
+    def consume_repair(self, capability_id: str, *, op_id: str) -> int:
+        """Spend one repair allowance without increasing any other plan limit."""
+        self._validate_operation_id(op_id)
+        device_id, user_id, owner = self._operation_context(capability_id)
+        return self.capability_store.consume_repair(
+            capability_id,
+            device_id=device_id,
+            user_id=user_id,
+            op_id=op_id,
+            supervisor_store=self.supervisor_store,
+            task_id=self.task_id,
+            requester_actor=owner,
         )
 
     def revoke_after_cancellation(self) -> int:

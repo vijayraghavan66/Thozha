@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 
 import pytest
 
@@ -178,7 +179,7 @@ def test_bounded_write_fixed_test_and_artifact_manifest(world):
     argv = world["adapter"].authorize_test(
         capability_id, op_id="adapter-test-001", command="unittest-tests"
     )
-    assert argv == ("python3", "-m", "unittest", "discover", "-s", "tests", "-q")
+    assert argv == (sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q")
     with pytest.raises(CapabilityError) as shell:
         world["adapter"].authorize_test(
             capability_id,
@@ -243,6 +244,15 @@ def test_cancelled_task_denies_operations_and_revokes_capability(world):
             capability_id, op_id="cancel-test-01", command="unittest-tests"
         )
     assert cancelled.value.code == "TASK_INACTIVE"
+
+
+def test_repair_budget_is_single_use_and_bounded_by_plan(world):
+    plan = {**PLAN, "max_repairs": 1}
+    _approval, capability_id = issue(world, plan)
+    assert world["adapter"].consume_repair(capability_id, op_id="repair-attempt-001") == 1
+    with pytest.raises(CapabilityError) as exhausted:
+        world["adapter"].consume_repair(capability_id, op_id="repair-attempt-002")
+    assert exhausted.value.code == "REPAIR_LIMIT"
 
 
 def test_adapter_refuses_non_development_or_unowned_tasks(tmp_path):

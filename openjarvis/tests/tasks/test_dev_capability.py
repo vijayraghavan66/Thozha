@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 
 import pytest
 
@@ -405,7 +406,7 @@ def test_arbitrary_or_shell_test_commands_are_refused(world, command):
 def test_only_the_fixed_allowlisted_command_is_returned_as_argv(world):
     cap = issue(world)
     argv = authorize_test(world, cap, device_id=DEVICE, user_id=USER, op_id="ok", command="unittest-tests")
-    assert argv[:3] == ("python3", "-m", "unittest")
+    assert argv[:3] == (sys.executable, "-m", "unittest")
 
 
 def test_plan_without_test_operation_refuses_tests(world):

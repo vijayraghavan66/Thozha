@@ -19,9 +19,11 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,7 +35,7 @@ ALLOWED_OPS = frozenset({OP_WRITE, OP_TEST, OP_ARTIFACT})
 PLAN_APPROVAL_OPERATION = "mcp:jarvis_dev:approve_plan"
 PLAN_APPROVAL_TARGET_PREFIX = "taskflow:plan:"
 # Test commands are fixed identifiers. Arbitrary command strings are never accepted.
-TEST_COMMANDS = {"unittest-tests": ("python3", "-m", "unittest", "discover", "-s", "tests", "-q")}
+TEST_COMMANDS = {"unittest-tests": (sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q")}
 MAX_FILE_BYTES_HARD = 256 * 1024
 MAX_TOTAL_BYTES_HARD = 4 * 1024 * 1024
 MAX_WRITES_HARD = 200
@@ -45,6 +47,20 @@ _PLAN_ID = re.compile(r"[A-Za-z0-9_.-]{8,80}")
 _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,120}")
 _DEVICE_ID = re.compile(r"[0-9a-f]{32}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+def capability_db_path() -> str:
+    """Return the private, persistent capability database path shared by MCP and cancellation routes."""
+    configured = os.environ.get("JARVIS_DEV_CAPABILITY_DB")
+    path = Path(configured).expanduser() if configured else Path.home() / ".openjarvis" / "data" / "development-capabilities.sqlite3"
+    parent = path.parent
+    if not parent.exists():
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(parent, 0o700)
+        except OSError:
+            pass
+    return str(path)
 
 
 class CapabilityError(Exception):
@@ -241,6 +257,11 @@ class CapabilityStore:
         # Operation methods call issuance/task helpers while holding the store lock.
         self._lock = threading.RLock()
         self._db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        if self.path != ":memory:":
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute(
@@ -402,9 +423,9 @@ class CapabilityStore:
 
         intent = self._issuance_intent(approval_id)
         if approval.get("status") == "CONSUMED":
-            # Supervisor and capability state live in separate SQLite databases. A
-            # durable intent is committed before consume_approval(), so a restart in
-            # the cross-store gap can recover only this exact already-consumed decision.
+            # Supervisor and capability state live in separate SQLite databases.
+            # A durable intent must exist before the approval is consumed; missing
+            # intents fail closed even when a consumed supervisor row looks plausible.
             self._validate_issuance_intent(
                 intent, spec=spec, task_id=task_id, requester_actor=requester_actor, approved_by=approved_by,
             )
