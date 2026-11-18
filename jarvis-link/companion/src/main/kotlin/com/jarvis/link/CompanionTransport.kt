@@ -315,6 +315,7 @@ internal fun decodeCompanionEvent(kind: String, payload: String): CompanionEvent
                 body = if (verified) text else null,
                 bodyComplete = fields["body_complete"] != false,
                 integrityFailed = text != null && !verified,
+                eventSeq = if (kind == "task.progress") (fields["event_seq"] as? Number)?.toLong()?.takeIf { it > 0 } else null,
             )
         }
         else -> CompanionEvent.Unknown(kind)
@@ -340,6 +341,7 @@ sealed interface CompanionEvent {
         val body: String? = null,
         val bodyComplete: Boolean = true,
         val integrityFailed: Boolean = false,
+        val eventSeq: Long? = null,
     ) : CompanionEvent
     data class Unknown(val kind: String) : CompanionEvent
 
@@ -350,7 +352,8 @@ sealed interface CompanionEvent {
             "operation" to review.operation, "target" to review.target,
             "canonical_arguments_digest" to review.canonicalArgumentsDigest, "expires_at_unix_ms" to review.expiresAtUnixMs,
         )
-        is TaskUpdate -> linkedMapOf("type" to "task_update", "task_id" to taskId, "state" to state, "summary" to summary, "in_reply_to" to inReplyTo)
+        is TaskUpdate -> linkedMapOf<String, Any>("type" to "task_update", "task_id" to taskId, "state" to state, "summary" to summary, "in_reply_to" to inReplyTo)
+            .also { update -> eventSeq?.let { update["event_seq"] = it } }
         is Unknown -> linkedMapOf("type" to "unknown", "kind" to kind)
     }
 }

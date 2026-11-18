@@ -368,10 +368,23 @@ class LinkRuntime(
                         entry["message_id"] == event.inReplyTo else event.taskId.isNotBlank() && entry["task_id"] == event.taskId
                     val matching = entries.filter(::matches)
                     val stale = matching.isNotEmpty() && matching.all { isStaleAfterTerminal(it, event.state) }
-                    if (!stale) updates.add(linkedMapOf("task_id" to event.taskId, "state" to event.state, "summary" to event.summary, "received_at_unix_ms" to now()))
+                    val highestProgressSeq = matching.mapNotNull { (it["progress_seq"] as? Number)?.toLong() }.maxOrNull() ?: 0L
+                    val staleProgress = event.eventSeq != null && event.eventSeq <= highestProgressSeq
+                    val duplicateProgress = event.eventSeq != null && updates.any {
+                        it["task_id"] == event.taskId && (it["event_seq"] as? Number)?.toLong() == event.eventSeq
+                    }
+                    if (!stale && !staleProgress && !duplicateProgress) {
+                        updates.add(linkedMapOf<String, Any>(
+                            "task_id" to event.taskId,
+                            "state" to event.state,
+                            "summary" to event.summary,
+                            "received_at_unix_ms" to now(),
+                        ).also { event.eventSeq?.let { seq -> it["event_seq"] = seq } })
+                    }
                     entries = entries.map { entry ->
-                        if (matches(entry) && !isStaleAfterTerminal(entry, event.state)) LinkedHashMap(entry).apply {
+                        if (matches(entry) && !isStaleAfterTerminal(entry, event.state) && !staleProgress && !duplicateProgress) LinkedHashMap(entry).apply {
                             put("state", event.state); put("summary", event.summary)
+                            event.eventSeq?.let { put("progress_seq", it) }
                             // The canonical answer is the verified body; the summary is only a preview for cards.
                             if (event.body != null) put("body", event.body) else remove("body")
                             put("body_complete", event.bodyComplete); put("body_integrity_failed", event.integrityFailed)

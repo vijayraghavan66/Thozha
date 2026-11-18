@@ -35,6 +35,7 @@ object CompanionProtocolTest {
         inboxPersistenceBeforeAck(host, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
         localTaskHistoryIsRestartSafe()
+        progressSequenceDeduplicatesOutOfOrderEvents()
         staleProgressCannotReopenTerminalTask()
         concurrentLocalStateAndOutbox(hostCertificate, hostRoot, companion, now)
         relayClientRequiresHttpsAndCanonicalTenantIds()
@@ -418,6 +419,38 @@ object CompanionProtocolTest {
         check(entry["state"] == "COMPLETED" && entry["summary"] == "real result") { "stale progress reopened completed task" }
         check(runtime.recentUpdates().size == 1) { "stale progress appeared in recent updates" }
         check(!runtime.persistInboxEvent("22".repeat(16), expiry, CompanionEvent.TaskUpdate(taskId, "RUNNING", "old progress", requestId)))
+        dir.deleteRecursively()
+    }
+
+    private fun progressSequenceDeduplicatesOutOfOrderEvents() {
+        val decoded = decodeCompanionEvent(
+            "task.progress",
+            "{\"task_id\":\"${"ab".repeat(16)}\",\"state\":\"RUNNING\",\"summary\":\"Working\",\"event_seq\":9}",
+        ) as CompanionEvent.TaskUpdate
+        check(decoded.eventSeq == 9L && decoded.toMap()["event_seq"] == 9L) { "task.progress sequence was not decoded" }
+
+        val dir = java.nio.file.Files.createTempDirectory("link-progress-sequence").toFile()
+        val runtime = LinkRuntime(
+            SoftwareTestKeyProvider(File(dir, "keys.json")),
+            FileLinkStateStore(File(dir, "state.json")), dir,
+            now = { 1_800_000_000_000L },
+        )
+        val requestId = "ef".repeat(16)
+        val taskId = "ab".repeat(16)
+        runtime.recordLocalTaskRequest(requestId, "slow task", "telegram")
+        runtime.recordLocalTaskResult(requestId, taskId, "QUEUED", "Task accepted")
+        val expiry = 1_800_000_030_000L
+        check(runtime.persistInboxEvent("11".repeat(16), expiry, CompanionEvent.TaskUpdate(taskId, "RUNNING", "newer", eventSeq = 9)))
+        check(runtime.persistInboxEvent("22".repeat(16), expiry, CompanionEvent.TaskUpdate(taskId, "PLANNING", "out of order", eventSeq = 8)))
+        check(runtime.persistInboxEvent("33".repeat(16), expiry, CompanionEvent.TaskUpdate(taskId, "RUNNING", "duplicate seq", eventSeq = 9)))
+        val entry = runtime.conversation().single()
+        check(entry["state"] == "RUNNING" && entry["summary"] == "newer" && entry["progress_seq"] == 9L) {
+            "out-of-order task.progress replaced newer state"
+        }
+        check(runtime.recentUpdates().size == 1) { "duplicate/out-of-order progress entered activity history" }
+        check(runtime.persistInboxEvent("44".repeat(16), expiry, CompanionEvent.TaskUpdate(taskId, "COMPLETED", "done", body = "verified answer")))
+        check(runtime.persistInboxEvent("55".repeat(16), expiry, CompanionEvent.TaskUpdate(taskId, "RUNNING", "late", eventSeq = 10)))
+        check(runtime.conversation().single()["state"] == "COMPLETED") { "late progress reopened terminal task" }
         dir.deleteRecursively()
     }
 
