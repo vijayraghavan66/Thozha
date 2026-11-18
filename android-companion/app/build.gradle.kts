@@ -191,3 +191,10 @@ tasks.register<JavaExec>("verifyExecutionLanes") {
     classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.ui.ExecutionLanesCheck")
 }
+
+tasks.register<JavaExec>("verifyFastCommand") {
+    group = "verification"
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"), layout.buildDirectory.dir("tmp/kotlin-classes/debug"), configurations.getByName("debugRuntimeClasspath"))
+    mainClass.set("com.jarvis.companion.fastpath.FastCommandCheckKt")
+}
