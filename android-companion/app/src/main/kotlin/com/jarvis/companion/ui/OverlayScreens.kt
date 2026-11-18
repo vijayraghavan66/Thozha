@@ -46,6 +46,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import com.jarvis.companion.AdvancedActivity
 import com.jarvis.companion.localai.LocalAiManager
 import com.jarvis.companion.localai.LocalAiPhase
+import com.jarvis.companion.localai.AndroidDeviceProfileReader
 import com.jarvis.companion.localai.LocalModelCatalog
 import com.jarvis.companion.link.LinkAlerts
 import com.jarvis.companion.link.LinkSettings
@@ -57,6 +58,7 @@ fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
     val context = LocalContext.current
     val settings = remember(context) { LinkSettings(context) }
     val modelPreflight = remember(context) { LocalAiManager.get(context).preflight() }
+    val deviceProfile = remember(context) { AndroidDeviceProfileReader.read(context) }
     val modelNetwork = remember(context) { modelNetworkLabel(context) }
     var modelTermsAccepted by remember { mutableStateOf(false) }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -128,6 +130,9 @@ fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     FactCard(
                         listOf(
+                            "Device" to listOf(deviceProfile.manufacturer, deviceProfile.model, "(${deviceProfile.device})").filter(String::isNotBlank).joinToString(" "),
+                            "Android / ABI" to "API ${deviceProfile.androidApi} · ${deviceProfile.supportedAbis.joinToString()}",
+                            "RAM" to "${memoryLabel(deviceProfile.totalRamBytes)} total · ${memoryLabel(deviceProfile.availableRamBytes)} available",
                             "Runtime" to "LiteRT-LM CPU",
                             "Model" to descriptor.displayName,
                             "Model file" to "584 MB · ${if (modelPreflight.enoughSpace) "space and memory available" else "device space or memory is below the published minimum"}",
@@ -276,6 +281,10 @@ private fun modelNetworkLabel(context: Context): String {
         else -> "another network"
     }
 }
+
+private fun memoryLabel(bytes: Long?): String = bytes?.let {
+    String.format(java.util.Locale.US, "%.1f GiB", it / (1024.0 * 1024.0 * 1024.0))
+} ?: "unavailable"
 
 private fun modeLabel(mode: com.jarvis.companion.link.LinkMode): String = when (mode) {
     com.jarvis.companion.link.LinkMode.LOCAL_USB -> "Local USB"

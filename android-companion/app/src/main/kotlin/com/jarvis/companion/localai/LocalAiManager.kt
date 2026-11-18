@@ -43,9 +43,10 @@ class LocalAiManager private constructor(context: Context) {
     fun unload() = runtime.unload()
 
     private fun hasRequiredMemory(): Boolean {
+        val minimumRamBytes = LocalModelCatalog.gemma3OneBInt4.minimumRamBytes ?: return true
         val info = ActivityManager.MemoryInfo()
         memory.getMemoryInfo(info)
-        return info.totalMem >= LocalModelCatalog.gemma3OneBInt4.minimumRamBytes
+        return info.totalMem >= minimumRamBytes
     }
 
     companion object {

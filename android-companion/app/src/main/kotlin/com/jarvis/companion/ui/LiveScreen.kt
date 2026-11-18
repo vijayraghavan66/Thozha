@@ -178,6 +178,9 @@ private fun LiveVoiceControls(store: JarvisStore) {
                 store.notice = "Voice captured. Review the transcript, then tap Send."
                 store.selectTab(Tab.HOME)
             }
+            override fun onBargeInDetected() {
+                store.notice = "I heard your interruption. Playback stopped; review the transcript before sending."
+            }
             override fun onError(error: VoiceControllerError) {
                 store.notice = when (error) {
                     VoiceControllerError.PERMISSION_REQUIRED -> "Microphone permission is required. Tap Start voice turn to allow it."
@@ -218,7 +221,7 @@ private fun LiveVoiceControls(store: JarvisStore) {
                 when (state) {
                     VoiceControllerState.LISTENING -> "Listening; Android will finish after a pause."
                     VoiceControllerState.PROCESSING -> "Transcribing speech…"
-                    VoiceControllerState.SPEAKING -> "Speaking. You can stop the current response."
+                    VoiceControllerState.SPEAKING -> "Speaking. Tap Interrupt and listen to speak over this response."
                     VoiceControllerState.ERROR -> "Voice is unavailable. Typed requests still work."
                     VoiceControllerState.IDLE -> "Start one spoken turn; review the transcript before sending."
                 },
@@ -230,14 +233,18 @@ private fun LiveVoiceControls(store: JarvisStore) {
                 VoiceControlButton(
                     label = when (state) {
                         VoiceControllerState.LISTENING, VoiceControllerState.PROCESSING -> "Cancel voice turn"
-                        VoiceControllerState.SPEAKING -> "Stop speaking"
+                        VoiceControllerState.SPEAKING -> "Interrupt and listen"
                         else -> "Start voice turn"
                     },
                     enabled = true,
                 ) {
                     when (state) {
                         VoiceControllerState.LISTENING, VoiceControllerState.PROCESSING -> voice.cancel()
-                        VoiceControllerState.SPEAKING -> voice.stopSpeaking()
+                        VoiceControllerState.SPEAKING -> {
+                            if (!voice.startBargeInTurn()) {
+                                store.notice = "The recognizer could not start an interruption. Tap Stop/Cancel or type your request."
+                            }
+                        }
                         else -> {
                             if (!JarvisVoiceController.hasMicrophonePermission(context)) {
                                 store.notice = "Allow microphone access, then start a voice turn."
