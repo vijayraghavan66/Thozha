@@ -129,6 +129,7 @@ class OpenJarvisApiSupervisorAdapter:
         config_file: str | Path | None = None,
         base_url: str = "http://127.0.0.1:8000",
         http_client: httpx.Client | None = None,
+        async_submission: bool = False,
         submission_ledger: str | Path | None = None,
         strict_recovery: bool = False,
     ) -> None:
@@ -140,6 +141,7 @@ class OpenJarvisApiSupervisorAdapter:
         if parsed.scheme != "http" or not loopback or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.username or parsed.password:
             raise ValueError("OpenJarvis supervisor URL must be a plain HTTP loopback origin")
         self.base_url = base_url.rstrip("/")
+        self.async_submission = bool(async_submission)
         self.key_file = Path(key_file or (Path.home() / ".openjarvis" / "supervisor_api_key")).expanduser()
         self.config_file = Path(config_file or (Path.home() / ".openjarvis" / "config.toml")).expanduser()
         self._client = http_client or httpx.Client(
@@ -218,7 +220,8 @@ class OpenJarvisApiSupervisorAdapter:
         digest = _submission_digest(objective.strip(), capability_scope)
         # Bind the key before posting, including when multiple workers race.
         known = self._ledger.reserve(idempotency_key, digest)
-        status, data = self._request("POST", "/v1/jarvis/link/tasks", {
+        submit_path = "/v1/jarvis/link/tasks?mode=async" if self.async_submission else "/v1/jarvis/link/tasks"
+        status, data = self._request("POST", submit_path, {
             "objective": objective.strip(),
             "capability_scope": capability_scope,
             "idempotency_key": idempotency_key,
@@ -245,7 +248,20 @@ class OpenJarvisApiSupervisorAdapter:
         state = data.get("state")
         if not isinstance(task_id, str) or not _ID_RE.fullmatch(task_id) or not isinstance(state, str):
             raise SupervisorRefused("OpenJarvis supervisor returned an invalid task record")
+        # Persist server acceptance before returning to the host receive loop.
+        # A process crash after HTTP 202 can be reconciled only by this exact
+        # idempotency key and digest; it must never submit a second AI run.
         self._ledger.put(idempotency_key, {"digest": digest, "task_id": task_id})
+        if self.async_submission and status == 202 and state.upper() in {"CREATED", "QUEUED", "PLANNING", "RUNNING", "VERIFYING"}:
+            return {
+                "task_id": task_id,
+                "state": state.upper(),
+                "summary": str(data.get("summary") or "")[:1000],
+                "result_text": "",
+                "result_digest": None,
+                "http_status": status,
+                "simulated": False,
+            }
         if status == 202 and state.upper() in {"CREATED", "PLANNING", "RUNNING", "VERIFYING"}:
             deadline = time.monotonic() + 240.0
             delay = 1.0
@@ -275,6 +291,29 @@ class OpenJarvisApiSupervisorAdapter:
         if not isinstance(task_id, str) or not _ID_RE.fullmatch(task_id) or not isinstance(state, str):
             raise SupervisorRefused("OpenJarvis supervisor returned an invalid task status")
         return {"task_id": task_id, "state": state.upper(), "summary": str(data.get("summary") or "")[:1000], "result_text": _result_text(data), "result_digest": data.get("result_digest"), "http_status": status}
+
+    def task_events(self, idempotency_key: str, *, after_seq: int = 0, limit: int = 100) -> dict[str, Any]:
+        if not _IDEMPOTENCY_RE.fullmatch(idempotency_key):
+            raise SupervisorRefused("task idempotency key is invalid")
+        if after_seq < 0 or not 1 <= limit <= 200:
+            raise SupervisorRefused("task event cursor is invalid")
+        path = f"/v1/jarvis/link/tasks/{idempotency_key}/events?after_seq={after_seq}&limit={limit}"
+        _, data = self._request("GET", path)
+        events = data.get("events")
+        task_id = data.get("task_id")
+        next_seq = data.get("next_seq")
+        if (not isinstance(task_id, str) or not _ID_RE.fullmatch(task_id)
+                or not isinstance(events, list) or not isinstance(next_seq, int)):
+            raise SupervisorRefused("OpenJarvis returned an invalid task event page")
+        safe_events = []
+        for event in events:
+            if not isinstance(event, dict):
+                raise SupervisorRefused("OpenJarvis returned a malformed task event")
+            seq, event_type, payload = event.get("seq"), event.get("event_type"), event.get("payload")
+            if not isinstance(seq, int) or not isinstance(event_type, str) or not isinstance(payload, dict):
+                raise SupervisorRefused("OpenJarvis returned a malformed task event")
+            safe_events.append({"seq": seq, "event_type": event_type, "payload": payload})
+        return {"task_id": task_id, "events": safe_events, "next_seq": next_seq}
 
     def fast_command(self, *, command: str, requester: str, idempotency_key: str | None = None,
                      task_id: str | None = None, app: str | None = None) -> dict[str, Any]:

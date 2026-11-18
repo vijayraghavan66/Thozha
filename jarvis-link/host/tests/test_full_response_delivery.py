@@ -12,6 +12,7 @@ from jarvis_link_host.runtime import (
     delivered_body,
     preview,
 )
+from jarvis_link_host.response_outbox import HostResponseOutbox
 from test_host import setup_host
 from test_response_delivery import RelayStub
 
@@ -84,6 +85,90 @@ def test_preview_is_only_for_activity_and_never_replaces_the_body():
     assert len(preview(long_answer)) == 200
     assert preview(long_answer).endswith("…")
     assert preview("short") == "short"
+
+
+def test_task_progress_is_encrypted_and_contains_only_sanitized_stage_fields():
+    processor, _supervisor, host_identity, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    relay = RelayStub(host_id, {"tenant_id": processor.tenant_id}, phone_cert.to_dict())
+    relay.fail_first_reply = False
+    runtime = HostRelayRuntime(host=processor, relay=relay)
+    runtime.send_task_progress(
+        companion_certificate=phone_cert.to_dict(),
+        companion_id=phone_id,
+        task_id="a" * 32,
+        event_seq=42,
+        state="RUNNING",
+        summary="Approved Mac action is executing",
+    )
+    envelope = LinkEnvelope.from_dict(relay.responses[0])
+    payload = decrypt_envelope(
+        envelope,
+        recipient=phone,
+        sender_certificate=host_cert,
+        trusted_host_signing_public_der=host_identity.signing_public_der,
+        expected_tenant_id=processor.tenant_id,
+        expected_recipient_id=phone_id,
+        expected_recipient_certificate_id=phone_cert.certificate_id,
+        expected_sender_id=host_id,
+        expected_issuer_device_id=host_id,
+        expected_sender_role="host",
+    )
+    assert envelope.kind == "task.progress"
+    assert payload == {
+        "event_seq": 42,
+        "in_reply_to": "",
+        "state": "RUNNING",
+        "summary": "Approved Mac action is executing",
+        "task_id": "a" * 32,
+    }
+
+
+def test_progress_retries_reuse_exact_ciphertext_after_lost_relay_ack(tmp_path):
+    processor, _supervisor, _host_identity, _phone, host_id, phone_id, _host_cert, phone_cert = setup_host()
+    path = tmp_path / "host-outbox.db"
+    sent = []
+    fail_after_accept = True
+
+    class Relay:
+        device_id = host_id
+        tenant_id = "test-tenant"
+
+        def submit_envelope(self, envelope):
+            nonlocal fail_after_accept
+            sent.append(dict(envelope))
+            if fail_after_accept:
+                fail_after_accept = False
+                raise OSError("relay accepted; response was lost")
+
+    relay = Relay()
+    first_outbox = HostResponseOutbox(path)
+    first_runtime = HostRelayRuntime(host=processor, relay=relay, response_outbox=first_outbox)
+    args = dict(
+        companion_certificate=phone_cert.to_dict(),
+        companion_id=phone_id,
+        task_id="a" * 32,
+        event_seq=77,
+        state="RUNNING",
+        summary="AI execution started",
+    )
+    try:
+        first_runtime.send_task_progress(**args)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("the simulated lost acknowledgment should be raised")
+    first_outbox.close()
+
+    reopened = HostResponseOutbox(path)
+    runtime = HostRelayRuntime(host=processor, relay=relay, response_outbox=reopened)
+    runtime.send_task_progress(**{**args, "summary": "This retry must use the cached envelope"})
+    assert len(sent) == 2
+    assert sent[0] == sent[1]
+    assert reopened.get_progress("a" * 32, 77)["delivered"] is True
+    # A host restart after the cursor write cannot send this event again.
+    runtime.send_task_progress(**args)
+    assert len(sent) == 2
+    reopened.close()
 
 
 def test_adapter_passes_full_result_text_and_falls_back_to_summary_for_old_supervisors():

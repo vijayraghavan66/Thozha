@@ -213,6 +213,201 @@ def test_task_202_is_polled_until_supervisor_approval_state(tmp_path, monkeypatc
     client.close()
 
 
+def test_async_202_persists_idempotency_mapping_before_receive_loop_returns(tmp_path):
+    key = _key(tmp_path / "api-key")
+    ledger = tmp_path / "submission-ledger.json"
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert request.method == "POST"
+        assert request.url.path == "/v1/jarvis/link/tasks"
+        assert request.url.params["mode"] == "async"
+        return httpx.Response(202, json={"task_id": "9" * 32, "state": "CREATED", "summary": "Queued"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = OpenJarvisApiSupervisorAdapter(
+        key_file=key,
+        http_client=client,
+        async_submission=True,
+        submission_ledger=ledger,
+        strict_recovery=True,
+    )
+    result = adapter.submit_task(
+        objective="a slow but safe task",
+        capability_scope=["read_only"],
+        idempotency_key="async-ledger-owner-0001",
+    )
+    saved = json.loads(ledger.read_text())
+    assert result["state"] == "CREATED" and result["task_id"] == "9" * 32
+    assert saved["async-ledger-owner-0001"]["task_id"] == "9" * 32
+    assert len(requests) == 1
+    client.close()
+
+
+def test_task_event_page_uses_authenticated_owner_scoped_cursor(tmp_path):
+    key = _key(tmp_path / "api-key")
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        assert request.method == "GET"
+        assert request.url.path == "/v1/jarvis/link/tasks/event-owner-key-0001/events"
+        assert dict(request.url.params) == {"after_seq": "7", "limit": "20"}
+        return httpx.Response(200, json={
+            "task_id": "a" * 32,
+            "events": [{"seq": 8, "event_type": "task.state", "payload": {"to": "RUNNING", "step": "codex_link"}}],
+            "next_seq": 8,
+        })
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    page = adapter.task_events("event-owner-key-0001", after_seq=7, limit=20)
+    assert page == {
+        "task_id": "a" * 32,
+        "events": [{"seq": 8, "event_type": "task.state", "payload": {"to": "RUNNING", "step": "codex_link"}}],
+        "next_seq": 8,
+    }
+    assert seen[0].headers["authorization"] == "Bearer test-local-supervisor-key"
+    client.close()
+
+
+def test_task_event_page_rejects_invalid_cursor_before_request(tmp_path):
+    key = _key(tmp_path / "api-key")
+    client = httpx.Client(transport=httpx.MockTransport(lambda _request: pytest.fail("unexpected request")))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    with pytest.raises(SupervisorRefused, match="cursor"):
+        adapter.task_events("event-owner-key-0001", after_seq=-1)
+    client.close()
+
+
+def test_host_progress_mapping_emits_only_user_facing_supervisor_stages(tmp_path):
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "link_host_admin.py"
+    spec = importlib.util.spec_from_file_location("jarvis_link_progress_mapping", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._progress_label({
+        "event_type": "task.state",
+        "payload": {"to": "RUNNING", "step": "codex_link", "reasoning": "private model analysis"},
+    }) == ("RUNNING", "Working on your request")
+    assert module._progress_label({
+        "event_type": "link_task.waiting_approval",
+        "payload": {"approval_id": "a" * 32},
+    }) == ("WAITING_APPROVAL", "Waiting for your approval")
+    assert module._progress_label({
+        "event_type": "link_task.completed",
+        "payload": {"result_text": "private assistant answer"},
+    }) is None
+
+
+def test_host_publishes_new_durable_events_and_advances_checkpoint(tmp_path, monkeypatch):
+    import importlib.util
+    import json
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "link_host_admin.py"
+    spec = importlib.util.spec_from_file_location("jarvis_link_progress_publish", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    watch_path = tmp_path / "watch.json"
+    watch_path.write_text(json.dumps([{
+        "task_id": "a" * 32, "idempotency_key": "progress-task-key-0001",
+        "companion_id": "b" * 32, "published": False, "progress_seq": 3,
+    }]))
+    monkeypatch.setattr(module, "TASK_WATCH_PATH", watch_path)
+    monkeypatch.setattr(module, "_companion_certificate", lambda _client, device_id: {"device_id": device_id})
+
+    class Adapter:
+        def task_status(self, _key):
+            return {"task_id": "a" * 32, "state": "RUNNING"}
+
+        def task_events(self, _key, *, after_seq, limit):
+            assert after_seq == 3 and limit == 100
+            return {"task_id": "a" * 32, "events": [
+                {"seq": 4, "event_type": "link_task.started", "payload": {"scope": "assistant"}},
+                {"seq": 5, "event_type": "task.state", "payload": {"to": "RUNNING", "step": "codex_link"}},
+            ]}
+
+        def list_pending_approvals(self, _task_id):
+            return []
+
+    class Runtime:
+        sent = []
+
+        def send_task_progress(self, **payload):
+            self.sent.append(payload)
+
+    runtime = Runtime()
+    assert module._publish_task_updates({}, object(), None, Adapter(), runtime) == 2
+    assert [item["event_seq"] for item in runtime.sent] == [4, 5]
+    assert all(item["state"] == "RUNNING" for item in runtime.sent)
+    saved = json.loads(watch_path.read_text())[0]
+    assert saved["progress_seq"] == 5
+
+
+def test_host_publishes_persisted_terminal_answer_after_async_acceptance(tmp_path, monkeypatch):
+    import importlib.util
+    import json
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "link_host_admin.py"
+    spec = importlib.util.spec_from_file_location("jarvis_link_terminal_publish", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    watch_path = tmp_path / "watch.json"
+    watch_path.write_text(json.dumps([{
+        "task_id": "a" * 32, "idempotency_key": "terminal-task-key-0001",
+        "companion_id": "b" * 32, "published": False,
+    }]))
+    monkeypatch.setattr(module, "TASK_WATCH_PATH", watch_path)
+    monkeypatch.setattr(module, "_companion_certificate", lambda _client, device_id: {"device_id": device_id})
+
+    class Adapter:
+        def task_status(self, _key):
+            return {
+                "task_id": "a" * 32, "state": "COMPLETED", "summary": "answer preview",
+                "result_text": "Complete verified answer", "result_digest": "c" * 64,
+            }
+
+        def list_pending_approvals(self, _task_id):
+            return []
+
+    class Runtime:
+        sent = []
+
+        def send_task_update(self, **payload):
+            self.sent.append(payload)
+
+    runtime = Runtime()
+    assert module._publish_task_updates({}, object(), None, Adapter(), runtime) == 1
+    assert runtime.sent[0]["result_text"] == "Complete verified answer"
+    assert runtime.sent[0]["state"] == "COMPLETED"
+    assert json.loads(watch_path.read_text())[0]["published"] is True
+
+
+def test_paused_task_watches_use_the_slow_recovery_poll_cadence(tmp_path, monkeypatch):
+    import importlib.util
+    import json
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "link_host_admin.py"
+    spec = importlib.util.spec_from_file_location("jarvis_link_paused_watch", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    watch_path = tmp_path / "watch.json"
+    watch_path.write_text(json.dumps([{"task_id": "a" * 32, "published": False, "paused_reported": True}]))
+    monkeypatch.setattr(module, "TASK_WATCH_PATH", watch_path)
+    assert module._has_open_task_watch() is False
+    assert module._has_open_task_watch(include_paused=True) is True
+
+
 def test_strict_recovery_keeps_unknown_conflict_unacknowledged_after_restart(tmp_path):
     key = _key(tmp_path / "key")
     ledger = tmp_path / "ledger.json"

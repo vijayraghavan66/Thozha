@@ -62,6 +62,18 @@ class HostResponseOutbox:
                  PRIMARY KEY(tenant_id,sender_device_id,message_id)
                )"""
         )
+        self._db.execute(
+            """CREATE TABLE IF NOT EXISTS relay_progress_outbox(
+                 task_id TEXT NOT NULL,
+                 event_seq INTEGER NOT NULL,
+                 message_id TEXT NOT NULL UNIQUE,
+                 envelope_json TEXT NOT NULL,
+                 expires_at_ms INTEGER NOT NULL,
+                 created_at_ms INTEGER NOT NULL,
+                 delivered_at_ms INTEGER,
+                 PRIMARY KEY(task_id,event_seq)
+               )"""
+        )
         columns = {row[1] for row in self._db.execute("PRAGMA table_info(relay_response_outbox)")}
         if "task_id" not in columns:
             self._db.execute("ALTER TABLE relay_response_outbox ADD COLUMN task_id TEXT")
@@ -223,6 +235,86 @@ class HostResponseOutbox:
                 (now, tenant, sender, message_id, digest),
             )
             self._db.commit()
+
+    def get_progress(self, task_id: str, event_seq: int, *, now_ms: int | None = None) -> dict[str, Any] | None:
+        self._validate_progress_identity(task_id, event_seq)
+        now = int(time.time() * 1000) if now_ms is None else now_ms
+        with self._lock:
+            row = self._db.execute(
+                "SELECT envelope_json,expires_at_ms,delivered_at_ms FROM relay_progress_outbox WHERE task_id=? AND event_seq=?",
+                (task_id, event_seq),
+            ).fetchone()
+            if row is None:
+                return None
+            if row[1] <= now:
+                self._db.execute("DELETE FROM relay_progress_outbox WHERE task_id=? AND event_seq=?", (task_id, event_seq))
+                self._db.commit()
+                return None
+            envelope = json.loads(row[0])
+            if not isinstance(envelope, dict) or envelope.get("message_id") is None:
+                raise RuntimeError("stored progress envelope is invalid")
+            return {"envelope": envelope, "delivered": row[2] is not None}
+
+    def put_progress(
+        self,
+        task_id: str,
+        event_seq: int,
+        envelope: Mapping[str, Any],
+        *,
+        now_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist exact encrypted bytes before relay send, keyed by supervisor sequence."""
+        self._validate_progress_identity(task_id, event_seq)
+        message_id = envelope.get("message_id")
+        expiry = envelope.get("expires_at_unix_ms")
+        if not isinstance(message_id, str) or not isinstance(expiry, int):
+            raise ValueError("progress envelope identity is invalid")
+        now = int(time.time() * 1000) if now_ms is None else now_ms
+        if expiry <= now:
+            raise ValueError("cannot cache an expired progress envelope")
+        raw = json.dumps(dict(envelope), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute("DELETE FROM relay_progress_outbox WHERE expires_at_ms<=?", (now,))
+                row = self._db.execute(
+                    "SELECT message_id,envelope_json,delivered_at_ms FROM relay_progress_outbox WHERE task_id=? AND event_seq=?",
+                    (task_id, event_seq),
+                ).fetchone()
+                if row is not None:
+                    existing = json.loads(row[1])
+                    if row[0] != message_id or existing != dict(envelope):
+                        raise ResponseReplayConflict("task progress sequence was reused with different envelope bytes")
+                    self._db.commit()
+                    return {"envelope": existing, "delivered": row[2] is not None}
+                self._db.execute(
+                    "INSERT INTO relay_progress_outbox(task_id,event_seq,message_id,envelope_json,expires_at_ms,created_at_ms) VALUES(?,?,?,?,?,?)",
+                    (task_id, event_seq, message_id, raw, expiry, now),
+                )
+                self._db.commit()
+                return {"envelope": json.loads(raw), "delivered": False}
+            except BaseException:
+                self._db.rollback()
+                raise
+
+    def mark_progress_delivered(self, task_id: str, event_seq: int, message_id: str, *, now_ms: int | None = None) -> None:
+        self._validate_progress_identity(task_id, event_seq)
+        now = int(time.time() * 1000) if now_ms is None else now_ms
+        with self._lock:
+            cursor = self._db.execute(
+                "UPDATE relay_progress_outbox SET delivered_at_ms=COALESCE(delivered_at_ms,?) WHERE task_id=? AND event_seq=? AND message_id=?",
+                (now, task_id, event_seq, message_id),
+            )
+            self._db.commit()
+            if cursor.rowcount != 1:
+                raise KeyError("progress envelope was not persisted")
+
+    @staticmethod
+    def _validate_progress_identity(task_id: str, event_seq: int) -> None:
+        if not isinstance(task_id, str) or len(task_id) != 32 or any(c not in "0123456789abcdef" for c in task_id):
+            raise ValueError("task progress ID is invalid")
+        if not isinstance(event_seq, int) or event_seq < 1:
+            raise ValueError("task progress event sequence is invalid")
 
     def close(self) -> None:
         with self._lock:

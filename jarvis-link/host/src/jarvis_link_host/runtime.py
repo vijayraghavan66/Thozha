@@ -148,6 +148,46 @@ class HostRelayRuntime:
         self.relay.submit_envelope(response.to_dict())
         return response.message_id
 
+    def send_task_progress(
+        self,
+        *,
+        companion_certificate: dict,
+        companion_id: str,
+        task_id: str,
+        event_seq: int,
+        state: str,
+        summary: str,
+    ) -> str:
+        """Publish one sanitized durable supervisor event to the task owner."""
+        if event_seq < 1 or not task_id or len(task_id) > 64:
+            raise ValueError("task progress identity is invalid")
+        cached = self.response_outbox.get_progress(task_id, event_seq)
+        if cached is not None and cached["delivered"]:
+            return str(cached["envelope"]["message_id"])
+        if cached is None:
+            issued = int(time.time() * 1000)
+            payload = {
+                "in_reply_to": "",
+                "task_id": task_id,
+                "state": state[:40],
+                "summary": summary[:200],
+                "event_seq": event_seq,
+            }
+            response = self.host.encrypt_reply(
+                recipient_certificate=companion_certificate,
+                recipient_id=companion_id,
+                message_id=uuid.uuid4().hex,
+                kind="task.progress",
+                payload=payload,
+                issued_at_unix_ms=issued,
+                expires_at_unix_ms=issued + 60 * 60 * 1000,
+            )
+            cached = self.response_outbox.put_progress(task_id, event_seq, response.to_dict())
+        envelope = cached["envelope"]
+        self.relay.submit_envelope(envelope)
+        self.response_outbox.mark_progress_delivered(task_id, event_seq, str(envelope["message_id"]))
+        return str(envelope["message_id"])
+
     def _refusal_envelope(self, original: Mapping[str, Any], cert: DeviceCertificate | Mapping[str, Any], message_id: str) -> LinkEnvelope:
         issued = int(time.time() * 1000)
         payload = {

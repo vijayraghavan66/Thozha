@@ -139,6 +139,33 @@ def _publish_task_updates_locked(state, client, identity, adapter, runtime) -> i
             continue
         current = adapter.task_status(entry["idempotency_key"])
         if current["state"] not in TERMINAL_TASK_STATES:
+            if current["state"] == "PAUSED":
+                entry["paused_reported"] = True
+            else:
+                entry.pop("paused_reported", None)
+            _save(TASK_WATCH_PATH, entries)
+            if hasattr(adapter, "task_events") and hasattr(runtime, "send_task_progress"):
+                cursor = int(entry.get("progress_seq", 0))
+                page = adapter.task_events(entry["idempotency_key"], after_seq=cursor, limit=100)
+                cert = _companion_certificate(client, entry["companion_id"])
+                for event in page["events"]:
+                    seq = event["seq"]
+                    label = _progress_label(event)
+                    if label is not None:
+                        progress_state, summary = label
+                        runtime.send_task_progress(
+                            companion_certificate=cert,
+                            companion_id=entry["companion_id"],
+                            task_id=entry["task_id"],
+                            event_seq=seq,
+                            state=progress_state,
+                            summary=summary,
+                        )
+                        published += 1
+                    entry["progress_seq"] = seq
+                    # Persist the cursor immediately after accepted relay delivery
+                    # (or after an intentionally filtered event) for restart safety.
+                    _save(TASK_WATCH_PATH, entries)
             # Active task: announce each pending approval exactly once, with its exact operation and expiry.
             announced = set(entry.get("announced", []))
             for approval in adapter.list_pending_approvals(entry["task_id"]):
@@ -162,6 +189,60 @@ def _publish_task_updates_locked(state, client, identity, adapter, runtime) -> i
         published += 1
     _save(TASK_WATCH_PATH, entries)
     return published
+
+
+def _progress_label(event: dict) -> tuple[str, str] | None:
+    """Translate safe supervisor events to user-facing states, never model reasoning."""
+    event_type = event.get("event_type")
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    if event_type == "link_task.queued":
+        return "QUEUED", "Task queued"
+    if event_type == "link_task.started":
+        return "RUNNING", "AI execution started"
+    if event_type == "link_task.waiting_approval":
+        return "WAITING_APPROVAL", "Waiting for your approval"
+    if event_type == "task.recovered_paused":
+        return "PAUSED", "Paused safely after Mac service restart"
+    if event_type == "task.cancelled":
+        return "CANCELLED", "Task cancelled"
+    if event_type == "tool.mcp_approval_dispatch_claimed":
+        return "RUNNING", "Approved Mac action is executing"
+    if event_type == "approval.consumed":
+        return "RUNNING", "Approved action started"
+    if event_type == "approval.execution_completed":
+        return "RUNNING", "Approved action completed; continuing task"
+    if event_type == "approval.mac_mcp_dispatched":
+        if payload.get("success") is True:
+            return "RUNNING", "Approved Mac action completed; continuing task"
+        if payload.get("success") is False:
+            return "FAILED", "Approved Mac action failed"
+    if event_type == "task.state":
+        target = payload.get("to")
+        labels = {
+            "PLANNING": ("PLANNING", "Planning task"),
+            "RUNNING": ("RUNNING", "Working on your request"),
+            "VERIFYING": ("VERIFYING", "Checking the result"),
+            "WAITING_APPROVAL": ("WAITING_APPROVAL", "Waiting for your approval"),
+            "PAUSED": ("PAUSED", "Task paused safely"),
+            "CANCELLED": ("CANCELLED", "Task cancelled"),
+        }
+        return labels.get(target)
+    return None
+
+
+def _has_open_task_watch(*, include_paused: bool = False) -> bool:
+    if not TASK_WATCH_PATH.is_file():
+        return False
+    try:
+        rows = json.loads(TASK_WATCH_PATH.read_text())
+        return any(
+            isinstance(row, dict)
+            and not row.get("published", False)
+            and (include_paused or not row.get("paused_reported", False))
+            for row in rows
+        )
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def _load(path: Path) -> tuple[dict, DeviceIdentity]:
@@ -349,6 +430,7 @@ async def _serve(args, path: Path) -> None:
         store, adapter = None, OpenJarvisApiSupervisorAdapter(
             submission_ledger=TEST_DIR / "submission-ledger.json" if args.concurrent_dispatch else None,
             strict_recovery=args.concurrent_dispatch,
+            async_submission=args.concurrent_dispatch,
         )
     else:
         store, adapter = _open_supervisor()
@@ -379,7 +461,13 @@ async def _serve(args, path: Path) -> None:
                 async with websockets.connect(ws_url, additional_headers=headers) as ws:
                     backoff = 2.0
                     try:
-                        await asyncio.wait_for(ws.recv(), timeout=args.interval)
+                        if _has_open_task_watch():
+                            active_interval = min(args.interval, args.task_watch_interval)
+                        elif _has_open_task_watch(include_paused=True):
+                            active_interval = min(args.interval, args.paused_watch_interval)
+                        else:
+                            active_interval = args.interval
+                        await asyncio.wait_for(ws.recv(), timeout=active_interval)
                     except asyncio.TimeoutError:
                         pass
             except Exception:  # relay down or restarting: back off, never spin
@@ -418,6 +506,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--message", default="JARVIS_SIMULATED_APPROVAL_1")
     parser.add_argument("--approval-ttl", type=int, default=300)
     parser.add_argument("--interval", type=float, default=60.0, help="serve: fallback cycle interval (s)")
+    parser.add_argument("--task-watch-interval", type=float, default=2.0,
+                        help="serve: poll active supervisor task events at this bounded interval (s)")
+    parser.add_argument("--paused-watch-interval", type=float, default=15.0,
+                        help="serve: poll tasks paused after recovery less often until explicit resume (s)")
     parser.add_argument("--concurrent-dispatch", action="store_true", help="experimental bounded relay dispatch; relay retains unacknowledged requests")
     parser.add_argument("--engine", choices=["api", "store"], default="api",
                         help="serve: 'api' dispatches to the running OpenJarvis server (real AI engine); "
