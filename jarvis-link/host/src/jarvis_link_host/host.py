@@ -203,7 +203,9 @@ class JarvisLinkHost:
                 result.pop("task_id", None)
                 return {"kind": "fast.result", "command": command, "queried_task_id": task_id, **result,
                         "state": "COMPLETED", "summary": f"Task status: {result.get('state', 'unknown')}."}
-            if command == "app.open" and set(payload) == {"app", "command", "version"} and payload.get("app") == "Calculator":
+            if command == "app.open" and set(payload) == {"app", "command", "idempotency_key", "version"} and payload.get("app") == "Calculator":
+                if payload.get("idempotency_key") != envelope.message_id:
+                    raise TaskEnvelopeError("fast command idempotency does not match signed envelope")
                 if handler is None:
                     raise TaskEnvelopeError("supervisor fast command approval is unavailable")
                 # Supervisor creates the exact operation approval; host never launches the app here.

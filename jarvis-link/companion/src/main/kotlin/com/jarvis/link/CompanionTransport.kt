@@ -95,8 +95,9 @@ sealed interface FastCommandRequest {
         override fun toJson() = "{\"command\":\"task.status\",\"task_id\":${FlatJson.quote(taskId)},\"version\":1}"
     }
 
-    data object OpenCalculator : FastCommandRequest {
-        override fun toJson() = "{\"app\":\"Calculator\",\"command\":\"app.open\",\"version\":1}"
+    data class OpenCalculator(val idempotencyKey: String = LinkCrypto.newId()) : FastCommandRequest {
+        init { require(idempotencyKey.matches(Regex("^[0-9a-f]{32}$"))) }
+        override fun toJson() = "{\"app\":\"Calculator\",\"command\":\"app.open\",\"idempotency_key\":${FlatJson.quote(idempotencyKey)},\"version\":1}"
     }
 }
 
@@ -404,11 +405,13 @@ class JarvisLinkCompanion(
     }
 
     fun submitFastCommand(command: FastCommandRequest, ttlMs: Long? = null, clientRequestId: String? = null): DeliveryResult {
+        val stableId = (command as? FastCommandRequest.OpenCalculator)?.idempotencyKey ?: clientRequestId
+        require(clientRequestId == null || stableId == null || clientRequestId == stableId) { "fast command idempotency does not match" }
         val envelope = LinkCrypto.createEnvelope(
             tenantId, signingIdentity, hostCertificate, hostRoot,
             "fast.command", command.toJson(), nowUnixMs = now(),
             ttlMs = ttlMs ?: (2 * 60 * 1000L),
-            messageId = clientRequestId,
+            messageId = stableId,
         )
         return sendOrQueue(envelope)
     }

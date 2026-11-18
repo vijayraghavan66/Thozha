@@ -41,12 +41,12 @@ def setup_host():
     return processor, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert
 
 
-def task_envelope(host, phone, host_id, phone_id, host_cert, payload, *, kind="task.submit", now=None):
+def task_envelope(host, phone, host_id, phone_id, host_cert, payload, *, kind="task.submit", now=None, message_id=None):
     issued = int(time.time() * 1000) if now is None else now
     return encrypt_envelope(
         sender=phone, recipient_certificate=host_cert,
         trusted_host_signing_public_der=host.signing_public_der,
-        tenant_id=TENANT, message_id=uuid.uuid4().hex,
+        tenant_id=TENANT, message_id=message_id or uuid.uuid4().hex,
         from_device_id=phone_id, to_device_id=host_id,
         kind=kind, payload=payload,
         issued_at_unix_ms=issued, expires_at_unix_ms=issued + 60_000,
@@ -90,8 +90,10 @@ def test_fast_command_rejects_extra_fields_and_unallowlisted_app():
 
 def test_fast_calculator_routes_to_exact_supervisor_approval_without_task_submission():
     hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    idem = uuid.uuid4().hex
     env = task_envelope(host, phone, host_id, phone_id, host_cert,
-                        {"app": "Calculator", "command": "app.open", "version": 1}, kind="fast.command")
+                        {"app": "Calculator", "command": "app.open", "idempotency_key": idem, "version": 1},
+                        kind="fast.command", message_id=idem)
     result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
     assert result["result"] == {
         "kind": "fast.result", "command": "app.open", "state": "WAITING_APPROVAL",
@@ -99,6 +101,16 @@ def test_fast_calculator_routes_to_exact_supervisor_approval_without_task_submis
         "summary": "Calculator requires your approval on this phone.",
     }
     assert [call[0] for call in supervisor.calls] == ["fast_command"]
+
+
+def test_calculator_idempotency_must_match_signed_envelope():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": "Calculator", "command": "app.open", "idempotency_key": "a" * 32, "version": 1},
+                        kind="fast.command", message_id="b" * 32)
+    with pytest.raises(TaskEnvelopeError, match="idempotency does not match"):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert supervisor.calls == []
 
 
 def test_assistant_scope_is_forwarded_to_supervisor_without_executable_fields():
