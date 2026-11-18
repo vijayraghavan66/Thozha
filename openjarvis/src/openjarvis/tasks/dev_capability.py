@@ -266,6 +266,13 @@ class CapabilityStore:
                 task_id TEXT NOT NULL, requester_actor TEXT NOT NULL, plan_digest TEXT NOT NULL,
                 approved_by TEXT NOT NULL, created_at REAL NOT NULL)"""
         )
+        self._db.execute(
+            """CREATE TABLE IF NOT EXISTS dev_capability_issuance_intents (
+                approval_id TEXT PRIMARY KEY, capability_id TEXT NOT NULL UNIQUE,
+                spec_json TEXT NOT NULL, task_id TEXT NOT NULL, requester_actor TEXT NOT NULL,
+                plan_digest TEXT NOT NULL, approved_by TEXT NOT NULL,
+                created_at REAL NOT NULL, expires_at REAL NOT NULL)"""
+        )
 
     def close(self) -> None:
         self._db.close()
@@ -393,6 +400,21 @@ class CapabilityStore:
                 raise CapabilityError("TASK_INACTIVE", "development task is no longer active")
             return existing["capability_id"]
 
+        intent = self._issuance_intent(approval_id)
+        if approval.get("status") == "CONSUMED":
+            # Supervisor and capability state live in separate SQLite databases. A
+            # durable intent is committed before consume_approval(), so a restart in
+            # the cross-store gap can recover only this exact already-consumed decision.
+            self._validate_issuance_intent(
+                intent, spec=spec, task_id=task_id, requester_actor=requester_actor, approved_by=approved_by,
+            )
+            self._validate_consumed_approval(
+                approval, intent=intent, task_id=task_id, operation=expected_operation,
+                target=expected_target, args_digest=expected_digest, requester_actor=requester_actor,
+                task_state=task.get("state"),
+            )
+            return self._finalize_issuance_intent(intent)
+
         if approval.get("status") != "APPROVED":
             raise CapabilityError("SUPERVISOR_APPROVAL_REQUIRED", "supervisor has not recorded a live approval decision")
         try:
@@ -407,6 +429,12 @@ class CapabilityStore:
         if task.get("state") != "WAITING_APPROVAL":
             raise CapabilityError("TASK_STATE_MISMATCH", "task is not waiting for this approval")
 
+        # Persist the exact capability payload and stable ID before the supervisor's
+        # one-shot consume commits. This intent is inert until consume is recorded.
+        intent = self._reserve_issuance_intent(
+            spec, approval_id=approval_id, task_id=task_id,
+            requester_actor=requester_actor, approved_by=approved_by,
+        )
         consumed = supervisor_store.consume_approval(
             approval_id,
             task_id=task_id,
@@ -415,20 +443,134 @@ class CapabilityStore:
             arguments=expected_arguments,
         )
         if not consumed:
-            # A concurrent/retried call may have consumed the same approval just before
-            # the durable issuance row was written. Return only that exact existing ID.
-            existing = self._issuance(approval_id)
-            if existing and existing["task_id"] == task_id and existing["requester_actor"] == requester_actor and existing["plan_digest"] == spec.plan_digest:
-                return existing["capability_id"]
-            raise CapabilityError("APPROVAL_ALREADY_USED", "supervisor approval is stale, expired, or already consumed")
+            # The competing issuer may have consumed the decision. Recover only if
+            # the durable intent and supervisor's consumed row prove the exact binding.
+            approval = supervisor_store.approval(approval_id)
+            if approval is None or approval.get("status") != "CONSUMED":
+                raise CapabilityError("APPROVAL_ALREADY_USED", "supervisor approval is stale, expired, or already consumed")
+            self._validate_consumed_approval(
+                approval, intent=intent, task_id=task_id, operation=expected_operation,
+                target=expected_target, args_digest=expected_digest, requester_actor=requester_actor,
+                task_state=supervisor_store.get_task(task_id).get("state"),
+            )
+        else:
+            approval = supervisor_store.approval(approval_id)
+            self._validate_consumed_approval(
+                approval, intent=intent, task_id=task_id, operation=expected_operation,
+                target=expected_target, args_digest=expected_digest, requester_actor=requester_actor,
+                task_state=supervisor_store.get_task(task_id).get("state"),
+            )
+        return self._finalize_issuance_intent(intent)
 
-        return self._create_issued_capability(
-            spec,
-            approval_id=approval_id,
-            task_id=task_id,
-            requester_actor=requester_actor,
-            approved_by=approved_by,
-        )
+    def _issuance_intent(self, approval_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT approval_id,capability_id,spec_json,task_id,requester_actor,plan_digest,approved_by,created_at,expires_at "
+                "FROM dev_capability_issuance_intents WHERE approval_id=?", (approval_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _validate_issuance_intent(
+        self, intent: dict[str, Any] | None, *, spec: CapabilitySpec, task_id: str,
+        requester_actor: str, approved_by: str,
+    ) -> None:
+        if intent is None:
+            raise CapabilityError("APPROVAL_ALREADY_USED", "consumed approval has no durable issuance intent")
+        expected_payload = {**spec.__dict__, "allowed_ops": sorted(spec.allowed_ops), "allowed_paths": list(spec.allowed_paths)}
+        try:
+            payload = json.loads(intent["spec_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise CapabilityError("ISSUANCE_INTENT_INVALID", "durable issuance intent is malformed") from exc
+        if (
+            payload != expected_payload or intent["task_id"] != task_id
+            or intent["requester_actor"] != requester_actor or intent["approved_by"] != approved_by
+            or intent["plan_digest"] != spec.plan_digest
+        ):
+            raise CapabilityError("REPLAY", "approval ID is reserved for a different plan or identity")
+        if self._clock() >= intent["expires_at"]:
+            raise CapabilityError("CAPABILITY_INACTIVE", "reserved capability expired before recovery")
+
+    @staticmethod
+    def _validate_consumed_approval(
+        approval: dict[str, Any] | None, *, intent: dict[str, Any], task_id: str,
+        operation: str, target: str, args_digest: str, requester_actor: str,
+        task_state: str | None,
+    ) -> None:
+        if approval is None or (
+            approval.get("status") != "CONSUMED" or approval.get("task_id") != task_id
+            or approval.get("operation") != operation or approval.get("target") != target
+            or approval.get("args_digest") != args_digest
+            or approval.get("decided_by") != requester_actor
+            or not approval.get("consumed_at") or not approval.get("expires_at")
+            or approval["consumed_at"] >= approval["expires_at"]
+            or task_state not in {"RUNNING", "PLANNING", "VERIFYING"}
+            or intent["task_id"] != task_id or intent["requester_actor"] != requester_actor
+        ):
+            raise CapabilityError("APPROVAL_ALREADY_USED", "consumed supervisor approval does not match the durable issuance intent")
+
+    def _reserve_issuance_intent(
+        self, spec: CapabilitySpec, *, approval_id: str, task_id: str,
+        requester_actor: str, approved_by: str,
+    ) -> dict[str, Any]:
+        now = self._clock()
+        payload = {**spec.__dict__, "allowed_ops": sorted(spec.allowed_ops), "allowed_paths": list(spec.allowed_paths)}
+        values = {
+            "approval_id": approval_id, "capability_id": uuid.uuid4().hex,
+            "spec_json": json.dumps(payload, sort_keys=True), "task_id": task_id,
+            "requester_actor": requester_actor, "plan_digest": spec.plan_digest,
+            "approved_by": approved_by, "created_at": now, "expires_at": now + spec.ttl_s,
+        }
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO dev_capability_issuance_intents "
+                    "(approval_id,capability_id,spec_json,task_id,requester_actor,plan_digest,approved_by,created_at,expires_at) "
+                    "VALUES (:approval_id,:capability_id,:spec_json,:task_id,:requester_actor,:plan_digest,:approved_by,:created_at,:expires_at)",
+                    values,
+                )
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+        intent = self._issuance_intent(approval_id)
+        self._validate_issuance_intent(intent, spec=spec, task_id=task_id,
+                                       requester_actor=requester_actor, approved_by=approved_by)
+        return intent
+
+    def _finalize_issuance_intent(self, intent: dict[str, Any]) -> str:
+        now = self._clock()
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self._db.execute(
+                    "SELECT capability_id,task_id,requester_actor,plan_digest,approved_by FROM dev_capability_issuances WHERE approval_id=?",
+                    (intent["approval_id"],),
+                ).fetchone()
+                if existing:
+                    if dict(existing) != {key: intent[key] for key in ("capability_id", "task_id", "requester_actor", "plan_digest", "approved_by")}:
+                        raise CapabilityError("REPLAY", "approval issuance record conflicts with its durable intent")
+                    self._db.execute("COMMIT")
+                    return intent["capability_id"]
+                payload = json.loads(intent["spec_json"])
+                self._db.execute(
+                    "INSERT INTO dev_capabilities(capability_id,spec_json,state,issued_at,expires_at) VALUES (?,?,?,?,?)",
+                    (intent["capability_id"], intent["spec_json"], "ACTIVE", intent["created_at"], intent["expires_at"]),
+                )
+                self._db.execute(
+                    "INSERT INTO dev_capability_issuances(approval_id,capability_id,task_id,requester_actor,plan_digest,approved_by,created_at) VALUES (?,?,?,?,?,?,?)",
+                    (intent["approval_id"], intent["capability_id"], intent["task_id"], intent["requester_actor"], intent["plan_digest"], intent["approved_by"], now),
+                )
+                self._audit(intent["capability_id"], "issued", plan_id=payload["plan_id"], plan_digest=intent["plan_digest"],
+                            approval_id=intent["approval_id"], task_id=intent["task_id"], approved_by=intent["approved_by"],
+                            device_id=payload["device_id"], user_id=payload["user_id"], workspace_root=payload["workspace_root"],
+                            ttl_s=payload["ttl_s"], recovered=now != intent["created_at"])
+                self._db.execute("DELETE FROM dev_capability_issuance_intents WHERE approval_id=?", (intent["approval_id"],))
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+        return intent["capability_id"]
 
     def _issuance(self, approval_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -445,39 +587,6 @@ class CapabilityStore:
                 (capability_id,),
             ).fetchone()
         return dict(row) if row else None
-
-    def _create_issued_capability(
-        self,
-        spec: CapabilitySpec,
-        *,
-        approval_id: str,
-        task_id: str,
-        requester_actor: str,
-        approved_by: str,
-    ) -> str:
-        capability_id = uuid.uuid4().hex
-        now = self._clock()
-        payload = {**spec.__dict__, "allowed_ops": sorted(spec.allowed_ops), "allowed_paths": list(spec.allowed_paths)}
-        with self._lock:
-            self._db.execute("BEGIN IMMEDIATE")
-            try:
-                self._db.execute(
-                    "INSERT INTO dev_capabilities(capability_id, spec_json, state, issued_at, expires_at) VALUES (?,?,?,?,?)",
-                    (capability_id, json.dumps(payload, sort_keys=True), "ACTIVE", now, now + spec.ttl_s),
-                )
-                self._db.execute(
-                    "INSERT INTO dev_capability_issuances(approval_id,capability_id,task_id,requester_actor,plan_digest,approved_by,created_at) VALUES (?,?,?,?,?,?,?)",
-                    (approval_id, capability_id, task_id, requester_actor, spec.plan_digest, approved_by, now),
-                )
-                self._audit(capability_id, "issued", plan_id=spec.plan_id, plan_digest=spec.plan_digest,
-                            approval_id=approval_id, task_id=task_id, approved_by=approved_by,
-                            device_id=spec.device_id, user_id=spec.user_id, workspace_root=spec.workspace_root,
-                            ttl_s=spec.ttl_s)
-                self._db.execute("COMMIT")
-            except Exception:
-                self._db.execute("ROLLBACK")
-                raise
-        return capability_id
 
     def revoke_for_supervisor_task(self, supervisor_store: Any, *, task_id: str, requester_actor: str) -> int:
         """Revoke task-bound capabilities only after supervisor cancellation is durable."""

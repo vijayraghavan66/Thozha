@@ -155,6 +155,60 @@ def test_capability_issuance_retry_survives_store_restart(world):
     world["store"] = CapabilityStore(world["tmp"] / "capabilities.db", clock=world["clock"])
 
 
+def test_consumed_approval_crash_gap_recovers_from_durable_intent(world, monkeypatch):
+    spec, task_id, approval_id, actor = approved_plan(world)
+    original_consume = world["supervisor"].consume_approval
+
+    def consume_then_crash(*args, **kwargs):
+        assert original_consume(*args, **kwargs) is True
+        raise RuntimeError("injected crash after supervisor commit")
+
+    monkeypatch.setattr(world["supervisor"], "consume_approval", consume_then_crash)
+    with pytest.raises(RuntimeError, match="injected crash"):
+        world["store"].issue(spec, supervisor_store=world["supervisor"], approval_id=approval_id,
+                             task_id=task_id, requester_actor=actor)
+
+    approval = world["supervisor"].approval(approval_id)
+    assert approval["status"] == "CONSUMED"
+    assert approval["consumed_at"] < approval["expires_at"]
+    assert world["store"]._issuance(approval_id) is None
+    intent = world["store"]._issuance_intent(approval_id)
+    assert intent is not None
+    expected_capability_id = intent["capability_id"]
+    assert world["store"]._db.execute("SELECT COUNT(*) FROM dev_capabilities").fetchone()[0] == 0
+
+    # Simulate a process restart; recovery uses the persisted intent and consumed
+    # supervisor record, without replaying or re-consuming the approval.
+    world["store"].close()
+    reopened = CapabilityStore(world["tmp"] / "capabilities.db", clock=world["clock"])
+    try:
+        capability_id = reopened.issue(spec, supervisor_store=world["supervisor"], approval_id=approval_id,
+                                       task_id=task_id, requester_actor=actor)
+        assert capability_id == expected_capability_id
+        assert reopened.usage(capability_id)["state"] == "ACTIVE"
+        assert world["supervisor"].approval(approval_id)["status"] == "CONSUMED"
+        assert reopened._issuance_intent(approval_id) is None
+        assert reopened.issue(spec, supervisor_store=world["supervisor"], approval_id=approval_id,
+                              task_id=task_id, requester_actor=actor) == capability_id
+    finally:
+        reopened.close()
+    world["store"] = CapabilityStore(world["tmp"] / "capabilities.db", clock=world["clock"])
+
+
+def test_consumed_approval_without_matching_durable_intent_is_not_recovered(world):
+    spec, task_id, approval_id, actor = approved_plan(world)
+    assert world["supervisor"].consume_approval(
+        approval_id, task_id=task_id, operation=PLAN_APPROVAL_OPERATION,
+        target=plan_approval_target(spec), arguments=plan_approval_arguments(spec),
+    )
+    with pytest.raises(CapabilityError) as caught:
+        world["store"].issue(spec, supervisor_store=world["supervisor"], approval_id=approval_id,
+                             task_id=task_id, requester_actor=actor)
+    assert caught.value.code == "APPROVAL_ALREADY_USED"
+    assert world["store"]._issuance(approval_id) is None
+    assert world["store"]._db.execute("SELECT COUNT(*) FROM dev_capabilities").fetchone()[0] == 0
+
+
 def test_forged_approval_labels_are_not_accepted(world):
     spec = build_spec(plan=PLAN, device_id=DEVICE, user_id=USER,
                       workspace_root=str(world["workspace"]), ttl_s=600, max_duration_s=900)
