@@ -86,6 +86,18 @@ def test_fast_command_rejects_extra_fields_and_unallowlisted_app():
     assert supervisor.calls == []
 
 
+def test_fast_calculator_routes_to_exact_supervisor_approval_without_task_submission():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": "Calculator", "command": "app.open", "version": 1}, kind="fast.command")
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert result["result"] == {
+        "kind": "fast.result", "command": "app.open", "state": "WAITING_APPROVAL",
+        "operation": "mcp:jarvis_mac:open_app", "target": "Calculator",
+    }
+    assert [call[0] for call in supervisor.calls] == ["fast_command"]
+
+
 def test_assistant_scope_is_forwarded_to_supervisor_without_executable_fields():
     hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
     env = task_envelope(

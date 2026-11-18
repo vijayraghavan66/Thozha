@@ -45,6 +45,19 @@ class MockSupervisor:
     def add_approval(self, record: ApprovalRecord) -> None:
         self.approvals[record.approval_id] = record
 
+    def fast_command(self, *, command: str, **arguments: Any) -> dict[str, Any]:
+        """Deterministic test double; Calculator is represented only as pending approval."""
+        self.calls.append(("fast_command", {"command": command, **arguments}))
+        if command == "task.status":
+            task_id = arguments["task_id"]
+            task = self.tasks.get(task_id)
+            if task is None:
+                return {"state": "UNKNOWN"}
+            return {"task_id": task_id, "state": task["state"]}
+        if command == "app.open" and arguments.get("app") == "Calculator":
+            return {"state": "WAITING_APPROVAL", "operation": "mcp:jarvis_mac:open_app", "target": "Calculator"}
+        raise ValueError("unsupported fast command")
+
     def submit_task(self, *, objective: str, capability_scope: list[str], idempotency_key: str) -> dict[str, Any]:
         if idempotency_key in self.decisions:
             return self.decisions[idempotency_key]
