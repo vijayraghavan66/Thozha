@@ -1,0 +1,92 @@
+"""Completed answers reach the phone whole, verified by hash; only a stated, bounded cut is ever applied."""
+from __future__ import annotations
+
+import hashlib
+
+from jarvis_link_host.crypto import LinkEnvelope, decrypt_envelope
+from jarvis_link_host.openjarvis_api_adapter import _result_text
+from jarvis_link_host.runtime import (
+    BODY_CUT_NOTICE,
+    MAX_DELIVERED_BODY_BYTES,
+    HostRelayRuntime,
+    delivered_body,
+    preview,
+)
+from test_host import setup_host
+from test_response_delivery import RelayStub
+
+PARAGRAPH = (
+    "Java is a programming language and software platform. Developers use it to build web services, "
+    "business applications, and Android apps. Java code runs on the Java Virtual Machine (JVM).\n\n"
+)
+
+
+def _send_and_decrypt(answer: str) -> dict:
+    processor, _supervisor, host_identity, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    relay = RelayStub(host_id, {"tenant_id": processor.tenant_id}, phone_cert.to_dict())
+    relay.fail_first_reply = False
+    runtime = HostRelayRuntime(host=processor, relay=relay)
+    runtime.send_task_update(
+        companion_certificate=phone_cert.to_dict(),
+        companion_id=phone_id,
+        task_id="a" * 32,
+        state="COMPLETED",
+        summary="",
+        result_text=answer,
+    )
+    assert len(relay.responses) == 1
+    envelope = LinkEnvelope.from_dict(relay.responses[0])
+    return decrypt_envelope(
+        envelope,
+        recipient=phone,
+        sender_certificate=host_cert,
+        trusted_host_signing_public_der=host_identity.signing_public_der,
+        expected_tenant_id=processor.tenant_id,
+        expected_recipient_id=phone_id,
+        expected_recipient_certificate_id=phone_cert.certificate_id,
+        expected_sender_id=host_id,
+        expected_issuer_device_id=host_id,
+        expected_sender_role="host",
+    )
+
+
+def test_long_multiparagraph_markdown_and_tamil_answer_arrives_exactly():
+    answer = (PARAGRAPH * 30) + "```java\nSystem.out.println(\"hi\");\n```\n\nதமிழ் உரை ✓ — end."
+    assert len(answer) > 200
+    payload = _send_and_decrypt(answer)
+    assert payload["body"] == answer
+    assert payload["body_complete"] is True
+    assert payload["body_bytes_total"] == len(answer.encode("utf-8"))
+    assert payload["body_sha256"] == hashlib.sha256(answer.encode("utf-8")).hexdigest()
+    assert payload["summary"] == preview(answer)
+    assert len(payload["summary"]) <= 200
+
+
+def test_answer_over_delivery_limit_is_cut_visibly_with_matching_hash():
+    answer = "தமிழ் " * 20000  # well over 24 KiB of multi-byte text
+    payload = _send_and_decrypt(answer)
+    body = payload["body"]
+    assert payload["body_complete"] is False
+    assert body.endswith(BODY_CUT_NOTICE)
+    assert len(body.encode("utf-8")) <= MAX_DELIVERED_BODY_BYTES
+    assert payload["body_sha256"] == hashlib.sha256(body.encode("utf-8")).hexdigest()
+    body.encode("utf-8").decode("utf-8")  # no broken multi-byte character at the cut
+
+
+def test_short_answer_is_complete_and_unchanged():
+    payload = delivered_body("JARVIS_CHAT_OK")
+    assert payload["body"] == "JARVIS_CHAT_OK"
+    assert payload["body_complete"] is True
+
+
+def test_preview_is_only_for_activity_and_never_replaces_the_body():
+    long_answer = "x" * 1000
+    assert len(preview(long_answer)) == 200
+    assert preview(long_answer).endswith("…")
+    assert preview("short") == "short"
+
+
+def test_adapter_passes_full_result_text_and_falls_back_to_summary_for_old_supervisors():
+    assert _result_text({"result_text": "A" * 5000, "summary": "A" * 1000}) == "A" * 5000
+    assert _result_text({"summary": "older supervisor preview"}) == "older supervisor preview"
+    assert _result_text({}) == ""

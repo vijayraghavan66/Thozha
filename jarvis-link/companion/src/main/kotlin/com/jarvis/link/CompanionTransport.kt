@@ -282,10 +282,46 @@ data class ApprovalReview(
     }
 }
 
+/** Decodes one authenticated host payload. A task body is used only when its SHA-256 matches the one the Mac sent. */
+internal fun decodeCompanionEvent(kind: String, payload: String): CompanionEvent {
+    val fields = FlatJson.decode(payload)
+    return when (kind) {
+        "approval.request" -> CompanionEvent.ApprovalPending(ApprovalReview.parse(payload))
+        "task.progress", "task.result" -> {
+            val text = fields["body"] as? String
+            val expected = fields["body_sha256"] as? String
+            val verified = text != null && expected != null && sha256Hex(text) == expected
+            CompanionEvent.TaskUpdate(
+                fields.string("task_id"), fields.string("state"), fields.string("summary"), (fields["in_reply_to"] as? String).orEmpty(),
+                body = if (verified) text else null,
+                bodyComplete = fields["body_complete"] != false,
+                integrityFailed = text != null && !verified,
+            )
+        }
+        else -> CompanionEvent.Unknown(kind)
+    }
+}
+
+private fun sha256Hex(text: String): String =
+    java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+
 sealed interface CompanionEvent {
     data class ApprovalPending(val review: ApprovalReview) : CompanionEvent
-    /** [inReplyTo] is the envelope message ID of the request this update answers (empty if none). */
-    data class TaskUpdate(val taskId: String, val state: String, val summary: String, val inReplyTo: String = "") : CompanionEvent
+    /**
+     * [inReplyTo] is the envelope message ID of the request this update answers (empty if none).
+     * [body] is the complete answer, present only when its SHA-256 matched. [bodyComplete] is false when the Mac
+     * cut the answer at the delivery limit. [integrityFailed] is true when a body arrived but did not verify.
+     */
+    data class TaskUpdate(
+        val taskId: String,
+        val state: String,
+        val summary: String,
+        val inReplyTo: String = "",
+        val body: String? = null,
+        val bodyComplete: Boolean = true,
+        val integrityFailed: Boolean = false,
+    ) : CompanionEvent
     data class Unknown(val kind: String) : CompanionEvent
 
     /** Plain map for the CLI/JSON output. Contains only decrypted, already-authenticated fields. */
@@ -500,16 +536,7 @@ class JarvisLinkCompanion(
         }
     }
 
-    private fun decodeEvent(kind: String, payload: String): CompanionEvent {
-        val fields = FlatJson.decode(payload)
-        return when (kind) {
-            "approval.request" -> CompanionEvent.ApprovalPending(ApprovalReview.parse(payload))
-            "task.progress", "task.result" -> CompanionEvent.TaskUpdate(
-                fields.string("task_id"), fields.string("state"), fields.string("summary"), (fields["in_reply_to"] as? String).orEmpty(),
-            )
-            else -> CompanionEvent.Unknown(kind)
-        }
-    }
+    private fun decodeEvent(kind: String, payload: String): CompanionEvent = decodeCompanionEvent(kind, payload)
 
     private fun RelayHttpException.isPermanent(): Boolean =
         status in 400..499 && status != 401 && status != 408 && status != 429

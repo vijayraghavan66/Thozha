@@ -368,6 +368,9 @@ class LinkRuntime(
                     entries = entries.map { entry ->
                         if (matches(entry) && !isStaleAfterTerminal(entry, event.state)) LinkedHashMap(entry).apply {
                             put("state", event.state); put("summary", event.summary)
+                            // The canonical answer is the verified body; the summary is only a preview for cards.
+                            if (event.body != null) put("body", event.body) else remove("body")
+                            put("body_complete", event.bodyComplete); put("body_integrity_failed", event.integrityFailed)
                             if (event.taskId.isNotBlank()) put("task_id", event.taskId)
                             put("updated_at_unix_ms", now())
                         } else entry

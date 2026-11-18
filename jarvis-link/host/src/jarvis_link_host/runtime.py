@@ -17,6 +17,37 @@ from .openjarvis_api_adapter import SupervisorUnavailable
 from .response_outbox import HostResponseOutbox, ResponseReplayConflict
 
 
+# A completed answer travels inside one encrypted relay envelope; the relay refuses envelopes over 64 KiB and
+# base64 plus JSON framing add about a third. The plaintext body is therefore capped at 24 KiB. A longer answer
+# is cut at a character boundary and the cut is stated in the body, so the phone never shows a partial answer
+# as complete. The full text stays in the Mac supervisor store.
+MAX_DELIVERED_BODY_BYTES = 24 * 1024
+PREVIEW_CHARS = 200
+BODY_CUT_NOTICE = "\n\n[The full answer is longer than this phone delivery limit. The rest stays on the Mac.]"
+
+
+def delivered_body(text: str) -> dict[str, Any]:
+    """Returns the body fields carried in a task.result payload, with integrity data for the phone."""
+    raw = text.encode("utf-8")
+    complete = len(raw) <= MAX_DELIVERED_BODY_BYTES
+    if complete:
+        body = text
+    else:
+        budget = MAX_DELIVERED_BODY_BYTES - len(BODY_CUT_NOTICE.encode("utf-8"))
+        body = raw[:budget].decode("utf-8", errors="ignore") + BODY_CUT_NOTICE
+    return {
+        "body": body,
+        "body_complete": complete,
+        "body_bytes_total": len(raw),
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    }
+
+
+def preview(text: str) -> str:
+    """A short line for Activity cards. It is never the canonical answer."""
+    return text if len(text) <= PREVIEW_CHARS else text[: PREVIEW_CHARS - 1].rstrip() + "…"
+
+
 class HostRelayRuntime:
     """One poll/dispatch/ACK cycle for signed relay envelopes.
 
@@ -91,16 +122,19 @@ class HostRelayRuntime:
         task_id: str,
         state: str,
         summary: str,
+        result_text: str | None = None,
     ) -> str:
-        """Operator/test helper for a flat task.result update."""
+        """Flat task.result update. result_text is the canonical answer; summary is only a fallback preview source."""
         issued = int(time.time() * 1000)
+        full = result_text if result_text is not None else summary
         payload = {
             "in_reply_to": "",
             "status": state.lower(),
             "task_id": task_id,
             "state": state,
-            "summary": summary[:200],
+            "summary": preview(full),
             "result_digest": "",
+            **delivered_body(full),
         }
         response = self.host.encrypt_reply(
             recipient_certificate=companion_certificate,
@@ -138,14 +172,18 @@ class HostRelayRuntime:
         message_id = str(original["message_id"])
         state = str(body.get("state") or body.get("status") or body.get("kind", "accepted"))
         summary = str(body.get("summary") or f"{body.get('kind', 'result')}: {body.get('status', 'accepted')}")
+        full = str(body["result_text"]) if isinstance(body.get("result_text"), str) else summary
+        # The full text travels once, as the top-level body. It is not repeated inside "result".
+        result = {key: value for key, value in body.items() if key != "result_text"}
         payload = {
             "in_reply_to": message_id,
             "status": str(body.get("status") or "processed"),
-            "result": dict(body),
+            "result": result,
             "result_digest": result_digest,
             "task_id": str(body.get("task_id", "")),
             "state": state,
-            "summary": summary[:1000],
+            "summary": preview(full),
+            **delivered_body(full),
         }
         issued = int(time.time() * 1000)
         return self.host.encrypt_reply(

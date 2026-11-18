@@ -156,6 +156,7 @@ def _publish_task_updates_locked(state, client, identity, adapter, runtime) -> i
             companion_certificate=_companion_certificate(client, entry["companion_id"]),
             companion_id=entry["companion_id"], task_id=entry["task_id"], state=current["state"],
             summary=current.get("summary") or "",
+            result_text=current.get("result_text"),
         )
         entry["published"] = True
         published += 1

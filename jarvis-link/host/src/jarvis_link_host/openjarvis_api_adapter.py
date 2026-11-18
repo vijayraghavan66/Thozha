@@ -16,7 +16,7 @@ import tomllib
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 import httpx
@@ -28,6 +28,14 @@ _ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _ALLOWED_SCOPES = {"read_only", "assistant", "development"}
+
+
+def _result_text(data: Mapping[str, Any]) -> str:
+    """The canonical completed answer. Never shortened here; older supervisors fall back to their summary."""
+    value = data.get("result_text")
+    if isinstance(value, str):
+        return value
+    return str(data.get("summary") or "")
 
 
 class SupervisorUnavailable(RuntimeError):
@@ -252,6 +260,7 @@ class OpenJarvisApiSupervisorAdapter:
             "task_id": task_id,
             "state": state.upper(),
             "summary": str(data.get("summary") or "")[:1000],
+            "result_text": _result_text(data),
             "result_digest": data.get("result_digest"),
             "http_status": status,
             "simulated": False,
@@ -265,7 +274,7 @@ class OpenJarvisApiSupervisorAdapter:
         state = data.get("state")
         if not isinstance(task_id, str) or not _ID_RE.fullmatch(task_id) or not isinstance(state, str):
             raise SupervisorRefused("OpenJarvis supervisor returned an invalid task status")
-        return {"task_id": task_id, "state": state.upper(), "summary": str(data.get("summary") or "")[:1000], "result_digest": data.get("result_digest"), "http_status": status}
+        return {"task_id": task_id, "state": state.upper(), "summary": str(data.get("summary") or "")[:1000], "result_text": _result_text(data), "result_digest": data.get("result_digest"), "http_status": status}
 
     def list_pending_approvals(self, task_id: str) -> list[dict[str, Any]]:
         if not _ID_RE.fullmatch(task_id):
