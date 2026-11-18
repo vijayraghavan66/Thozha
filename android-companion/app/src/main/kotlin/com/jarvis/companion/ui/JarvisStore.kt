@@ -124,6 +124,9 @@ class JarvisStore(private val app: Context) {
             return@ui
         }
         val requestId = UUID.randomUUID().toString().replace("-", "")
+        val requestTrace = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(requestId.toByteArray(Charsets.UTF_8)).take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val submitStartedNs = System.nanoTime()
         val fastCommand = FastCommandClassifier.classify(text)
         val transport = if (TelegramSession.activeTunnel() != null) "telegram" else "link"
         val conversation = session
@@ -155,6 +158,7 @@ class JarvisStore(private val app: Context) {
                 }
             }
             delivery.onSuccess { result ->
+                android.util.Log.i("JarvisStore", "submit_enqueued trace=$requestTrace transport=$transport elapsed_ms=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs)} queued=${result.queuedOffline}")
                 if (result.messageId != requestId) {
                     runtime.recordLocalTaskResult(requestId, "", "FAILED", "Jarvis could not correlate this request safely. Send it again.")
                 } else {
@@ -162,6 +166,8 @@ class JarvisStore(private val app: Context) {
                 }
             }.onFailure { failure ->
                 val unresolved = failure is ApiException && failure.statusCode == null
+                val site = failure.stackTrace.firstOrNull()?.let { "${it.className.substringAfterLast('.')}.${it.methodName}" } ?: "unknown"
+                android.util.Log.w("JarvisStore", "submit_failed trace=$requestTrace type=${failure.javaClass.simpleName} site=$site status=${(failure as? ApiException)?.statusCode} elapsed_ms=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs)}")
                 runtime.recordLocalTaskResult(requestId, "", if (unresolved) "RUNNING" else "FAILED", deliveryError(failure))
             }
             ui { submitting = false }
