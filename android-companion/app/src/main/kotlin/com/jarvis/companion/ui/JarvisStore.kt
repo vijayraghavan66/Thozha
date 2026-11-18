@@ -140,6 +140,8 @@ class JarvisStore(private val app: Context) {
                 }
                 return@background
             }
+            // Show the user's bubble as pending now, not after the network call returns.
+            refreshLocal()
             val delivery = runCatching {
                 runtime.submit(LinkSettings(app).relayUrl, TaskSubmission(text, setOf(SafeCapability.ASSISTANT), clientRequestId = requestId), null)
             }

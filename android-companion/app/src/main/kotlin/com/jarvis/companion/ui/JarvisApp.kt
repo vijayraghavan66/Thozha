@@ -83,6 +83,13 @@ fun JarvisApp(store: JarvisStore) {
             delay(15_000L)
         }
     }
+    // Local-only refresh while work is open, so replies appear as soon as they are stored, not only after a sync.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(3_000L)
+            if (store.hasActiveWork() || store.submitting) store.refreshLocal()
+        }
+    }
 
     // Opening an overlay or changing tab must not leave the composer focused behind it with the keyboard up.
     val focusManager = LocalFocusManager.current
