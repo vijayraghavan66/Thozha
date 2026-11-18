@@ -72,7 +72,8 @@ fun main(args: Array<String>) {
 
     // --- full exchange against a simulated Mac ----------------------------------------------------------------
     val sent = mutableListOf<String>()
-    val tunnel = TelegramRelayTunnel(sendFrame = { sent += it }, timeoutMs = 5_000, idSource = { "exchange-id-0001" })
+    val diagnostics = mutableListOf<String>()
+    val tunnel = TelegramRelayTunnel(sendFrame = { sent += it }, timeoutMs = 5_000, idSource = { "exchange-id-0001" }, log = { diagnostics += it })
     val macResponse = linkedMapOf<String, Any>("t" to "res", "id" to "exchange-id-0001", "s" to 200L, "b" to "{\"messages\":[]}")
     val worker = thread(start = true) {
         while (sent.isEmpty()) Thread.sleep(5)
@@ -85,6 +86,8 @@ fun main(args: Array<String>) {
     worker.join()
     check(response.status == 200 && response.text == "{\"messages\":[]}", "exchange returns the relay response through the tunnel")
     check(sent.isNotEmpty() && !sent.joinToString("").contains("leak"), "only allowlisted headers leave the phone")
+    check(diagnostics.size == 3 && diagnostics.all { !it.contains("exchange-id-0001") && !it.contains("/v1/") && !it.contains("leak") }, "diagnostics avoid raw ids, paths and headers")
+    check(diagnostics.any { it.contains("tunnel_finish") && it.contains("outcome=response") }, "successful exchange records timing outcome")
 
     // --- timeout is an IOException, not a silent success -------------------------------------------------------
     val slow = TelegramRelayTunnel(sendFrame = { }, timeoutMs = 50, idSource = { "timeout-id-0001" })

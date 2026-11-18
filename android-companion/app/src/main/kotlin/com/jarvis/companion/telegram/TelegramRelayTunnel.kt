@@ -31,6 +31,9 @@ class TelegramRelayTunnel(
 
     override fun exchange(method: String, pathAndQuery: String, headers: Map<String, String>, body: ByteArray): RelayRawResponse {
         val id = idSource()
+        val trace = java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8))
+            .take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val startNs = System.nanoTime()
         val queue = ArrayBlockingQueue<RelayRawResponse>(1)
         synchronized(lock) {
             if (waiting.containsKey(id)) throw IOException("duplicate tunnel request id")
@@ -47,10 +50,11 @@ class TelegramRelayTunnel(
                 "b" to String(body, Charsets.UTF_8),
             )
             val frames = TunnelFrames.encode(request, id)
-            log("tunnel request method=$method path=${pathAndQuery.substringBefore('?')} frames=${frames.size}")
+            log("tunnel_start trace=$trace method=$method frames=${frames.size}")
             frames.forEach(sendFrame)
+            log("tunnel_enqueued trace=$trace elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)}")
             val response = queue.poll(timeoutMs, TimeUnit.MILLISECONDS)
-            if (response == null) log("tunnel response timed out")
+            log("tunnel_finish trace=$trace outcome=${if (response == null) "timeout" else "response"} elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs)}")
             return response ?: throw IOException("relay tunnel timed out")
         } finally {
             synchronized(lock) { waiting.remove(id) }
