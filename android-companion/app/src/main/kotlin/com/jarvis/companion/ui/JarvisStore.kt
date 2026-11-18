@@ -153,7 +153,7 @@ class JarvisStore(private val app: Context) {
                 when (fastCommand) {
                     FastCommand.MacStatus -> runtime.submitFastCommand(relayUrl, FastCommandRequest.MacStatus, requestId)
                     is FastCommand.TaskStatus -> runtime.submitFastCommand(relayUrl, FastCommandRequest.TaskStatus(fastCommand.taskId), requestId)
-                    is FastCommand.OpenApplication -> runtime.submitFastCommand(relayUrl, FastCommandRequest.OpenCalculator, requestId)
+                    is FastCommand.OpenApplication -> runtime.submitFastCommand(relayUrl, FastCommandRequest.OpenCalculator(requestId), requestId)
                     null -> runtime.submit(relayUrl, TaskSubmission(text, setOf(SafeCapability.ASSISTANT), clientRequestId = requestId), null)
                 }
             }
