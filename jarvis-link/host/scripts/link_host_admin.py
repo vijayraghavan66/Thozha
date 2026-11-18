@@ -35,7 +35,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from jarvis_link_host.client import RelayClient  # noqa: E402
+from jarvis_link_host.client import RelayClient, relay_failure_log_fields  # noqa: E402
 from jarvis_link_host.crypto import DeviceCertificate, DeviceIdentity, device_id_for_signing_key, issue_device_certificate  # noqa: E402
 from jarvis_link_host.host import JarvisLinkHost  # noqa: E402
 from jarvis_link_host.runtime import HostRelayRuntime  # noqa: E402
@@ -450,7 +450,7 @@ async def _serve(args, path: Path) -> None:
                 cycle = await asyncio.to_thread(_cycle, state, client, identity, store, adapter, response_outbox, dispatcher)
                 print(json.dumps({"event": "cycle", "at": time.strftime("%H:%M:%S"), **cycle}), flush=True)
             except Exception as failure:  # keep the loop alive; report only the exception class
-                print(json.dumps({"event": "cycle_error", "error": type(failure).__name__}), flush=True)
+                print(json.dumps({"event": "cycle_error", "error": type(failure).__name__, **relay_failure_log_fields(failure)}), flush=True)
             ts, nonce = str(int(time.time() * 1000)), _b64(os.urandom(32))
             signature = identity.sign_request(tenant_id=state["tenant_id"], device_id=host_id, timestamp_ms=int(ts),
                                               nonce_b64url=nonce, method="GET",
@@ -470,8 +470,8 @@ async def _serve(args, path: Path) -> None:
                         await asyncio.wait_for(ws.recv(), timeout=active_interval)
                     except asyncio.TimeoutError:
                         pass
-            except Exception:  # relay down or restarting: back off, never spin
-                print(json.dumps({"event": "relay_unavailable", "at": time.strftime("%H:%M:%S"), "retry_s": backoff}), flush=True)
+            except Exception as failure:  # relay down or restarting: back off, never spin
+                print(json.dumps({"event": "relay_unavailable", "at": time.strftime("%H:%M:%S"), "retry_s": backoff, **relay_failure_log_fields(failure)}), flush=True)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
     finally:

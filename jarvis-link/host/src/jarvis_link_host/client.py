@@ -170,3 +170,25 @@ class RelayClient:
     def close(self) -> None:
         if self._owned_client:
             self.http.close()
+
+
+_SAFE_RELAY_CODE = re.compile(r"[A-Z][A-Z_]{0,39}")
+
+
+def relay_failure_log_fields(failure: BaseException) -> dict[str, Any]:
+    """Structured, non-sensitive diagnostics for a relay failure: HTTP status and a whitelisted error code only.
+
+    Relay bodies, headers, signatures and tokens are never included. Codes must be fixed uppercase identifiers
+    (for example TIMESTAMP_SKEW or INVALID_SIGNATURE); anything else is dropped.
+    """
+    fields: dict[str, Any] = {}
+    status = getattr(failure, "status_code", None)
+    if status is None:
+        response = getattr(failure, "response", None)  # websockets handshake rejection carries the response
+        status = getattr(response, "status_code", None)
+    if isinstance(status, int) and 100 <= status <= 599:
+        fields["relay_status"] = status
+    code = getattr(failure, "code", None)
+    if isinstance(code, str) and _SAFE_RELAY_CODE.fullmatch(code):
+        fields["relay_code"] = code
+    return fields
