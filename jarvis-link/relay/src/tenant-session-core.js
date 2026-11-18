@@ -2,7 +2,7 @@ const enc = new TextEncoder();
 const DEVICE_ID_RE = /^[0-9a-f]{32}$/;
 const NONCE_RE = /^[A-Za-z0-9_-]{32,128}$/;
 const KIND_SET = new Set([
-  "task.submit", "task.progress", "task.result", "approval.request", "approval.decision", "task.cancel",
+  "task.submit", "task.progress", "task.result", "approval.request", "approval.decision", "task.cancel", "fast.command",
 ]);
 const MAX_ENVELOPE_BYTES = 64 * 1024;
 const MAX_TTL_MS = 24 * 60 * 60 * 1000;

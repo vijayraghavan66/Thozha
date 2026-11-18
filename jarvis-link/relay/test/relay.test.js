@@ -234,6 +234,25 @@ test("host bootstrap, one-use enrollment, encrypted queue, ACK, revoke, and repl
   assert.equal((await expiredRes.json()).error.code, "MESSAGE_EXPIRED");
 });
 
+test("typed fast.command is queued as ciphertext for the authenticated host", async () => {
+  const ctx = await setupTenant();
+  const companion = await enrollCompanion(ctx);
+  const envelope = await makeEnvelope({
+    tenant: TENANT, from: companion.companionId,
+    to: { id: ctx.hostId, encryption_public_key_b64url: ctx.hostCert.encryption_public_key_b64url },
+    sender: companion.companionSign, toKeyId: ctx.hostCert.certificate_id,
+    kind: "fast.command", text: JSON.stringify({ command: "mac.status", version: 1 }),
+  });
+  const response = await relay.fetch(await postRequest({
+    path: "/v1/messages", tenant: TENANT, deviceId: companion.companionId,
+    pair: companion.companionSign, body: envelope,
+  }), ctx.env);
+  assert.equal(response.status, 200, await response.clone().text());
+  const stored = await ctx.env.SESSIONS.sessions.get(TENANT).state.storage.get(`message:${envelope.message_id}`);
+  assert.ok(stored?.envelope?.ciphertext_b64url);
+  assert.equal(JSON.stringify(stored).includes("mac.status"), false, "relay must not inspect or store command plaintext");
+});
+
 test("bootstrap secret, unauthenticated access, and route allowlist fail closed", async () => {
   const ctx = await setupTenant();
   const bootstrapAgain = await relay.fetch(await postRequest({

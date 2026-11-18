@@ -111,7 +111,7 @@ object LinkCrypto {
     private const val MESSAGE_ID_BYTES = 16
     private val random = SecureRandom()
     private val deviceIdRegex = Regex("^[0-9a-f]{32}$")
-    private val kindSet = setOf("task.submit", "task.progress", "task.result", "approval.request", "approval.decision", "task.cancel")
+    private val kindSet = setOf("task.submit", "task.progress", "task.result", "approval.request", "approval.decision", "task.cancel", "fast.command")
 
     fun newSigningIdentity(): SigningIdentity {
         val pair = newP256KeyPair()

@@ -28,6 +28,7 @@ object CompanionProtocolTest {
         check(companionCertificate.verify(hostRoot, "tenant_sim", now))
         enrollmentProofBindsAllKeys(root, host, hostEnc, companion, companionEnc, now)
         assistantTextJsonRoundTrip()
+        typedFastCommandEnvelopeIsAllowed(companion, hostCertificate, hostRoot, now)
         endToEndEnvelopeRoundTrip(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         crashAfterRelayAcceptancePreservesExactEnvelope(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
@@ -52,6 +53,19 @@ object CompanionProtocolTest {
             val encoded = LinkJson.encode(linkedMapOf("text" to sample))
             val decoded = LinkJson.parseObject(encoded)["text"]
             check(decoded == sample) { "JSON changed assistant text or newline boundaries" }
+        }
+    }
+
+    private fun typedFastCommandEnvelopeIsAllowed(
+        companion: SigningIdentity, hostCertificate: DeviceCertificate, hostRoot: TrustedHostRoot, now: Long,
+    ) {
+        val requestId = "12".repeat(16)
+        val envelope = LinkCrypto.createEnvelope(
+            "tenant_sim", companion, hostCertificate, hostRoot, "fast.command",
+            FastCommandRequest.MacStatus.toJson(), nowUnixMs = now, ttlMs = 30_000, messageId = requestId,
+        )
+        check(envelope.header.kind == "fast.command" && envelope.header.messageId == requestId) {
+            "typed fast command must retain its request correlation ID"
         }
     }
 
