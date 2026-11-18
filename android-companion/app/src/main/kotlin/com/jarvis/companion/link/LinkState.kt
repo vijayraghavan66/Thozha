@@ -11,8 +11,20 @@ import java.io.File
  */
 class SharedPrefsLinkStateStore(context: Context) : LinkStateStore {
     private val prefs = context.getSharedPreferences("jarvis_link_state", Context.MODE_PRIVATE)
-    override fun read(): String? = prefs.getString("json", null)
-    override fun write(json: String) { prefs.edit().putString("json", json).apply() }
+    // SharedPreferences updates its in-memory cache even if commit fails. Fail closed until process
+    // restart instead of ACKing an event based on state that might not have reached disk.
+    override fun read(): String? {
+        check(!storageFailed) { "Link state persistence failed; restart required" }
+        return prefs.getString("json", null)
+    }
+    override fun write(json: String) {
+        check(!storageFailed) { "Link state persistence failed; restart required" }
+        if (!prefs.edit().putString("json", json).commit()) {
+            storageFailed = true
+            error("Link state could not be saved; restart required")
+        }
+    }
+    companion object { @Volatile private var storageFailed = false }
     fun clear() { prefs.edit().clear().apply() }
 }
 
