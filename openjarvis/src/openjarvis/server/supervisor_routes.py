@@ -1,15 +1,17 @@
 """Authenticated task, pairing, and exact-operation approval API."""
 from __future__ import annotations
 
-import hashlib
 import asyncio
-import ipaddress
+import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -474,12 +476,18 @@ async def run_link_task(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Expected JSON Link task body") from exc
-    required = {"objective", "capability_scope", "idempotency_key"}
+    required = {
+        "objective", "capability_scope", "idempotency_key", "requester_device_id",
+    }
     if not isinstance(body, dict) or set(body) != required:
-        raise HTTPException(status_code=422, detail="objective, capability_scope, and idempotency_key are required")
+        raise HTTPException(
+            status_code=422,
+            detail="objective, capability_scope, idempotency_key, and requester_device_id are required",
+        )
     objective = body.get("objective")
     capability_scope = body.get("capability_scope")
     idempotency_key = body.get("idempotency_key")
+    requester_device_id = body.get("requester_device_id")
     if not isinstance(objective, str) or not objective.strip() or len(objective) > 20_000:
         raise HTTPException(status_code=422, detail="objective must be a non-empty string under 20000 characters")
     if not isinstance(capability_scope, list) or any(not isinstance(scope, str) for scope in capability_scope):
@@ -489,6 +497,18 @@ async def run_link_task(request: Request) -> JSONResponse:
         raise HTTPException(status_code=403, detail="Only read_only or supervisor-gated assistant scope is enabled")
     if not isinstance(idempotency_key, str):
         raise HTTPException(status_code=422, detail="idempotency_key is required")
+    if not isinstance(requester_device_id, str) or not re.fullmatch(
+        r"[0-9a-f]{32}", requester_device_id,
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="requester_device_id must be a 32-character lowercase device ID",
+        )
+    if actor.startswith("device:") and actor != "device:" + requester_device_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Authenticated device does not match the Link task requester",
+        )
 
     agent = getattr(request.app.state, "agent", None)
     engine = getattr(request.app.state, "engine", None)
@@ -506,7 +526,7 @@ async def run_link_task(request: Request) -> JSONResponse:
             objective,
             capability_scope=capability_scope,
             idempotency_key=idempotency_key,
-            owner_actor=actor,
+            owner_actor="device:" + requester_device_id,
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail="This task belongs to another paired device") from exc
@@ -699,7 +719,8 @@ async def get_link_task_events(
         "link_task.queued", "link_task.started", "link_task.waiting_approval",
         "link_task.approval_consumed", "link_task.approval_rejected",
         "link_task.completed", "link_task.failed", "approval.consumed",
-        "tool.mcp_approval_dispatch_claimed", "approval.execution_completed",
+        "tool.mcp_approval_dispatch_claimed", "approval.created", "approval.decision",
+        "approval.expired", "approval.execution_completed", "approval.execution_failed",
         "approval.mac_mcp_dispatched",
     }
     safe_events = []
@@ -708,9 +729,15 @@ async def get_link_task_events(
             continue
         payload = event.get("payload") or {}
         safe_payload = {}
-        for key in ("from", "to", "step", "previous_state", "state"):
+        for key in (
+            "from", "to", "step", "previous_state", "state", "approval_id",
+            "operation", "decision", "error_code", "success", "executed",
+            "result_digest",
+        ):
             value = payload.get(key)
             if isinstance(value, str) and len(value) <= 80:
+                safe_payload[key] = value
+            elif key in {"success", "executed"} and isinstance(value, bool):
                 safe_payload[key] = value
         safe_events.append({
             "seq": event["seq"],
@@ -757,6 +784,178 @@ def _link_task_status_label(store: Any, task: dict[str, Any]) -> tuple[str, str]
     return "UNKNOWN", "Approval state is unavailable."
 
 
+def _approval_execution_reconciliation(
+    store: Any, approval_id: str, task_id: str,
+) -> dict[str, Any]:
+    """Return execution status only when a durable terminal event proves the outcome.
+
+    CONSUMED means the one-shot authorization was spent; it does not prove the
+    operating-system or MCP action finished. Replays must never infer success
+    from that authorization state or dispatch the operation again.
+    """
+    for event in reversed(store.events(task_id)):
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if payload.get("approval_id") != approval_id:
+            continue
+        event_type = event.get("event_type")
+        if event_type == "approval.execution_completed":
+            return {
+                "execution_state": "COMPLETED", "executed": True, "success": True,
+                "result_summary": "The approved operation completed successfully.",
+            }
+        if event_type == "approval.execution_failed":
+            return {
+                "execution_state": "FAILED",
+                "executed": bool(payload.get("executed", True)),
+                "success": False,
+                "error_code": str(payload.get("error_code") or "APPROVED_OPERATION_FAILED")[:80],
+                "result_summary": (
+                    "The approved operation failed. Check the Mac before retrying."
+                ),
+            }
+        if event_type == "approval.mac_mcp_dispatched" and isinstance(
+            payload.get("success"), bool,
+        ):
+            return {
+                "execution_state": "COMPLETED" if payload["success"] else "FAILED",
+                "executed": bool(payload["success"]),
+                "success": payload["success"],
+                "result_summary": (
+                    "The approved Mac action completed successfully."
+                    if payload["success"]
+                    else "The approved Mac action failed. Check the Mac before retrying."
+                ),
+                **(
+                    {} if payload["success"]
+                    else {"error_code": "APPROVED_MCP_OPERATION_FAILED"}
+                ),
+            }
+    task = store.get_task(task_id) or {}
+    return {
+        "execution_state": "INDETERMINATE",
+        "executed": False,
+        "success": False,
+        "task_state": task.get("state", "UNKNOWN"),
+        "summary": (
+            "Authorization was consumed, but no durable execution result is available. "
+            "Check the Mac before retrying."
+        ),
+    }
+
+
+def _consume_approved_operation_without_dispatch(
+    store: Any, *, approval_id: str, task_id: str, item: dict[str, Any],
+    is_link_task: bool,
+    error_code: str,
+) -> dict[str, Any]:
+    """Burn an approved one-shot authorization and persist a truthful dispatch failure."""
+    try:
+        arguments = json.loads(item.get("arguments_json") or "null")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Stored approved operation arguments are invalid",
+        ) from exc
+    if not isinstance(arguments, dict):
+        raise HTTPException(
+            status_code=409,
+            detail="Stored approved operation arguments are unavailable",
+        )
+    task = store.get_task(task_id)
+    if task and task.get("state") == "PAUSED" and not store.resume_approved_task(
+        task_id, approval_id,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Paused task could not be resumed safely",
+        )
+    if not store.consume_approval(
+        approval_id, task_id=task_id, operation=item["operation"],
+        target=item["target"], arguments=arguments,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Exact operation approval was stale or already used",
+        )
+    if is_link_task:
+        try:
+            store.resume_link_task_after_approval(task_id, approval_id)
+        except (KeyError, PermissionError, RuntimeError):
+            # The approval is already consumed. Never attempt another dispatch;
+            # persist that continuation could not start and return an explicit error.
+            pass
+    store.record_event(task_id, "approval.execution_failed", {
+        "approval_id": approval_id,
+        "operation": item["operation"],
+        "error_code": error_code,
+        "executed": False,
+    })
+    if is_link_task:
+        run = store.link_task_run(task_id) or {}
+        if run.get("status") == "RUNNING":
+            try:
+                store.finish_link_task(task_id, error=error_code.lower())
+            except RuntimeError:
+                pass
+    current = store.get_task(task_id)
+    if current and current.get("state") in {"RUNNING", "WAITING_APPROVAL"}:
+        try:
+            store.transition(
+                task_id, "FAILED", expected=current["state"],
+                error=error_code.lower(),
+            )
+        except RuntimeError:
+            pass
+    return {
+        "status": "CONSUMED", "decision": "approve", "execution_state": "FAILED",
+        "executed": False, "success": False, "continued": False,
+        "task_state": (store.get_task(task_id) or {}).get("state", "UNKNOWN"),
+        "result_summary": (
+            "The exact approval was accepted, but no authorized executor "
+            "could run it."
+        ),
+        "error_code": error_code,
+        "approval_id": approval_id, "task_id": task_id,
+    }
+
+
+def _fast_command_result(row: dict[str, Any], *, replay: bool) -> dict[str, Any]:
+    state = row.get("state") or "INDETERMINATE"
+    if state == "EXECUTING":
+        state = "EXECUTION_PENDING"
+    return {
+        "command": row.get("command", "app.open"),
+        "state": state,
+        "executed": bool(row.get("executed")),
+        "success": bool(row.get("success")),
+        "bundle_id": row.get("target", ""),
+        "summary": str(
+            row.get("summary") or "Application activation is still being reconciled."
+        )[:500],
+        "idempotent_replay": replay,
+    }
+
+
+def _parse_pmset_battery(output: str) -> tuple[int | None, bool | None]:
+    """Parse only percentage and charging state from bounded `pmset -g batt` output."""
+    normalized = output.casefold()
+    if "no battery" in normalized or "battery information unavailable" in normalized:
+        return None, None
+    match = re.search(r"(?<!\d)(100|[0-9]{1,2})%", output)
+    if match is None:
+        raise ValueError("battery percentage missing")
+    percentage = int(match.group(1))
+    if not 0 <= percentage <= 100:
+        raise ValueError("battery percentage out of range")
+    if re.search(r";\s*charging\b", normalized):
+        charging: bool | None = True
+    elif re.search(r";\s*(?:charged|discharging|not charging)\b", normalized):
+        charging = False
+    else:
+        charging = None
+    return percentage, charging
+
+
 @router.post("/link/fast-command")
 async def run_link_fast_command(request: Request) -> dict[str, Any]:
     """Handle exact deterministic commands without invoking the agent."""
@@ -768,19 +967,75 @@ async def run_link_fast_command(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Expected JSON fast command") from exc
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="Fast command must be an object")
-    command, requester = body.get("command"), body.get("requester")
+    command, requester = body.get("command"), body.get("requester_device_id")
     if not isinstance(requester, str) or not re.fullmatch(r"[0-9a-f]{32}", requester):
         raise HTTPException(status_code=422, detail="Invalid companion identity")
     store = get_supervisor_store()
-    if command == "mac.status" and set(body) == {"command", "requester"}:
+    if command == "mac.status" and set(body) == {"command", "requester_device_id"}:
         agent = getattr(request.app.state, "agent", None)
         engine = getattr(request.app.state, "engine", None)
         model = getattr(request.app.state, "model", "") or getattr(agent, "_model", "")
         from openjarvis.server.routes import _engine_key_for_model
         ai_available = bool(agent is not None and engine is not None and model and _engine_key_for_model(engine, model) == "codex_sdk")
-        return {"command": command, "state": "ONLINE", "online": True, "ai_available": ai_available}
+        return {
+            "command": command, "state": "COMPLETED", "online": True,
+            "ai_available": ai_available, "executed": True, "success": True,
+            "summary": "Mac is online.",
+        }
 
-    if command == "task.status" and set(body) == {"command", "requester", "task_id"}:
+    if command == "mac.battery" and set(body) == {"command", "requester_device_id"}:
+        if sys.platform != "darwin":
+            return {
+                "command": command, "state": "FAILED",
+                "executed": False, "success": False,
+                "battery_percent": None, "charging": None,
+                "summary": "Battery status is available only from a Mac.",
+            }
+        try:
+            result = subprocess.run(
+                ["/usr/bin/pmset", "-g", "batt"],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError("battery status provider failed")
+            battery_percent, charging = _parse_pmset_battery(result.stdout)
+        except subprocess.TimeoutExpired:
+            return {
+                "command": command, "state": "FAILED",
+                "executed": False, "success": False,
+                "battery_percent": None, "charging": None,
+                "summary": "Mac battery status timed out.",
+            }
+        except Exception:
+            return {
+                "command": command, "state": "FAILED",
+                "executed": False, "success": False,
+                "battery_percent": None, "charging": None,
+                "summary": "Mac battery status could not be read.",
+            }
+        if battery_percent is None:
+            return {
+                "command": command, "state": "FAILED",
+                "executed": True, "success": False,
+                "battery_percent": None, "charging": None,
+                "summary": "This Mac does not report an internal battery.",
+            }
+        elif charging is True:
+            summary = f"Mac battery is {battery_percent}% and charging."
+        elif charging is False:
+            summary = f"Mac battery is {battery_percent}% and is not charging."
+        else:
+            summary = f"Mac battery is {battery_percent}%; charging state is unknown."
+        return {
+            "command": command, "state": "COMPLETED",
+            "executed": True, "success": True,
+            "battery_percent": battery_percent, "charging": charging,
+            "summary": summary,
+        }
+
+    if command == "task.status" and set(body) == {
+        "command", "requester_device_id", "task_id",
+    }:
         task_id = body.get("task_id")
         if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
             raise HTTPException(status_code=422, detail="Invalid task ID")
@@ -803,7 +1058,97 @@ async def run_link_fast_command(request: Request) -> dict[str, Any]:
             "result_text": (run.get("result_text") or run.get("result_summary") or "") if state == "COMPLETED" else None,
         }
 
-    if command == "app.open" and set(body) == {"command", "requester", "app", "idempotency_key"} and body.get("app") == "Calculator":
+    # Tier A: typed, allowlisted foreground activation. The only value passed
+    # to LaunchServices is a canonical bundle ID from this map; paths, argv,
+    # scripts, shell strings and arbitrary bundle IDs are not accepted.
+    trusted_apps = {
+        "com.apple.calculator": "Calculator",
+        "com.spotify.client": "Spotify",
+    }
+    if (
+        command == "app.open"
+        and set(body) == {"command", "requester_device_id", "app", "idempotency_key"}
+        and body.get("app") in trusted_apps
+    ):
+        bundle_id = body.get("app")
+        request_id = body.get("idempotency_key")
+        if not isinstance(request_id, str) or not re.fullmatch(
+            r"[0-9a-f]{32}", request_id,
+        ):
+            raise HTTPException(status_code=422, detail="Invalid fast command idempotency key")
+        try:
+            record, created = store.claim_fast_command(
+                request_id=request_id,
+                requester=requester,
+                command="app.open",
+                target=bundle_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409, detail="Fast command idempotency conflict",
+            ) from exc
+        if not created:
+            return _fast_command_result(record, replay=True)
+
+        display_name = trusted_apps[bundle_id]
+        if sys.platform != "darwin":
+            record = store.finish_fast_command(
+                request_id,
+                state="FAILED",
+                executed=False,
+                success=False,
+                summary="Foreground app activation is available only on the Mac.",
+            ) or record
+            return _fast_command_result(record, replay=False)
+        try:
+            launched = subprocess.run(
+                ["/usr/bin/open", "-b", bundle_id],
+                capture_output=True,
+                text=True,
+                timeout=12,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            record = store.finish_fast_command(
+                request_id,
+                state="INDETERMINATE",
+                executed=False,
+                success=False,
+                summary=(
+                    f"Jarvis could not confirm whether {display_name} opened. "
+                    "Check the Mac before retrying."
+                ),
+            ) or record
+            return _fast_command_result(record, replay=False)
+        except Exception:
+            record = store.finish_fast_command(
+                request_id,
+                state="FAILED",
+                executed=False,
+                success=False,
+                summary=f"Jarvis could not open {display_name} on the Mac.",
+            ) or record
+            return _fast_command_result(record, replay=False)
+
+        success = launched.returncode == 0
+        record = store.finish_fast_command(
+            request_id,
+            state="COMPLETED" if success else "FAILED",
+            executed=success,
+            success=success,
+            summary=(
+                f"{display_name} opened on the Mac."
+                if success
+                else f"macOS could not open {display_name}. Confirm that it is installed and available."
+            ),
+        ) or record
+        return _fast_command_result(record, replay=False)
+
+    if (
+        command == "app.open"
+        and set(body) == {"command", "requester_device_id", "app", "idempotency_key"}
+        and body.get("app") == "Calculator"
+    ):
         idem = body.get("idempotency_key")
         if not isinstance(idem, str) or not re.fullmatch(r"[0-9a-f]{32}", idem):
             raise HTTPException(status_code=422, detail="Invalid fast command idempotency key")
@@ -950,7 +1295,10 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Expected JSON decision body") from exc
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected JSON object")
-    allowed_fields = {"decision", "task_id", "expected_operation_digest", "args_digest", "idempotency_key", "continuation_objective"}
+    allowed_fields = {
+        "decision", "task_id", "expected_operation_digest", "args_digest",
+        "idempotency_key", "continuation_objective", "requester_device_id",
+    }
     if set(body) - allowed_fields:
         raise HTTPException(status_code=422, detail="Unexpected approval decision field")
     decision = body.get("decision")
@@ -958,6 +1306,7 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
     digest = body.get("expected_operation_digest", body.get("args_digest"))
     nonce = body.get("idempotency_key") or uuid.uuid4().hex
     continuation_objective = body.get("continuation_objective")
+    requester_device_id = body.get("requester_device_id")
     if decision not in {"approve", "reject"} or not isinstance(digest, str) or not digest or not isinstance(nonce, str) or not nonce:
         raise HTTPException(status_code=422, detail="decision, task_id, and expected_operation_digest are required")
     if continuation_objective is not None and (
@@ -966,6 +1315,11 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
         or len(continuation_objective.encode("utf-8")) > 4096
     ):
         raise HTTPException(status_code=422, detail="continuation_objective must be under 4096 bytes")
+    if requester_device_id is not None and (
+        not isinstance(requester_device_id, str)
+        or not re.fullmatch(r"[0-9a-f]{32}", requester_device_id)
+    ):
+        raise HTTPException(status_code=422, detail="requester_device_id must be a 32-character lowercase device ID")
     store = get_supervisor_store()
     existing = store.approval(approval_id)
     if existing is None:
@@ -985,6 +1339,14 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
         metadata = {}
     is_link_task = metadata.get("source") == "jarvis_link"
     link_capabilities: frozenset[str] | None = None
+    if is_link_task:
+        owner_actor = metadata.get("owner_actor")
+        if (
+            not isinstance(requester_device_id, str)
+            or owner_actor != "device:" + requester_device_id
+            or (actor.startswith("device:") and actor != owner_actor)
+        ):
+            raise HTTPException(status_code=403, detail="Approval requester does not match the task's paired device")
     if decision == "approve" and is_link_task and not (repeated and existing["status"] == "CONSUMED"):
         from openjarvis.tasks.supervisor import LINK_SCOPE_CAPABILITIES, canonical_json
 
@@ -1031,17 +1393,50 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
             nonce=nonce,
         )
         if not ok:
+            refreshed = store.approval(approval_id)
+            if refreshed and refreshed.get("status") == "EXPIRED":
+                return {
+                    "status": "EXPIRED", "decision": decision,
+                    "execution_state": "EXPIRED", "executed": False, "success": False,
+                    "continued": False,
+                    "result_summary": "Approval expired; the operation was not executed.",
+                    "approval_id": approval_id, "task_id": task_id,
+                }
             raise HTTPException(status_code=409, detail="Approval is stale, expired, already decided, or does not match")
     item = store.approval(approval_id)
     if item["status"] == "CONSUMED":
-        return {"status": "CONSUMED", "executed": True, "approval_id": approval_id, "task_id": task_id}
+        outcome = _approval_execution_reconciliation(store, approval_id, task_id)
+        return {
+            "status": "CONSUMED",
+            "decision": "approve",
+            "approval_id": approval_id,
+            "task_id": task_id,
+            "continued": False,
+            **outcome,
+        }
     if item["status"] != "APPROVED":
         if is_link_task and item["status"] == "REJECTED":
             try:
                 store.reject_link_task_after_approval(task_id, approval_id)
             except (KeyError, PermissionError, RuntimeError):
                 pass
-        return {"status": item["status"], "executed": False, "approval_id": approval_id, "task_id": task_id}
+        return {
+            "status": item["status"],
+            "decision": decision,
+            "execution_state": item["status"] if item["status"] in {"REJECTED", "EXPIRED"} else "UNKNOWN",
+            "executed": False,
+            "success": False,
+            "continued": False,
+            "result_summary": (
+                "The operation was rejected and was not executed."
+                if item["status"] == "REJECTED"
+                else "Approval expired; the operation was not executed."
+                if item["status"] == "EXPIRED"
+                else "Approval is not active; the operation was not executed."
+            ),
+            "approval_id": approval_id,
+            "task_id": task_id,
+        }
 
     # Codex Mac MCP calls are not OpenJarvis BaseTools. Dispatch them through
     # the same exact-operation store boundary, using only arguments saved when
@@ -1059,7 +1454,10 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
             allowed_mcp_tools = {"click", "type_text", "press_key", "scroll", "open_app", "open_browser_workspace"}
             source_ok = metadata.get("source") in {"agent_chat", "jarvis_link"}
         if mcp_tool not in allowed_mcp_tools or not source_ok:
-            return {"status": "APPROVED", "executed": False, "approval_id": approval_id, "task_id": task_id}
+            return _consume_approved_operation_without_dispatch(
+                store, approval_id=approval_id, task_id=task_id, item=item,
+                is_link_task=is_link_task, error_code="NO_AUTHORIZED_DISPATCHER",
+            )
         try:
             args = json.loads(item.get("arguments_json") or "null")
         except (TypeError, json.JSONDecodeError) as exc:
@@ -1152,7 +1550,13 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
             current = store.get_task(task_id)
             if current and current["state"] in {"RUNNING", "WAITING_APPROVAL"}:
                 store.transition(task_id, "FAILED", expected=current["state"], error="approved_mcp_operation_failed")
-            return {"status": "CONSUMED", "executed": False, "success": False, "approval_id": approval_id, "task_id": task_id}
+            return {
+                "status": "CONSUMED", "decision": "approve",
+                "execution_state": "FAILED", "executed": False, "success": False,
+                "continued": False, "error_code": "APPROVED_MCP_OPERATION_FAILED",
+                "result_summary": "The approved Mac action failed. Check the Mac before retrying.",
+                "approval_id": approval_id, "task_id": task_id,
+            }
 
         if is_link_task:
             if continuation_objective:
@@ -1212,8 +1616,10 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
         current = store.get_task(task_id) or {}
         return {
             "status": "CONSUMED",
+            "decision": "approve",
             "executed": True,
             "success": True,
+            "execution_state": "COMPLETED",
             "continued": bool(is_link_task and continuation_objective),
             "task_state": current.get("state", "UNKNOWN"),
             "approval_id": approval_id,
@@ -1230,7 +1636,10 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
     executor = getattr(agent, "_executor", None)
     tool = getattr(executor, "_tools", {}).get(item["operation"]) if executor is not None else None
     if metadata.get("source") not in {"agent_chat", "jarvis_link"} or tool is None:
-        return {"status": "APPROVED", "executed": False, "approval_id": approval_id, "task_id": task_id}
+        return _consume_approved_operation_without_dispatch(
+            store, approval_id=approval_id, task_id=task_id, item=item,
+            is_link_task=is_link_task, error_code="NO_AUTHORIZED_EXECUTOR",
+        )
     try:
         if task and task["state"] == "PAUSED" and not store.resume_approved_task(task_id, approval_id):
             raise ValueError("paused task could not be explicitly resumed")
@@ -1262,18 +1671,56 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
             if task_after and task_after["state"] == "VERIFYING":
                 store.transition(task_id, "COMPLETED", evidence={"approved_tool_success": True})
             store.record_event(task_id, "approval.execution_completed", {"approval_id": approval_id, "operation": item["operation"]})
-            return {"status": "CONSUMED", "executed": True, "success": True, "approval_id": approval_id, "task_id": task_id}
+            return {
+                "status": "CONSUMED", "decision": "approve", "executed": True, "success": True,
+                "execution_state": "COMPLETED", "continued": False,
+                "task_state": (store.get_task(task_id) or {}).get("state", "UNKNOWN"),
+                "result_summary": "The approved operation completed successfully.",
+                "approval_id": approval_id, "task_id": task_id,
+            }
         if task_after and task_after["state"] in {"RUNNING", "WAITING_APPROVAL"}:
             store.transition(task_id, "FAILED", error=str(result.metadata.get("error_code", "tool_execution_failed")))
         if is_link_task:
             store.finish_link_task(task_id, error=str(result.metadata.get("error_code", "tool_execution_failed")))
         store.record_event(task_id, "approval.execution_failed", {"approval_id": approval_id, "operation": item["operation"], "error_code": result.metadata.get("error_code", "TOOL_FAILED")})
-        return {"status": "CONSUMED", "executed": True, "success": False, "approval_id": approval_id, "task_id": task_id, "error_code": result.metadata.get("error_code", "TOOL_FAILED")}
+        return {
+            "status": "CONSUMED", "decision": "approve", "executed": True, "success": False,
+            "execution_state": "FAILED", "continued": False,
+            "task_state": (store.get_task(task_id) or {}).get("state", "UNKNOWN"),
+            "result_summary": "The approved operation failed. Check the Mac before retrying.",
+            "approval_id": approval_id, "task_id": task_id,
+            "error_code": result.metadata.get("error_code", "TOOL_FAILED"),
+        }
     except HTTPException:
         raise
     except Exception as exc:
         logger.error("Approved operation dispatch failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=500, detail="Approved operation could not be dispatched") from exc
+        store.record_event(task_id, "approval.execution_failed", {
+            "approval_id": approval_id,
+            "operation": item["operation"],
+            "error_code": "APPROVED_DISPATCH_FAILED",
+        })
+        current = store.get_task(task_id)
+        if current and current["state"] in {"RUNNING", "WAITING_APPROVAL"}:
+            try:
+                store.transition(task_id, "FAILED", expected=current["state"], error="approved_dispatch_failed")
+            except RuntimeError:
+                pass
+        if is_link_task:
+            run = store.link_task_run(task_id) or {}
+            if run.get("status") == "RUNNING":
+                try:
+                    store.finish_link_task(task_id, error="approved_dispatch_failed")
+                except RuntimeError:
+                    pass
+        return {
+            "status": "CONSUMED", "decision": "approve", "executed": True, "success": False,
+            "execution_state": "FAILED", "continued": False,
+            "task_state": (store.get_task(task_id) or {}).get("state", "UNKNOWN"),
+            "result_summary": "The approved operation could not be completed. Check the Mac before retrying.",
+            "approval_id": approval_id, "task_id": task_id,
+            "error_code": "APPROVED_DISPATCH_FAILED",
+        }
 
 
 @router.post("/devices/{device_id}/revoke")

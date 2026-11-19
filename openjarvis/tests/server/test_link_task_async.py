@@ -65,6 +65,7 @@ def _body(key: str, objective: str | None = None):
         "objective": objective or f"Explain {key}",
         "capability_scope": ["read_only"],
         "idempotency_key": key,
+        "requester_device_id": "a" * 32,
     }
 
 

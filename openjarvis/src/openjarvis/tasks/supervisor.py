@@ -235,6 +235,12 @@ class SupervisorStore:
               created_at TEXT NOT NULL, expires_at TEXT NOT NULL, decided_at TEXT,
               decided_by TEXT, decision_nonce TEXT, consumed_at TEXT, last_error TEXT
             );
+            CREATE TABLE IF NOT EXISTS fast_command_requests(
+              request_id TEXT PRIMARY KEY, requester TEXT NOT NULL,
+              command TEXT NOT NULL, target TEXT NOT NULL, state TEXT NOT NULL,
+              executed INTEGER NOT NULL DEFAULT 0, success INTEGER NOT NULL DEFAULT 0,
+              summary TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS link_task_runs(
               task_id TEXT PRIMARY KEY REFERENCES tasks(id), idempotency_key TEXT NOT NULL UNIQUE,
               objective_digest TEXT NOT NULL, scope TEXT NOT NULL, scope_digest TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
@@ -827,6 +833,75 @@ class SupervisorStore:
             row = self._db.execute("SELECT * FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
         if not row: return None
         data=dict(row); data["safe_args"] = json.loads(data.pop("safe_args_json")); return data
+
+    def claim_fast_command(
+        self, *, request_id: str, requester: str, command: str, target: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Durably claim one typed fast command; replays never dispatch it twice."""
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT * FROM fast_command_requests WHERE request_id=?", (request_id,),
+            ).fetchone()
+            if row is not None:
+                existing = dict(row)
+                if any(existing[key] != value for key, value in {
+                    "requester": requester, "command": command, "target": target,
+                }.items()):
+                    raise ValueError("fast-command idempotency key conflicts with the original request")
+                if existing["state"] == "EXECUTING":
+                    try:
+                        updated = datetime.fromisoformat(existing["updated_at"])
+                    except (TypeError, ValueError):
+                        updated = now_dt - timedelta(days=1)
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    if (now_dt - updated).total_seconds() > 30:
+                        db.execute(
+                            "UPDATE fast_command_requests SET state='INDETERMINATE',executed=0,success=0,"
+                            "summary=?,updated_at=? WHERE request_id=? AND state='EXECUTING'",
+                            (
+                                "The earlier activation did not record a terminal result. "
+                                "Check the Mac before retrying.",
+                                now,
+                                request_id,
+                            ),
+                        )
+                        row = db.execute(
+                            "SELECT * FROM fast_command_requests WHERE request_id=?", (request_id,),
+                        ).fetchone()
+                        existing = dict(row)
+                return existing, False
+            db.execute(
+                "INSERT INTO fast_command_requests(request_id,requester,command,target,state,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (request_id, requester, command, target, "EXECUTING", now, now),
+            )
+            row = db.execute(
+                "SELECT * FROM fast_command_requests WHERE request_id=?", (request_id,),
+            ).fetchone()
+        return dict(row), True
+
+    def finish_fast_command(
+        self, request_id: str, *, state: str, executed: bool, success: bool, summary: str,
+    ) -> dict[str, Any] | None:
+        """Persist the real outcome of a claimed typed command exactly once."""
+        if state not in {"COMPLETED", "FAILED", "INDETERMINATE"}:
+            raise ValueError("invalid terminal fast-command state")
+        if success and (state != "COMPLETED" or not executed):
+            raise ValueError("successful command requires confirmed completion")
+        now = utc_now()
+        with self._tx() as db:
+            cur = db.execute(
+                "UPDATE fast_command_requests SET state=?,executed=?,success=?,summary=?,updated_at=? "
+                "WHERE request_id=? AND state='EXECUTING'",
+                (state, int(executed), int(success), summary[:500], now, request_id),
+            )
+            row = db.execute(
+                "SELECT * FROM fast_command_requests WHERE request_id=?", (request_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def pending_approvals(self, limit: int = 100) -> list[dict[str, Any]]:
         now = utc_now()

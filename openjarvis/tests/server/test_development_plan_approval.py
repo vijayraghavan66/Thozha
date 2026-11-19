@@ -119,6 +119,7 @@ def test_api_persists_plan_intent_before_consuming_and_continues_task(client, tm
             "decision": "approve",
             "task_id": task_id,
             "expected_operation_digest": card.args_digest,
+            "requester_device_id": device_id,
             "continuation_objective": objective,
         },
     )

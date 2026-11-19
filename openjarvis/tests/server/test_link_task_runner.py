@@ -103,6 +103,7 @@ def test_link_runner_executes_codex_agent_once_and_returns_persisted_digest(link
         "objective": "Summarize this read-only task",
         "capability_scope": ["read_only"],
         "idempotency_key": "link-run-2026-11-16-0001",
+        "requester_device_id": "a" * 32,
     }
     response = client.post("/v1/jarvis/link/tasks", headers=headers, json=body)
     assert response.status_code == 200, response.json()
@@ -140,13 +141,40 @@ def test_link_runner_executes_codex_agent_once_and_returns_persisted_digest(link
 
 def test_link_runner_requires_loopback_auth_and_supported_scope(link_client):
     client, _, _ = link_client
-    body = {"objective": "read safely", "capability_scope": ["read_only"], "idempotency_key": "link-run-unique-0001"}
+    body = {"objective": "read safely", "capability_scope": ["read_only"], "idempotency_key": "link-run-unique-0001", "requester_device_id": "a" * 32}
     assert client.post("/v1/jarvis/link/tasks", json=body).status_code == 401
     assert client.post(
         "/v1/jarvis/link/tasks",
         headers={"Authorization": "Bearer link-test-admin-key"},
         json={**body, "capability_scope": ["desktop_observation"]},
     ).status_code == 403
+
+
+def test_link_task_submit_requires_and_binds_verified_requester_device(link_client):
+    client, store, agent = link_client
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    body = {
+        "objective": "Read the current Mac status",
+        "capability_scope": ["read_only"],
+        "idempotency_key": "link-owner-binding-submit-01",
+        "requester_device_id": "a" * 32,
+    }
+    created = client.post("/v1/jarvis/link/tasks", headers=headers, json=body)
+    assert created.status_code == 200, created.json()
+    task = store.get_task(created.json()["task_id"])
+    assert json.loads(task["recovery_json"])["owner_actor"] == "device:" + "a" * 32
+
+    missing = client.post(
+        "/v1/jarvis/link/tasks", headers=headers,
+        json={key: value for key, value in body.items() if key != "requester_device_id"},
+    )
+    assert missing.status_code == 422
+    conflicting_replay = client.post(
+        "/v1/jarvis/link/tasks", headers=headers,
+        json={**body, "requester_device_id": "b" * 32},
+    )
+    assert conflicting_replay.status_code == 403
+    assert agent.calls == [body["objective"]]
 
     remote = TestClient(client.app, base_url="http://127.0.0.1:8000", client=("192.168.1.7", 12345))
     assert remote.post(
@@ -159,7 +187,7 @@ def test_link_runner_requires_loopback_auth_and_supported_scope(link_client):
 def test_link_runner_rejects_conflicting_idempotency_reuse(link_client):
     client, _, agent = link_client
     headers = {"Authorization": "Bearer link-test-admin-key"}
-    body = {"objective": "first objective", "capability_scope": ["read_only"], "idempotency_key": "link-run-conflict-0001"}
+    body = {"objective": "first objective", "capability_scope": ["read_only"], "idempotency_key": "link-run-conflict-0001", "requester_device_id": "a" * 32}
     assert client.post("/v1/jarvis/link/tasks", headers=headers, json=body).status_code == 200
     changed = {**body, "objective": "different objective"}
     assert client.post("/v1/jarvis/link/tasks", headers=headers, json=changed).status_code == 409
@@ -179,6 +207,7 @@ def test_link_request_and_codex_prompt_keep_newlines_and_literal_markers(link_cl
             "objective": objective,
             "capability_scope": ["read_only"],
             "idempotency_key": "multiline-link-request-0001",
+            "requester_device_id": "a" * 32,
         },
     )
     assert response.status_code == 200
@@ -193,10 +222,269 @@ def test_fast_mac_status_is_deterministic_and_does_not_call_agent(link_client):
     response = client.post(
         "/v1/jarvis/link/fast-command",
         headers={"Authorization": "Bearer link-test-admin-key"},
-        json={"command": "mac.status", "requester": "a" * 32},
+        json={"command": "mac.status", "requester_device_id": "a" * 32},
     )
     assert response.status_code == 200
-    assert response.json() == {"command": "mac.status", "state": "ONLINE", "online": True, "ai_available": True}
+    assert response.json() == {
+        "command": "mac.status", "state": "COMPLETED", "online": True,
+        "ai_available": True, "executed": True, "success": True, "summary": "Mac is online.",
+    }
+    assert agent.calls == []
+
+
+@pytest.mark.parametrize(
+    ("bundle_id", "display_name"),
+    [("com.apple.calculator", "Calculator"), ("com.spotify.client", "Spotify")],
+)
+def test_trusted_bundle_fast_open_is_durable_and_bypasses_codex(link_client, monkeypatch, bundle_id, display_name):
+    import types
+    import openjarvis.server.supervisor_routes as routes
+
+    client, store, agent = link_client
+    monkeypatch.setattr(routes.sys, "platform", "darwin")
+    calls = []
+
+    def fake_open(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(routes.subprocess, "run", fake_open)
+    request_id = uuid.uuid4().hex
+    body = {
+        "command": "app.open",
+        "requester_device_id": "a" * 32,
+        "app": bundle_id,
+        "idempotency_key": request_id,
+    }
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+
+    response = client.post("/v1/jarvis/link/fast-command", headers=headers, json=body)
+    assert response.status_code == 200, response.json()
+    assert response.json() == {
+        "command": "app.open",
+        "state": "COMPLETED",
+        "executed": True,
+        "success": True,
+        "bundle_id": bundle_id,
+        "summary": f"{display_name} opened on the Mac.",
+        "idempotent_replay": False,
+    }
+    assert calls == [(
+        ["/usr/bin/open", "-b", bundle_id],
+        {"capture_output": True, "text": True, "timeout": 12, "check": False},
+    )]
+    assert agent.calls == []
+    assert store.pending_approvals(20) == []
+
+    replay = client.post("/v1/jarvis/link/fast-command", headers=headers, json=body)
+    assert replay.status_code == 200
+    assert replay.json()["state"] == "COMPLETED"
+    assert replay.json()["idempotent_replay"] is True
+    assert len(calls) == 1
+
+
+def test_trusted_bundle_fast_open_failure_is_truthful_and_not_retried(link_client, monkeypatch):
+    import types
+    import openjarvis.server.supervisor_routes as routes
+
+    client, store, agent = link_client
+    monkeypatch.setattr(routes.sys, "platform", "darwin")
+    calls = []
+    monkeypatch.setattr(
+        routes.subprocess,
+        "run",
+        lambda argv, **kwargs: calls.append((argv, kwargs)) or types.SimpleNamespace(returncode=1, stdout="", stderr=""),
+    )
+    body = {
+        "command": "app.open", "requester_device_id": "a" * 32,
+        "app": "com.spotify.client", "idempotency_key": uuid.uuid4().hex,
+    }
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+
+    first = client.post("/v1/jarvis/link/fast-command", headers=headers, json=body)
+    second = client.post("/v1/jarvis/link/fast-command", headers=headers, json=body)
+    assert first.status_code == second.status_code == 200
+    assert first.json()["state"] == second.json()["state"] == "FAILED"
+    assert first.json()["success"] is second.json()["success"] is False
+    assert first.json()["executed"] is second.json()["executed"] is False
+    assert second.json()["idempotent_replay"] is True
+    assert len(calls) == 1
+    assert agent.calls == []
+    assert store.pending_approvals(20) == []
+
+
+def test_fast_open_replay_after_stale_inflight_claim_is_indeterminate_not_reexecuted(link_client, monkeypatch):
+    import openjarvis.server.supervisor_routes as routes
+
+    client, store, agent = link_client
+    monkeypatch.setattr(routes.sys, "platform", "darwin")
+    calls = []
+    monkeypatch.setattr(routes.subprocess, "run", lambda *args, **kwargs: calls.append(args))
+    request_id = uuid.uuid4().hex
+    store.claim_fast_command(
+        request_id=request_id, requester="a" * 32,
+        command="app.open", target="com.apple.calculator",
+    )
+    store._db.execute(
+        "UPDATE fast_command_requests SET updated_at=? WHERE request_id=?",
+        ("2000-01-01T00:00:00+00:00", request_id),
+    )
+    store._db.commit()
+    response = client.post(
+        "/v1/jarvis/link/fast-command",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json={
+            "command": "app.open", "requester_device_id": "a" * 32,
+            "app": "com.apple.calculator", "idempotency_key": request_id,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["state"] == "INDETERMINATE"
+    assert response.json()["executed"] is False
+    assert response.json()["success"] is False
+    assert calls == []
+    assert agent.calls == []
+
+
+def test_fast_open_rejects_unknown_or_injected_bundle_and_idempotency_conflict(link_client, monkeypatch):
+    import openjarvis.server.supervisor_routes as routes
+
+    client, store, agent = link_client
+    calls = []
+    monkeypatch.setattr(routes.subprocess, "run", lambda *args, **kwargs: calls.append(args))
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    request_id = uuid.uuid4().hex
+    base = {"command": "app.open", "requester_device_id": "a" * 32, "idempotency_key": request_id}
+
+    unknown = client.post(
+        "/v1/jarvis/link/fast-command", headers=headers,
+        json={**base, "app": "com.attacker.app;touch /tmp/x"},
+    )
+    assert unknown.status_code == 422
+    assert calls == []
+
+    monkeypatch.setattr(routes.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        routes.subprocess, "run",
+        lambda argv, **kwargs: calls.append(argv) or __import__("types").SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    valid = {**base, "app": "com.apple.calculator"}
+    assert client.post("/v1/jarvis/link/fast-command", headers=headers, json=valid).status_code == 200
+    conflict = client.post(
+        "/v1/jarvis/link/fast-command", headers=headers,
+        json={**valid, "requester_device_id": "b" * 32},
+    )
+    assert conflict.status_code == 409
+    assert len(calls) == 1
+    assert agent.calls == []
+    assert store.pending_approvals(20) == []
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("Now drawing from 'AC Power'\n -InternalBattery-0 (id=123) 83%; charging; 0:43 remaining present: true", (83, True)),
+        ("Now drawing from 'Battery Power'\n -InternalBattery-0 (id=123) 65%; discharging; 2:18 remaining present: true", (65, False)),
+        ("No battery information available.", (None, None)),
+    ],
+)
+def test_pmset_battery_parser_reports_actual_fields(output, expected):
+    from openjarvis.server.supervisor_routes import _parse_pmset_battery
+
+    assert _parse_pmset_battery(output) == expected
+
+
+def test_mac_battery_fast_command_uses_fixed_bounded_provider(link_client, monkeypatch):
+    import types
+    import openjarvis.server.supervisor_routes as routes
+
+    client, store, agent = link_client
+    monkeypatch.setattr(routes.sys, "platform", "darwin")
+    calls = []
+
+    def fake_pmset(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout="Now drawing from 'AC Power'\n -InternalBattery-0 (id=123) 94%; charged; (no estimate) present: true",
+            stderr="",
+        )
+
+    monkeypatch.setattr(routes.subprocess, "run", fake_pmset)
+    response = client.post(
+        "/v1/jarvis/link/fast-command",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json={"command": "mac.battery", "requester_device_id": "a" * 32},
+    )
+    assert response.status_code == 200, response.json()
+    assert response.json() == {
+        "command": "mac.battery", "state": "COMPLETED", "executed": True, "success": True,
+        "battery_percent": 94, "charging": False,
+        "summary": "Mac battery is 94% and is not charging.",
+    }
+    assert calls == [(
+        ["/usr/bin/pmset", "-g", "batt"],
+        {"capture_output": True, "text": True, "timeout": 3, "check": False},
+    )]
+    assert agent.calls == []
+    assert store.pending_approvals(20) == []
+
+
+def test_mac_battery_failure_and_non_mac_do_not_fabricate_status(link_client, monkeypatch):
+    import types
+    import openjarvis.server.supervisor_routes as routes
+
+    client, store, agent = link_client
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    body = {"command": "mac.battery", "requester_device_id": "a" * 32}
+    calls = []
+    monkeypatch.setattr(routes.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        routes.subprocess, "run",
+        lambda argv, **kwargs: calls.append(argv) or types.SimpleNamespace(returncode=1, stdout="", stderr="private provider detail"),
+    )
+    failed = client.post("/v1/jarvis/link/fast-command", headers=headers, json=body)
+    assert failed.status_code == 200
+    assert failed.json()["state"] == "FAILED"
+    assert failed.json()["success"] is False
+    assert failed.json()["battery_percent"] is None
+    assert "private provider detail" not in failed.text
+    assert calls == [["/usr/bin/pmset", "-g", "batt"]]
+
+    monkeypatch.setattr(routes.sys, "platform", "linux")
+    calls.clear()
+    desktop = client.post("/v1/jarvis/link/fast-command", headers=headers, json=body)
+    assert desktop.status_code == 200
+    assert desktop.json()["state"] == "FAILED"
+    assert desktop.json()["success"] is False
+    assert desktop.json()["battery_percent"] is None
+    assert calls == []
+    assert agent.calls == []
+    assert store.pending_approvals(20) == []
+
+
+def test_mac_battery_reports_desktop_without_fabricating_percentage(link_client, monkeypatch):
+    import types
+    import openjarvis.server.supervisor_routes as routes
+
+    client, _, agent = link_client
+    monkeypatch.setattr(routes.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        routes.subprocess, "run",
+        lambda argv, **kwargs: types.SimpleNamespace(returncode=0, stdout="No battery information available.", stderr=""),
+    )
+    response = client.post(
+        "/v1/jarvis/link/fast-command",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json={"command": "mac.battery", "requester_device_id": "a" * 32},
+    )
+    assert response.status_code == 200
+    assert response.json()["state"] == "FAILED"
+    assert response.json()["executed"] is True
+    assert response.json()["success"] is False
+    assert response.json()["battery_percent"] is None
+    assert response.json()["charging"] is None
+    assert "does not report an internal battery" in response.json()["summary"]
     assert agent.calls == []
 
 
@@ -208,9 +496,9 @@ def test_fast_task_status_is_owner_bound_and_does_not_call_agent(link_client):
     )
     headers = {"Authorization": "Bearer link-test-admin-key"}
     allowed = client.post("/v1/jarvis/link/fast-command", headers=headers,
-                          json={"command": "task.status", "requester": "a" * 32, "task_id": task["task_id"]})
+                          json={"command": "task.status", "requester_device_id": "a" * 32, "task_id": task["task_id"]})
     denied = client.post("/v1/jarvis/link/fast-command", headers=headers,
-                         json={"command": "task.status", "requester": "b" * 32, "task_id": task["task_id"]})
+                         json={"command": "task.status", "requester_device_id": "b" * 32, "task_id": task["task_id"]})
     assert allowed.status_code == 200 and allowed.json()["state"] == "CREATED"
     assert denied.status_code == 403
     assert agent.calls == []
@@ -237,7 +525,7 @@ def test_fast_task_status_reports_approval_expiry_without_running_the_operation(
     response = client.post(
         "/v1/jarvis/link/fast-command",
         headers={"Authorization": "Bearer link-test-admin-key"},
-        json={"command": "task.status", "requester": "a" * 32, "task_id": task_id},
+        json={"command": "task.status", "requester_device_id": "a" * 32, "task_id": task_id},
     )
     assert response.status_code == 200
     assert response.json()["state"] == "EXPIRED"
@@ -251,7 +539,7 @@ def test_fast_task_status_reports_approval_expiry_without_running_the_operation(
 def test_fast_calculator_creates_exact_approval_without_invoking_agent(link_client):
     client, store, agent = link_client
     headers = {"Authorization": "Bearer link-test-admin-key"}
-    body = {"command": "app.open", "requester": "c" * 32, "app": "Calculator", "idempotency_key": "d" * 32}
+    body = {"command": "app.open", "requester_device_id": "c" * 32, "app": "Calculator", "idempotency_key": "d" * 32}
     response = client.post("/v1/jarvis/link/fast-command", headers=headers, json=body)
     assert response.status_code == 200, response.json()
     result = response.json()
@@ -272,7 +560,7 @@ def test_fast_calculator_creates_exact_approval_without_invoking_agent(link_clie
 def test_fast_command_rejects_unapproved_app_and_extra_fields(link_client):
     client, _store, agent = link_client
     headers = {"Authorization": "Bearer link-test-admin-key"}
-    base = {"command": "app.open", "requester": "d" * 32, "idempotency_key": "fast-invalid-app-request-0001"}
+    base = {"command": "app.open", "requester_device_id": "d" * 32, "idempotency_key": "f" * 32}
     assert client.post("/v1/jarvis/link/fast-command", headers=headers, json={**base, "app": "Terminal"}).status_code == 422
     assert client.post("/v1/jarvis/link/fast-command", headers=headers, json={**base, "app": "Calculator", "shell": "echo bad"}).status_code == 422
     assert agent.calls == []
@@ -371,6 +659,7 @@ def test_phone_assistant_scope_waits_for_exact_approval_then_continues(link_clie
         "objective": "Open TextEdit, then tell me it is open.",
         "capability_scope": ["assistant"],
         "idempotency_key": "phone-assistant-flow-0001",
+        "requester_device_id": "a" * 32,
     }
     accepted = client.post("/v1/jarvis/link/tasks", headers=headers, json=body)
     assert accepted.status_code == 202
@@ -392,6 +681,7 @@ def test_phone_assistant_scope_waits_for_exact_approval_then_continues(link_clie
         "decision": "approve",
         "task_id": task_id,
         "expected_operation_digest": approval["args_digest"],
+        "requester_device_id": "a" * 32,
         "idempotency_key": "phone-approval-once-0001",
         "continuation_objective": body["objective"],
     }
@@ -403,6 +693,9 @@ def test_phone_assistant_scope_waits_for_exact_approval_then_continues(link_clie
     assert result.status_code == 200
     assert result.json()["status"] == "CONSUMED"
     assert result.json()["executed"] is True
+    assert result.json()["success"] is True
+    assert result.json()["execution_state"] == "COMPLETED"
+    assert result.json()["result_summary"] == "Opened TextEdit."
     assert result.json()["task_state"] == "COMPLETED"
     assert len(dispatched) == 1
     assert dispatched[0][:3] == ("open_app", {"name": "TextEdit"}, "control")
@@ -424,8 +717,95 @@ def test_phone_assistant_scope_waits_for_exact_approval_then_continues(link_clie
     )
     assert replay.status_code == 200
     assert replay.json()["status"] == "CONSUMED"
+    assert replay.json()["execution_state"] == "COMPLETED"
+    assert replay.json()["executed"] is True
+    assert replay.json()["success"] is True
     assert len(dispatched) == 1
     assert len(agent.calls) == 2
+
+
+def test_replayed_consumed_approval_without_terminal_execution_event_is_indeterminate(link_client, monkeypatch):
+    client, store, agent = link_client
+    control_agent = _install_control_agent(client, monkeypatch)
+    dispatched = []
+    monkeypatch.setattr("openjarvis.engine.codex_sdk._call_local_mcp", lambda *args, **kwargs: dispatched.append(args))
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    objective = "Open TextEdit, then report the actual result."
+    accepted = client.post("/v1/jarvis/link/tasks", headers=headers, json={
+        "objective": objective,
+        "capability_scope": ["assistant"],
+        "idempotency_key": "phone-approval-crash-window-01",
+        "requester_device_id": "a" * 32,
+    })
+    assert accepted.status_code == 202
+    task_id = accepted.json()["task_id"]
+    approval = next(item for item in store.pending_approvals(20) if item["task_id"] == task_id)
+    nonce = "phone-approval-crash-window-decision"
+
+    # Simulate a process crash after the one-shot approval is consumed but
+    # before the MCP call's durable terminal event is written.
+    assert store.decide_approval(
+        approval["id"], decision="approve", expected_digest=approval["args_digest"],
+        task_id=task_id, actor="device:" + "a" * 32, nonce=nonce,
+    )
+    assert store.consume_approval(
+        approval["id"], task_id=task_id, operation=approval["operation"],
+        target=approval["target"], arguments=json.loads(approval["arguments_json"]),
+    )
+    assert store.approval(approval["id"])["status"] == "CONSUMED"
+
+    replay = client.post(f"/v1/jarvis/approvals/{approval['id']}/decision", headers=headers, json={
+        "decision": "approve", "task_id": task_id,
+        "expected_operation_digest": approval["args_digest"],
+        "requester_device_id": "a" * 32,
+        "idempotency_key": nonce, "continuation_objective": objective,
+    })
+    assert replay.status_code == 200
+    assert replay.json()["status"] == "CONSUMED"
+    assert replay.json()["execution_state"] == "INDETERMINATE"
+    assert replay.json()["executed"] is False
+    assert replay.json()["success"] is False
+    assert replay.json()["task_state"] == "RUNNING"
+    assert dispatched == []
+    assert len(control_agent.calls) == 1
+
+
+def test_approval_replay_reports_persisted_mcp_failure_without_retry(link_client, monkeypatch):
+    client, store, _ = link_client
+    agent = _install_control_agent(client, monkeypatch)
+    dispatched = []
+
+    def fake_mcp_call(tool, arguments, mode, **authorization):
+        dispatched.append((tool, dict(arguments), mode))
+        return {"content": [{"type": "text", "text": "Activation failed."}], "isError": True}
+
+    monkeypatch.setattr("openjarvis.engine.codex_sdk._call_local_mcp", fake_mcp_call)
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    body = {
+        "objective": "Open TextEdit and tell me whether it opened.",
+        "capability_scope": ["assistant"],
+        "idempotency_key": "phone-approval-failure-0001",
+        "requester_device_id": "a" * 32,
+    }
+    accepted = client.post("/v1/jarvis/link/tasks", headers=headers, json=body)
+    assert accepted.status_code == 202
+    task_id = accepted.json()["task_id"]
+    approval = next(item for item in store.pending_approvals(20) if item["task_id"] == task_id)
+    decision = {
+        "decision": "approve", "task_id": task_id,
+        "expected_operation_digest": approval["args_digest"],
+        "requester_device_id": "a" * 32,
+        "idempotency_key": "phone-approval-failure-decision-0001",
+        "continuation_objective": body["objective"],
+    }
+    first = client.post(f"/v1/jarvis/approvals/{approval['id']}/decision", headers=headers, json=decision)
+    replay = client.post(f"/v1/jarvis/approvals/{approval['id']}/decision", headers=headers, json=decision)
+    assert first.status_code == replay.status_code == 200
+    assert first.json()["execution_state"] == replay.json()["execution_state"] == "FAILED"
+    assert first.json()["success"] is replay.json()["success"] is False
+    assert replay.json()["executed"] is False
+    assert len(dispatched) == 1
+    assert agent.calls == [body["objective"]]
 
 
 def test_phone_assistant_reject_never_dispatches_or_continues(link_client, monkeypatch):
@@ -438,6 +818,7 @@ def test_phone_assistant_reject_never_dispatches_or_continues(link_client, monke
         "objective": "Open TextEdit only if I approve.",
         "capability_scope": ["assistant"],
         "idempotency_key": "phone-assistant-reject-0001",
+        "requester_device_id": "a" * 32,
     }
     accepted = client.post("/v1/jarvis/link/tasks", headers=headers, json=body)
     assert accepted.status_code == 202
@@ -450,6 +831,7 @@ def test_phone_assistant_reject_never_dispatches_or_continues(link_client, monke
             "decision": "reject",
             "task_id": task_id,
             "expected_operation_digest": approval["args_digest"],
+            "requester_device_id": "a" * 32,
             "idempotency_key": "phone-approval-reject-0001",
             "continuation_objective": body["objective"],
         },
@@ -464,6 +846,188 @@ def test_phone_assistant_reject_never_dispatches_or_continues(link_client, monke
     assert len(agent.calls) == 1
 
 
+def test_link_approval_requires_matching_requester_device_before_decision(link_client, monkeypatch):
+    client, store, _ = link_client
+    agent = _install_control_agent(client, monkeypatch)
+    dispatched = []
+    monkeypatch.setattr(
+        "openjarvis.engine.codex_sdk._call_local_mcp",
+        lambda tool, arguments, mode, **kwargs: dispatched.append(tool) or {
+            "content": [{"type": "text", "text": "Opened TextEdit."}], "isError": False,
+        },
+    )
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    objective = "Open TextEdit and report the outcome."
+    task_body = {
+        "objective": objective,
+        "capability_scope": ["assistant"],
+        "idempotency_key": "link-owner-binding-approval-01",
+        "requester_device_id": "a" * 32,
+    }
+    accepted = client.post("/v1/jarvis/link/tasks", headers=headers, json=task_body)
+    assert accepted.status_code == 202
+    task_id = accepted.json()["task_id"]
+    approval = next(item for item in store.pending_approvals(20) if item["task_id"] == task_id)
+    base = {
+        "decision": "approve", "task_id": task_id,
+        "expected_operation_digest": approval["args_digest"],
+        "requester_device_id": "a" * 32,
+        "idempotency_key": "link-owner-binding-decision-01",
+        "continuation_objective": objective,
+    }
+
+    missing = client.post(
+        f"/v1/jarvis/approvals/{approval['id']}/decision", headers=headers,
+        json={key: value for key, value in base.items() if key != "requester_device_id"},
+    )
+    wrong = client.post(
+        f"/v1/jarvis/approvals/{approval['id']}/decision", headers=headers,
+        json={**base, "requester_device_id": "b" * 32},
+    )
+    assert missing.status_code == wrong.status_code == 403
+    assert store.approval(approval["id"])["status"] == "PENDING"
+    assert store.get_task(task_id)["state"] == "WAITING_APPROVAL"
+    assert dispatched == []
+
+    correct = client.post(
+        f"/v1/jarvis/approvals/{approval['id']}/decision", headers=headers,
+        json={**base, "requester_device_id": "a" * 32},
+    )
+    assert correct.status_code == 200, correct.json()
+    assert correct.json()["execution_state"] == "COMPLETED"
+    assert correct.json()["success"] is True
+    assert dispatched == ["open_app"]
+    assert len(agent.calls) == 2
+
+
+def test_expired_link_approval_returns_terminal_expired_without_execution(link_client, monkeypatch):
+    client, store, _ = link_client
+    _install_control_agent(client, monkeypatch)
+    dispatched = []
+    monkeypatch.setattr("openjarvis.engine.codex_sdk._call_local_mcp", lambda *args, **kwargs: dispatched.append(args))
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    objective = "Open TextEdit if the approval is still valid."
+    accepted = client.post("/v1/jarvis/link/tasks", headers=headers, json={
+        "objective": objective,
+        "capability_scope": ["assistant"],
+        "idempotency_key": "expired-link-approval-test-01",
+        "requester_device_id": "a" * 32,
+    })
+    assert accepted.status_code == 202
+    task_id = accepted.json()["task_id"]
+    approval = next(item for item in store.pending_approvals(20) if item["task_id"] == task_id)
+    store._db.execute(
+        "UPDATE operation_approvals SET expires_at=? WHERE id=?",
+        ("2000-01-01T00:00:00+00:00", approval["id"]),
+    )
+    store._db.commit()
+    response = client.post(
+        f"/v1/jarvis/approvals/{approval['id']}/decision",
+        headers=headers,
+        json={
+            "decision": "approve", "task_id": task_id,
+            "expected_operation_digest": approval["args_digest"],
+            "requester_device_id": "a" * 32,
+            "idempotency_key": "expired-link-approval-decision-01",
+            "continuation_objective": objective,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "EXPIRED"
+    assert response.json()["execution_state"] == "EXPIRED"
+    assert response.json()["executed"] is False
+    assert response.json()["success"] is False
+    assert store.approval(approval["id"])["status"] == "EXPIRED"
+    assert store.get_task(task_id)["state"] == "WAITING_APPROVAL"
+    assert dispatched == []
+
+
+def test_approved_operation_without_authorized_executor_fails_durably(link_client, monkeypatch):
+    client, store, _ = link_client
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    link = store.create_link_task(
+        "Run an unsupported Mac action",
+        capability_scope=["assistant"],
+        idempotency_key="unsupported-approved-operation-0001",
+        owner_actor="device:" + "a" * 32,
+    )
+    store.start_link_task(
+        link["task_id"], objective_digest=link["objective_digest"],
+        objective_text_digest=link["objective_digest"], capability_scope=["assistant"],
+        idempotency_key=link["idempotency_key"],
+    )
+    operation = "mcp:jarvis_mac:unknown_tool"
+    arguments = {"name": "not-allowlisted"}
+    approval_id, digest = store.create_approval(
+        link["task_id"], operation, "unknown target", arguments, "Test only.",
+    )
+    store.mark_link_task_waiting_approval(link["task_id"], approval_id)
+    store.decide_approval(
+        approval_id, decision="approve", expected_digest=digest,
+        task_id=link["task_id"], actor="device:" + "a" * 32, nonce="unsupported-tool-decision-01",
+    )
+
+    result = client.post(f"/v1/jarvis/approvals/{approval_id}/decision", headers=headers, json={
+        "decision": "approve", "task_id": link["task_id"],
+        "expected_operation_digest": digest, "requester_device_id": "a" * 32,
+        "idempotency_key": "unsupported-tool-decision-01",
+    })
+    assert result.status_code == 200, result.json()
+    assert result.json()["execution_state"] == "FAILED"
+    assert result.json()["executed"] is False
+    assert result.json()["success"] is False
+    assert result.json()["error_code"] == "NO_AUTHORIZED_DISPATCHER"
+    assert store.approval(approval_id)["status"] == "CONSUMED"
+    assert store.get_task(link["task_id"])["state"] == "FAILED"
+    assert store.link_task_run(link["task_id"])["status"] == "FAILED"
+    replay = client.post(f"/v1/jarvis/approvals/{approval_id}/decision", headers=headers, json={
+        "decision": "approve", "task_id": link["task_id"],
+        "expected_operation_digest": digest, "requester_device_id": "a" * 32,
+        "idempotency_key": "unsupported-tool-decision-01",
+    })
+    assert replay.status_code == 200
+    assert replay.json()["execution_state"] == "FAILED"
+    assert replay.json()["executed"] is False
+
+
+def test_link_event_feed_exposes_terminal_approval_state_without_arguments(link_client):
+    client, store, _ = link_client
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    device_id = "a" * 32
+    objective = "Open TextEdit and report the result."
+    run = store.create_link_task(
+        objective, capability_scope=["assistant"],
+        idempotency_key="approval-event-feed-test-0001", owner_actor="device:" + device_id,
+    )
+    task_id = run["task_id"]
+    store.start_link_task(
+        task_id, objective_digest=run["objective_digest"],
+        objective_text_digest=run["objective_digest"], capability_scope=["assistant"],
+        idempotency_key=run["idempotency_key"],
+    )
+    approval_id, _ = store.create_approval(
+        task_id, "mcp:jarvis_mac:open_app", "TextEdit", {"name": "TextEdit"}, "Open the app.",
+    )
+    store.mark_link_task_waiting_approval(task_id, approval_id)
+    store.record_event(task_id, "approval.execution_failed", {
+        "approval_id": approval_id, "operation": "mcp:jarvis_mac:open_app",
+        "error_code": "APPROVED_OPERATION_FAILED", "success": False,
+        "private_arguments": {"name": "TextEdit"},
+    })
+    response = client.get(
+        f"/v1/jarvis/link/tasks/{run['idempotency_key']}/events?after_seq=0",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    event = next(row for row in response.json()["events"] if row["event_type"] == "approval.execution_failed")
+    assert event["payload"] == {
+        "approval_id": approval_id,
+        "operation": "mcp:jarvis_mac:open_app",
+        "error_code": "APPROVED_OPERATION_FAILED",
+        "success": False,
+    }
+
+
 def test_phone_can_cancel_pending_approval_and_revoke_it(link_client, monkeypatch):
     client, store, _ = link_client
     agent = _install_control_agent(client, monkeypatch)
@@ -474,6 +1038,7 @@ def test_phone_can_cancel_pending_approval_and_revoke_it(link_client, monkeypatc
         "objective": "Open TextEdit, then report the result.",
         "capability_scope": ["assistant"],
         "idempotency_key": "phone-assistant-cancel-0001",
+        "requester_device_id": "a" * 32,
     }
     accepted = client.post("/v1/jarvis/link/tasks", headers=headers, json=body)
     assert accepted.status_code == 202
@@ -500,6 +1065,7 @@ def test_phone_can_cancel_pending_approval_and_revoke_it(link_client, monkeypatc
             "decision": "approve",
             "task_id": task_id,
             "expected_operation_digest": approval["args_digest"],
+            "requester_device_id": "a" * 32,
             "idempotency_key": "phone-cancelled-approval-replay-01",
         },
     )
@@ -529,6 +1095,7 @@ def test_link_task_owner_is_bound_to_paired_device(link_client):
         "objective": "A device-bound task",
         "capability_scope": ["read_only"],
         "idempotency_key": "device-owned-link-task-01",
+        "requester_device_id": device_a,
     }
     created = client.post("/v1/jarvis/link/tasks", headers={"Authorization": f"Bearer {token_a}"}, json=body)
     assert created.status_code == 200
