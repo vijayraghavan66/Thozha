@@ -90,6 +90,87 @@ fun main() {
     check(!ApprovalPresentation.card(approval("ODD", 60_000), now) { "x" }!!.canDecide, "unknown approval status is not decidable")
     check(ApprovalPresentation.card(mapOf("operation" to "x"), now) { "x" } == null, "an approval without an id is ignored")
 
+    // --- approve -> supervisor -> execution: transport receipt is never treated as authorization -----------------
+    val queuedDecision = ApprovalDecisionPresentation.submitted(
+        approvalId = "ap1", taskId = "task1", decision = "approve", queuedOffline = true,
+        messageId = "msg1", nowUnixMs = now, operation = "open_app", target = "Calculator",
+    )!!
+    check(queuedDecision.phase == ApprovalDecisionPhase.QUEUED, "offline approval decision stays queued")
+    check(ApprovalDecisionPresentation.label(queuedDecision).contains("not confirmed"), "queued decision is not called approved")
+    check(ApprovalDecisionPresentation.blocksAnotherTap(queuedDecision), "queued decision prevents a duplicate tap")
+    val interrupted = ApprovalDecisionPresentation.submitting(
+        approvalId = "ap2", taskId = "task2", decision = "approve", operation = "open_app", target = "Calculator", nowUnixMs = now,
+    )!!
+    val afterRestart = ApprovalDecisionPresentation.afterRestart(interrupted)
+    check(afterRestart.phase == ApprovalDecisionPhase.UNKNOWN, "process restart during send is reconciled as uncertain")
+    check(ApprovalDecisionPresentation.blocksAnotherTap(afterRestart), "uncertain decision is not blindly replayed")
+    val restoredQueued = ApprovalDecisionPresentation.fromRuntimeState(null, mapOf(
+        "approval_id" to "ap3", "task_id" to "task3", "decision" to "approve", "state" to "QUEUED",
+    ), now + 1)
+    check(restoredQueued?.phase == ApprovalDecisionPhase.QUEUED, "durable runtime restores queued decision after app restart")
+    val restoredDelivered = ApprovalDecisionPresentation.fromRuntimeState(restoredQueued, mapOf(
+        "approval_id" to "ap3", "task_id" to "task3", "decision" to "approve",
+        "state" to "DELIVERED_WAITING_SUPERVISOR", "authoritative" to false,
+    ), now + 2)
+    check(restoredDelivered?.phase == ApprovalDecisionPhase.DELIVERED, "delivery recovery still waits for supervisor authority")
+    val relayAccepted = ApprovalDecisionPresentation.submitted(
+        approvalId = "ap1", taskId = "task1", decision = "approve", queuedOffline = false,
+        messageId = "msg2", nowUnixMs = now,
+    )!!
+    check(relayAccepted.phase == ApprovalDecisionPhase.DELIVERED, "relay receipt is distinct from supervisor acknowledgement")
+    check(ApprovalDecisionPresentation.label(relayAccepted).contains("Waiting for the Mac supervisor"), "relay receipt does not claim execution")
+    check(ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "other", "task_id" to "task1",
+        "decision" to "approve", "status" to "APPROVED", "execution_state" to "COMPLETED",
+        "executed" to true, "success" to true,
+    ), now + 1) == null, "mismatched approval result cannot advance this card")
+    val approved = ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
+        "decision" to "approve", "status" to "APPROVED", "execution_state" to "EXECUTION_PENDING",
+        "executed" to false, "success" to false,
+    ), now + 2)!!
+    check(approved.phase == ApprovalDecisionPhase.APPROVED, "supervisor approval is shown as pending execution")
+    check(ApprovalDecisionPresentation.taskState(approved, "RUNNING", now + 3)?.phase == ApprovalDecisionPhase.EXECUTING, "fresh Mac task state shows execution")
+    check(ApprovalDecisionPresentation.taskState(approved, "COMPLETED", now + 4)?.phase == ApprovalDecisionPhase.COMPLETED, "terminal Mac task state completes an approved operation")
+    val completed = ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
+        "decision" to "approve", "status" to "APPROVED", "execution_state" to "COMPLETED",
+        "executed" to true, "success" to true,
+    ), now + 5)!!
+    check(completed.phase == ApprovalDecisionPhase.COMPLETED, "only executed, persisted success can show completed")
+    check(ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
+        "decision" to "approve", "status" to "APPROVED", "execution_state" to "COMPLETED",
+        "executed" to true, "success" to true, "simulated" to true,
+    ), now + 5)?.phase == ApprovalDecisionPhase.INDETERMINATE, "simulated completion never becomes physical success")
+    check(ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
+        "decision" to "approve", "status" to "APPROVED", "execution_state" to "COMPLETED",
+        "executed" to false, "success" to true,
+    ), now + 6)?.phase == ApprovalDecisionPhase.INDETERMINATE, "success without execution evidence fails closed")
+    check(ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
+        "decision" to "approve", "status" to "APPROVED", "execution_state" to "INDETERMINATE",
+        "executed" to false, "success" to false,
+    ), now + 7)?.phase == ApprovalDecisionPhase.INDETERMINATE, "consumed approval without terminal evidence is not replayed")
+    check(ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
+        "decision" to "approve", "status" to "APPROVED", "execution_state" to "FAILED",
+        "executed" to true, "success" to false,
+    ), now + 8)?.phase == ApprovalDecisionPhase.FAILED, "execution failure is not presented as approval success")
+    check(ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
+        "decision" to "approve", "status" to "REJECTED", "execution_state" to "REJECTED",
+        "executed" to false, "success" to false,
+    ), now + 9)?.phase == ApprovalDecisionPhase.REJECTED, "rejection is explicit and not execution")
+    check(ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
+        "decision" to "approve", "status" to "EXPIRED", "execution_state" to "EXPIRED",
+        "executed" to false, "success" to false,
+    ), now + 10)?.phase == ApprovalDecisionPhase.EXPIRED, "expiration is explicit")
+    check(!ApprovalDecisionPresentation.blocksAnotherTap(null), "fresh pending approval remains decidable")
+    check(ApprovalDecisionPresentation.blocksAnotherTap(completed), "terminal approval cannot be decided again")
+
     // --- connection: three separate facts, no false "Mac unavailable" ---------------------------------------------
     val connected = ConnectionPresentation.summary(TransportState.CONNECTED, now - 60_000, AiEvidence.ANSWERED, now) { "$it ms ago" }
     check(connected.headline == "Connected", "connected with an answer reads Connected")

@@ -6,6 +6,9 @@ import android.os.Looper
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.jarvis.companion.presentation.ApprovalDecisionPhase
+import com.jarvis.companion.presentation.ApprovalDecisionPresentation
+import com.jarvis.companion.presentation.ApprovalDecisionStatus
 import com.jarvis.companion.link.LinkBackgroundSync
 import com.jarvis.companion.link.LinkService
 import com.jarvis.companion.link.LinkSettings
@@ -25,6 +28,8 @@ import com.jarvis.link.LinkStatus
 import com.jarvis.link.RelayHttpException
 import com.jarvis.link.SafeCapability
 import com.jarvis.link.TaskSubmission
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.UUID
 
 enum class Tab(val label: String) { HOME("Home"), ACTIVITY("Activity"), APPROVALS("Approvals"), LIVE("Live") }
@@ -46,12 +51,15 @@ class JarvisStore(private val app: Context) {
     private val sessions = ChatSessions(app)
     private val localHistory = LocalAiConversationHistory(app)
     private val localAi = LocalAiManager.get(app)
+    private val approvalDecisionPrefs = app.getSharedPreferences("jarvis_approval_decisions", Context.MODE_PRIVATE)
     private var destroyed = false
 
     var tab by mutableStateOf(Tab.HOME)
     var overlay by mutableStateOf<Overlay?>(null)
     var entries by mutableStateOf<List<Map<String, Any>>>(emptyList())
     var approvals by mutableStateOf<List<ApprovalReview>>(emptyList())
+    /** Persisted UI reconciliation only; supervisor remains authoritative for every decision and action. */
+    var approvalDecisions by mutableStateOf(loadApprovalDecisions())
     var linkStatus by mutableStateOf<LinkStatus?>(null)
     var lastSyncMs by mutableStateOf(0L)
     var lastSyncError by mutableStateOf("")
@@ -62,7 +70,10 @@ class JarvisStore(private val app: Context) {
     var submitting by mutableStateOf(false)
     var syncing by mutableStateOf(false)
     var decisionInFlight by mutableStateOf(false)
-    var decisionNote by mutableStateOf("")
+    var decisionNote by mutableStateOf(
+        approvalDecisions.values.maxByOrNull { it.updatedAtUnixMs }?.let(ApprovalDecisionPresentation::label).orEmpty(),
+    )
+    private var currentDecisionApprovalId: String? = null
     var notice by mutableStateOf("")
     var now by mutableStateOf(System.currentTimeMillis())
     /** Set by the host activity; asks Android for one runtime permission, on the user's tap only. */
@@ -167,6 +178,11 @@ class JarvisStore(private val app: Context) {
         val runtime = LinkService.runtime(app)
         val conversation = runtime.conversation()
         val pending = runtime.pendingApprovals()
+        val recentUpdates = runtime.recentUpdates()
+        val decisionIds = (approvalDecisions.keys + pending.map { it.approvalId }).distinct()
+        val runtimeDecisionStates = decisionIds.mapNotNull { id ->
+            runtime.approvalDecisionState(id)?.let { id to it }
+        }.toMap()
         val status = runtime.status()
         val (syncAt, syncError) = runtime.lastSync()
         val snapshot = TelegramSession.controller?.snapshot()
@@ -174,6 +190,8 @@ class JarvisStore(private val app: Context) {
             entries = mergeEntries(conversation, localHistory.all())
             localAiSnapshot = localAi.status()
             approvals = pending
+            reconcileRuntimeDecisionStates(pending, runtimeDecisionStates)
+            reconcileApprovalDecisions(recentUpdates)
             linkStatus = status
             lastSyncMs = syncAt
             lastSyncError = syncError
@@ -394,28 +412,156 @@ class JarvisStore(private val app: Context) {
     /** Sends one approve or reject for an exact pending request. The phone and the Mac both check digest and expiry. */
     fun decide(review: ApprovalReview, decision: String) = ui {
         if (decisionInFlight || decision !in setOf("approve", "reject")) return@ui
+        val current = approvals.firstOrNull { it.approvalId == review.approvalId }
+        if (current == null || current.expiresAtUnixMs <= now) {
+            decisionNote = "This approval is no longer pending. Sync with the Mac before taking another action."
+            syncNow()
+            return@ui
+        }
+        if (ApprovalDecisionPresentation.blocksAnotherTap(approvalDecisions[review.approvalId])) {
+            decisionNote = ApprovalDecisionPresentation.label(approvalDecisions.getValue(review.approvalId))
+            return@ui
+        }
+        val submitting = ApprovalDecisionPresentation.submitting(
+            approvalId = current.approvalId,
+            taskId = current.taskId,
+            decision = decision,
+            operation = current.operation,
+            target = current.target,
+            nowUnixMs = now,
+        ) ?: return@ui
+        saveApprovalDecision(submitting)
         decisionInFlight = true
-        decisionNote = if (decision == "approve") "Sending your one-time approval to the Mac…" else "Sending your rejection…"
+        currentDecisionApprovalId = review.approvalId
+        decisionNote = ApprovalDecisionPresentation.label(submitting)
         background {
             val outcome = runCatching { LinkService.runtime(app).decideApproval(LinkSettings(app).relayUrl, review.approvalId, decision) }
             ui {
                 decisionInFlight = false
-                decisionNote = outcome.fold(
-                    onSuccess = {
-                        if (decision == "approve") {
-                            "Approved once. The Mac has your decision; its result appears in Activity when it reports back."
-                        } else {
-                            "Rejected. The Mac will not run this operation."
-                        }
+                currentDecisionApprovalId = null
+                val previous = approvalDecisions[review.approvalId] ?: submitting
+                val updated = outcome.fold(
+                    onSuccess = { result ->
+                        val queued = result["queued_offline"] == true
+                        ApprovalDecisionPresentation.submitted(
+                            approvalId = review.approvalId,
+                            taskId = review.taskId,
+                            decision = decision,
+                            queuedOffline = queued,
+                            messageId = result["message_id"] as? String ?: "",
+                            nowUnixMs = now,
+                            operation = current.operation,
+                            target = current.target,
+                        ) ?: previous.copy(phase = ApprovalDecisionPhase.UNKNOWN, updatedAtUnixMs = now)
                     },
-                    onFailure = {
-                        "The decision was not sent. The approval may have expired or been decided already. Check Activity."
+                    onFailure = { failure ->
+                        // A lost response is ambiguous: never claim the Mac did not receive or run the decision.
+                        val phase = if (failure is RelayHttpException) ApprovalDecisionPhase.DELIVERY_FAILED else ApprovalDecisionPhase.UNKNOWN
+                        previous.copy(phase = phase, updatedAtUnixMs = now)
                     },
                 )
+                saveApprovalDecision(updated)
+                decisionNote = ApprovalDecisionPresentation.label(updated)
             }
             refreshLocal()
             syncNow()
         }
+    }
+
+    fun approvalDecisionStatus(approvalId: String): ApprovalDecisionStatus? = approvalDecisions[approvalId]
+
+    fun refreshApprovalDecisionStatus() = syncNow()
+
+    private fun reconcileRuntimeDecisionStates(
+        pending: List<ApprovalReview>,
+        runtimeStates: Map<String, Map<String, Any>>,
+    ) {
+        var next = approvalDecisions
+        for ((approvalId, raw) in runtimeStates) {
+            val status = ApprovalDecisionPresentation.fromRuntimeState(
+                previous = next[approvalId],
+                runtime = raw,
+                nowUnixMs = now,
+                operation = pending.firstOrNull { it.approvalId == approvalId }?.operation.orEmpty(),
+                target = pending.firstOrNull { it.approvalId == approvalId }?.target.orEmpty(),
+                allowSubmitting = currentDecisionApprovalId == approvalId,
+            ) ?: continue
+            next = next + (approvalId to status)
+        }
+        if (next != approvalDecisions) {
+            approvalDecisions = next
+            persistApprovalDecisions(next)
+            decisionNote = next.values.maxByOrNull { it.updatedAtUnixMs }?.let(ApprovalDecisionPresentation::label).orEmpty()
+        }
+    }
+
+    private fun loadApprovalDecisions(): Map<String, ApprovalDecisionStatus> = runCatching {
+        val array = JSONArray(approvalDecisionPrefs.getString("records", "[]"))
+        buildMap {
+            for (index in 0 until array.length()) {
+                val value = array.optJSONObject(index) ?: continue
+                val id = value.optString("approval_id").takeIf { it.isNotBlank() } ?: continue
+                val storedPhase = runCatching { ApprovalDecisionPhase.valueOf(value.optString("phase")) }.getOrNull() ?: continue
+                val status = ApprovalDecisionStatus(
+                    approvalId = id,
+                    taskId = value.optString("task_id"),
+                    decision = value.optString("decision"),
+                    phase = storedPhase,
+                    updatedAtUnixMs = value.optLong("updated_at_unix_ms"),
+                    messageId = value.optString("message_id"),
+                )
+                put(id, ApprovalDecisionPresentation.afterRestart(status))
+            }
+        }
+    }.getOrDefault(emptyMap())
+
+    private fun saveApprovalDecision(status: ApprovalDecisionStatus) {
+        val bounded = (approvalDecisions + (status.approvalId to status)).values
+            .sortedBy { it.updatedAtUnixMs }
+            .takeLast(20)
+            .associateBy { it.approvalId }
+        approvalDecisions = bounded
+        persistApprovalDecisions(bounded)
+    }
+
+    /** Reduce authenticated supervisor decision results and task states into a durable, honest UI snapshot. */
+    private fun reconcileApprovalDecisions(recentUpdates: List<Map<String, Any>>) {
+        var next = approvalDecisions
+        for (update in recentUpdates) {
+            val decisionResult = update["approval_decision_result"] as? Map<*, *>
+            if (decisionResult != null) {
+                val typed = decisionResult.entries.mapNotNull { (key, value) ->
+                    (key as? String)?.let { it to value }
+                }.toMap()
+                val id = typed["approval_id"] as? String ?: continue
+                val previous = next[id] ?: continue
+                ApprovalDecisionPresentation.authoritative(previous, typed, now)?.let { next = next + (id to it) }
+                continue
+            }
+            val taskId = update["task_id"] as? String ?: continue
+            val state = update["state"] as? String ?: continue
+            next.values.filter { it.taskId == taskId }.forEach { previous ->
+                ApprovalDecisionPresentation.taskState(previous, state, now)?.let { next = next + (it.approvalId to it) }
+            }
+        }
+        if (next != approvalDecisions) {
+            approvalDecisions = next
+            persistApprovalDecisions(next)
+            decisionNote = next.values.maxByOrNull { it.updatedAtUnixMs }?.let(ApprovalDecisionPresentation::label).orEmpty()
+        }
+    }
+
+    private fun persistApprovalDecisions(records: Map<String, ApprovalDecisionStatus>) {
+        val array = JSONArray()
+        records.values.sortedBy { it.updatedAtUnixMs }.takeLast(20).forEach { item ->
+            array.put(JSONObject()
+                .put("approval_id", item.approvalId)
+                .put("task_id", item.taskId)
+                .put("decision", item.decision)
+                .put("phase", item.phase.name)
+                .put("updated_at_unix_ms", item.updatedAtUnixMs))
+        }
+        approvalDecisionPrefs.edit().putString("records", array.toString()).apply()
     }
 
     fun newChat() = ui {

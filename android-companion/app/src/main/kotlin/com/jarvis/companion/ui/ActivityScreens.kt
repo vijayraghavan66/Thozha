@@ -34,6 +34,8 @@ import androidx.compose.foundation.layout.size
 import com.jarvis.companion.presentation.TaskTone
 import com.jarvis.companion.presentation.TimelinePresentation
 import com.jarvis.companion.presentation.TimelineRow
+import com.jarvis.companion.presentation.ApprovalDecisionPresentation
+import com.jarvis.companion.presentation.ApprovalDecisionStatus
 import com.jarvis.link.ApprovalReview
 import com.jarvis.link.DevelopmentPlanReview
 
@@ -134,13 +136,7 @@ fun ApprovalsScreen(store: JarvisStore) {
 private fun ApprovalList(store: JarvisStore, onSelect: (ApprovalReview) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         ScreenHeader("Approvals", "Exact operations the Mac is waiting on. Nothing runs until you approve it once.")
-        if (store.decisionNote.isNotBlank()) {
-            SurfaceCard(Modifier.padding(horizontal = JarvisSpace.Page)) {
-                BasicText(store.decisionNote, style = JarvisType.Caption.copy(color = JarvisColor.Text))
-            }
-            Spacer(Modifier.height(10.dp))
-        }
-        if (store.approvals.isEmpty()) {
+        if (store.approvals.isEmpty() && store.approvalDecisions.isEmpty()) {
             EmptyNote(
                 "Nothing waiting",
                 "When the Mac needs your approval for an exact operation, it appears here until you decide or it expires.",
@@ -151,6 +147,13 @@ private fun ApprovalList(store: JarvisStore, onSelect: (ApprovalReview) -> Unit)
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JarvisSpace.Page, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                if (store.approvalDecisions.isNotEmpty()) {
+                    item(key = "decision-history-heading") { SectionLabel("Decision status") }
+                    items(store.approvalDecisions.values.sortedByDescending { it.updatedAtUnixMs }, key = { "decision-${it.approvalId}" }) { status ->
+                        ApprovalDecisionCard(status, store)
+                    }
+                }
+                if (store.approvals.isNotEmpty()) item(key = "pending-approvals-heading") { SectionLabel("Waiting for you") }
                 items(store.approvals, key = { it.approvalId }) { review ->
                     SurfaceCard(onClick = { onSelect(review) }) {
                         Column {
@@ -168,8 +171,37 @@ private fun ApprovalList(store: JarvisStore, onSelect: (ApprovalReview) -> Unit)
 }
 
 @Composable
+private fun ApprovalDecisionCard(status: ApprovalDecisionStatus, store: JarvisStore) {
+    SurfaceCard {
+        Column {
+            BasicText(status.operation.ifBlank { "Approval decision" }, style = JarvisType.Section.copy(color = JarvisColor.Text), maxLines = 2)
+            if (status.target.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                BasicText(status.target, style = JarvisType.Caption.copy(color = JarvisColor.TextMuted), maxLines = 2)
+            }
+            Spacer(Modifier.height(8.dp))
+            BasicText(ApprovalDecisionPresentation.label(status), style = JarvisType.Body.copy(color = JarvisColor.Text))
+            Spacer(Modifier.height(4.dp))
+            BasicText("Task ${status.taskId.take(8)}", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+            if (status.phase !in setOf(
+                    com.jarvis.companion.presentation.ApprovalDecisionPhase.COMPLETED,
+                    com.jarvis.companion.presentation.ApprovalDecisionPhase.REJECTED,
+                    com.jarvis.companion.presentation.ApprovalDecisionPhase.EXPIRED,
+                    com.jarvis.companion.presentation.ApprovalDecisionPhase.CANCELLED,
+                    com.jarvis.companion.presentation.ApprovalDecisionPhase.FAILED,
+                )) {
+                Spacer(Modifier.height(8.dp))
+                TextAction("Check status", filled = false) { store.refreshApprovalDecisionStatus() }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ApprovalDetail(store: JarvisStore, review: ApprovalReview, onBack: () -> Unit) {
     val expired = review.expiresAtUnixMs <= store.now
+    val decisionStatus = store.approvalDecisionStatus(review.approvalId)
+    val decisionBlocksTap = ApprovalDecisionPresentation.blocksAnotherTap(decisionStatus)
     Column(Modifier.fillMaxSize().padding(horizontal = JarvisSpace.Page)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconAction(JarvisIcons.Back, "Back to approvals", onClick = onBack)
@@ -197,8 +229,21 @@ private fun ApprovalDetail(store: JarvisStore, review: ApprovalReview, onBack: (
                 style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
             )
         }
+        if (decisionStatus != null) {
+            SurfaceCard {
+                Column {
+                    BasicText(ApprovalDecisionPresentation.label(decisionStatus), style = JarvisType.Section.copy(color = JarvisColor.Text))
+                    Spacer(Modifier.height(8.dp))
+                    TextAction("Check status", filled = false) { store.refreshApprovalDecisionStatus() }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
         if (expired) {
             BasicText("This approval expired. The Mac will not run it.", style = JarvisType.Section.copy(color = JarvisColor.Failed))
+            Spacer(Modifier.height(16.dp))
+        } else if (decisionBlocksTap) {
+            BasicText("This approval decision has already been submitted. Wait for the Mac's authoritative result; do not send it again.", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
             Spacer(Modifier.height(16.dp))
         } else {
             if (store.decisionInFlight) {
