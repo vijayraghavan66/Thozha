@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicText
@@ -33,6 +35,7 @@ import com.jarvis.companion.presentation.TaskTone
 import com.jarvis.companion.presentation.TimelinePresentation
 import com.jarvis.companion.presentation.TimelineRow
 import com.jarvis.link.ApprovalReview
+import com.jarvis.link.DevelopmentPlanReview
 
 @Composable
 fun ScreenHeader(title: String, subtitle: String) {
@@ -173,11 +176,17 @@ private fun ApprovalDetail(store: JarvisStore, review: ApprovalReview, onBack: (
             BasicText("Approval", style = JarvisType.Section.copy(color = JarvisColor.Text))
         }
         Spacer(Modifier.height(12.dp))
-        Column(Modifier.fillMaxWidth().weight(1f, fill = true)) {
+        Column(Modifier.fillMaxWidth().weight(1f, fill = true).verticalScroll(rememberScrollState())) {
             DetailField("Operation", review.operation)
             DetailField("Target", review.target)
-            DetailField("Arguments (redacted by the Mac)", review.redactedSummary.ifBlank { "None reported" })
-            DetailField("Digest", review.canonicalArgumentsDigest)
+            val plan = review.developmentPlan
+            if (plan == null) {
+                DetailField("Arguments (redacted by the Mac)", review.redactedSummary.ifBlank { "None reported" })
+            } else {
+                DetailField("Reason", review.redactedSummary.ifBlank { "Review the complete plan below." })
+                DevelopmentPlanDetails(plan)
+            }
+            DetailField("Supervisor operation digest", review.canonicalArgumentsDigest)
             DetailField(
                 "Expires",
                 "${expiryClock(review.expiresAtUnixMs)} · ${remainingLabel(review.expiresAtUnixMs, store.now)}",
@@ -210,6 +219,31 @@ private fun ApprovalDetail(store: JarvisStore, review: ApprovalReview, onBack: (
             Spacer(Modifier.height(24.dp))
         }
     }
+}
+
+@Composable
+private fun DevelopmentPlanDetails(plan: DevelopmentPlanReview) {
+    SectionLabel("Complete approved scope")
+    Spacer(Modifier.height(4.dp))
+    DetailField("Plan ID", plan.planId)
+    DetailField("Workspace", plan.workspaceRoot)
+    DetailField("Paired device", plan.deviceId)
+    DetailField("User binding", plan.userId)
+    DetailField("Permitted operations", plan.allowedOps.joinToString("\n"))
+    DetailField("Permitted paths", if (plan.allowedPaths.isEmpty() || "" in plan.allowedPaths) "Entire workspace" else plan.allowedPaths.joinToString("\n"))
+    DetailField("Maximum file size", "${plan.maxFileBytes} bytes")
+    DetailField("Maximum total write bytes", "${plan.maxTotalBytes} bytes")
+    DetailField("Write count", plan.maxWrites.toString())
+    DetailField("Test runs", plan.maxTestRuns.toString())
+    DetailField("Repair attempts", plan.maxRepairs.toString())
+    DetailField("Maximum task duration", "${plan.maxDurationSeconds} seconds")
+    DetailField("Capability lifetime", "${plan.ttlSeconds} seconds")
+    DetailField("Plan digest", plan.planDigest)
+    BasicText(
+        "Approval authorizes only these operations and paths within these limits. Codex shell and independent sandbox approvals remain separate.",
+        style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
+    )
+    Spacer(Modifier.height(16.dp))
 }
 
 @Composable
