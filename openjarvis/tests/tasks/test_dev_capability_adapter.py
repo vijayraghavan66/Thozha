@@ -133,6 +133,14 @@ def test_one_task_cannot_replace_its_plan_or_select_another_approval(world):
     assert world["supervisor"].approval(first.approval_id)["status"] == "PENDING"
 
 
+def test_plan_too_large_for_complete_review_is_refused_before_creating_approval(world):
+    adapter = world["adapter"]
+    too_many_paths = {**PLAN, "allowed_paths": [f"src/dir{index}" for index in range(25)]}
+    with pytest.raises(CapabilityError, match="path list"):
+        adapter.request_plan_approval(too_many_paths, reason="This must fail before approval.")
+    assert world["supervisor"].pending_approvals() == []
+
+
 def test_orphaned_exact_pending_plan_approval_is_recovered_without_duplicate(world):
     task = world["supervisor"].get_task(world["task_id"])
     assert json.loads(task["recovery_json"])["owner_actor"] == ACTOR

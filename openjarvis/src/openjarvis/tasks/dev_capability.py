@@ -43,6 +43,8 @@ MAX_TEST_RUNS_HARD = 50
 MAX_REPAIRS_HARD = 5
 MAX_ARTIFACTS_HARD = 2000
 MAX_DURATION_HARD_S = 4 * 60 * 60
+MAX_ALLOWED_PATHS_HARD = 24
+MAX_CANONICAL_PLAN_BYTES = 16 * 1024
 _PLAN_ID = re.compile(r"[A-Za-z0-9_.-]{8,80}")
 _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,120}")
 _DEVICE_ID = re.compile(r"[0-9a-f]{32}")
@@ -110,8 +112,13 @@ class CapabilitySpec:
             raise CapabilityError("INVALID_SPEC", "repair budget out of range")
         if not (1 <= self.max_duration_s <= MAX_DURATION_HARD_S and 1 <= self.ttl_s <= MAX_DURATION_HARD_S):
             raise CapabilityError("INVALID_SPEC", "time bounds out of range")
+        if len(self.allowed_paths) > MAX_ALLOWED_PATHS_HARD:
+            raise CapabilityError("INVALID_SPEC", "approved path list exceeds the displayable plan limit")
         for prefix in self.allowed_paths:
             _check_relative(prefix, allow_empty=True)
+        canonical_plan = json.dumps(_spec_fields(self), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        if len(canonical_plan.encode("utf-8")) > MAX_CANONICAL_PLAN_BYTES:
+            raise CapabilityError("INVALID_SPEC", "canonical plan is too large to display and verify")
 
 
 def _check_relative(rel: str, allow_empty: bool = False) -> list[str]:
@@ -897,10 +904,12 @@ def build_spec(*, plan: dict[str, Any], device_id: str, user_id: str, workspace_
         "max_writes": plan["max_writes"], "max_test_runs": plan["max_test_runs"],
         "max_repairs": plan["max_repairs"], "max_duration_s": max_duration_s, "ttl_s": ttl_s,
     }
-    return CapabilitySpec(
+    spec = CapabilitySpec(
         plan_id=plan["plan_id"], device_id=device_id, user_id=user_id, workspace_root=fields["workspace_root"],
         allowed_ops=frozenset(plan["allowed_ops"]), allowed_paths=tuple(plan["allowed_paths"]),
         max_file_bytes=plan["max_file_bytes"], max_total_bytes=plan["max_total_bytes"],
         max_writes=plan["max_writes"], max_test_runs=plan["max_test_runs"], max_repairs=plan["max_repairs"],
         max_duration_s=max_duration_s, ttl_s=ttl_s, plan_digest=digest_plan(fields),
     )
+    spec.validate_bounds()
+    return spec
