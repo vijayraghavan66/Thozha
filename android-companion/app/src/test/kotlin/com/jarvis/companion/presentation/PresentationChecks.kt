@@ -98,6 +98,10 @@ fun main() {
     check(queuedDecision.phase == ApprovalDecisionPhase.QUEUED, "offline approval decision stays queued")
     check(ApprovalDecisionPresentation.label(queuedDecision).contains("not confirmed"), "queued decision is not called approved")
     check(ApprovalDecisionPresentation.blocksAnotherTap(queuedDecision), "queued decision prevents a duplicate tap")
+    val deliveryFailed = queuedDecision.copy(phase = ApprovalDecisionPhase.DELIVERY_FAILED)
+    check(ApprovalDecisionPresentation.canExplicitlyRetry(deliveryFailed, "approve"), "a permanent delivery refusal permits only an explicit same-decision retry")
+    check(!ApprovalDecisionPresentation.canExplicitlyRetry(deliveryFailed, "reject"), "a failed approval cannot be silently changed into a rejection")
+    check(ApprovalDecisionPresentation.blocksAnotherTap(deliveryFailed), "ordinary duplicate taps remain blocked after a delivery failure")
     val interrupted = ApprovalDecisionPresentation.submitting(
         approvalId = "ap2", taskId = "task2", decision = "approve", operation = "open_app", target = "Calculator", nowUnixMs = now,
     )!!

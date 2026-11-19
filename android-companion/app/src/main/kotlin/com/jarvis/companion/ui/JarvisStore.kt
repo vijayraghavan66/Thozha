@@ -423,7 +423,9 @@ class JarvisStore(private val app: Context) {
             syncNow()
             return@ui
         }
-        if (ApprovalDecisionPresentation.blocksAnotherTap(approvalDecisions[review.approvalId])) {
+        val priorDecision = approvalDecisions[review.approvalId]
+        val isExplicitRetry = ApprovalDecisionPresentation.canExplicitlyRetry(priorDecision, decision)
+        if (ApprovalDecisionPresentation.blocksAnotherTap(priorDecision) && !isExplicitRetry) {
             decisionNote = ApprovalDecisionPresentation.label(approvalDecisions.getValue(review.approvalId))
             return@ui
         }

@@ -185,7 +185,7 @@ object ApprovalDecisionPresentation {
         ApprovalDecisionPhase.REJECTED -> "Rejected by the Mac. The operation was not run."
         ApprovalDecisionPhase.EXPIRED -> "Approval expired. The operation was not authorized."
         ApprovalDecisionPhase.CANCELLED -> "Operation was cancelled."
-        ApprovalDecisionPhase.DELIVERY_FAILED -> "The relay refused the decision. The Mac has not authorized the operation; sync with the Mac before acting again."
+        ApprovalDecisionPhase.DELIVERY_FAILED -> "The relay refused this decision; the supervisor has not confirmed it. Retry only this same decision after checking the connection."
         ApprovalDecisionPhase.FAILED -> "The approved operation failed on the Mac."
         ApprovalDecisionPhase.INDETERMINATE -> "The decision was consumed, but execution outcome is unconfirmed. Check task status before retrying."
         ApprovalDecisionPhase.UNKNOWN -> "The Mac returned an unrecognized decision state. Check task status before acting."
@@ -206,4 +206,8 @@ object ApprovalDecisionPresentation {
         ApprovalDecisionPhase.INDETERMINATE,
         ApprovalDecisionPhase.UNKNOWN,
     )
+
+    /** A permanent relay refusal can be retried explicitly with the same decision/idempotency key. */
+    fun canExplicitlyRetry(status: ApprovalDecisionStatus?, decision: String): Boolean =
+        status?.phase == ApprovalDecisionPhase.DELIVERY_FAILED && status.decision == decision
 }

@@ -242,6 +242,21 @@ private fun ApprovalDetail(store: JarvisStore, review: ApprovalReview, onBack: (
         if (expired) {
             BasicText("This approval expired. The Mac will not run it.", style = JarvisType.Section.copy(color = JarvisColor.Failed))
             Spacer(Modifier.height(16.dp))
+        } else if (decisionStatus?.phase == com.jarvis.companion.presentation.ApprovalDecisionPhase.DELIVERY_FAILED) {
+            BasicText(
+                "Only the same decision can be retried. The supervisor did not confirm this submission.",
+                style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
+            )
+            Spacer(Modifier.height(10.dp))
+            TextAction(
+                if (decisionStatus.decision == "approve") "Retry approval delivery" else "Retry rejection delivery",
+                filled = true,
+                enabled = !store.decisionInFlight,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                store.decide(review, decisionStatus.decision)
+            }
+            Spacer(Modifier.height(16.dp))
         } else if (decisionBlocksTap) {
             BasicText("This approval decision has already been submitted. Wait for the Mac's authoritative result; do not send it again.", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
             Spacer(Modifier.height(16.dp))
