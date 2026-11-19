@@ -459,13 +459,37 @@ object CompanionProtocolTest {
             "operation" to "mcp:jarvis_dev:approve_plan",
             "target" to target,
             "canonical_arguments_digest" to operationDigest,
-            "expires_at_unix_ms" to 2_000L,
+            "expires_at_unix_ms" to 1_800_000_060_000L,
             "redacted_summary" to "Review the full bounded plan below.",
             "development_plan" to plan.toWire(),
         )
         val parsed = ApprovalReview.parse(FlatJson.encode(payload))
         check(parsed.developmentPlan == plan) { "complete plan details should round-trip through the approval event" }
         check(parsed.canonicalArgumentsDigest == operationDigest)
+        check((CompanionEvent.ApprovalPending(parsed).toMap()["development_plan"] as? Map<*, *>)?.get("plan_digest") == planDigest)
+
+        val directory = java.nio.file.Files.createTempDirectory("development-plan-approval-history").toFile()
+        try {
+            val state = FileLinkStateStore(File(directory, "state.json"))
+            val first = LinkRuntime(
+                keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+                state = state,
+                storeDir = directory,
+                now = { 1_800_000_000_000L },
+            )
+            first.recordEvents(listOf(CompanionEvent.ApprovalPending(parsed)))
+            val recovered = LinkRuntime(
+                keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+                state = state,
+                storeDir = directory,
+                now = { 1_800_000_000_000L },
+            )
+            check(recovered.pendingApprovals().single().developmentPlan == plan) {
+                "complete verified plan details should survive app-state restoration"
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
 
         val missingPlan = payload.toMutableMap().apply { remove("development_plan") }
         check(runCatching { ApprovalReview.parse(FlatJson.encode(missingPlan)) }.isFailure) {
