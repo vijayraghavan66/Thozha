@@ -35,6 +35,7 @@ object CompanionProtocolTest {
         crashAfterRelayAcceptancePreservesExactEnvelope(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         inboxPersistenceBeforeAck(host, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
+        approvalDecisionRequiresAuthoritativeCorrelatedResult()
         developmentPlanApprovalRequiresCompleteDigestBoundDetails()
         localTaskHistoryIsRestartSafe()
         progressSequenceDeduplicatesOutOfOrderEvents()
@@ -548,6 +549,125 @@ object CompanionProtocolTest {
         check(entry["state"] == "COMPLETED")
         check(entry["summary"] == "Java is a programming language.")
         directory.deleteRecursively()
+    }
+
+    private fun approvalDecisionRequiresAuthoritativeCorrelatedResult() {
+        val now = 1_800_000_000_000L
+        val directory = java.nio.file.Files.createTempDirectory("approval-decision-state").toFile()
+        try {
+            val root = LinkCrypto.newSigningIdentity()
+            val host = LinkCrypto.newSigningIdentity()
+            val phoneKeys = SoftwareTestKeyProvider(File(directory, "keys.json"))
+            val (phone, phoneEncryption) = phoneKeys.identities()
+            val hostCertificate = certificate(root, host, LinkCrypto.newEncryptionIdentity(host), "host", now)
+            val phoneCertificate = certificate(root, phone, phoneEncryption, "companion", now)
+            val hostRoot = TrustedHostRoot(root.deviceId, root.publicKeyBase64)
+            val state = FileLinkStateStore(File(directory, "state.json"))
+            state.write(LinkJson.encode(mapOf(
+                "tenant_id" to "tenant_sim",
+                "device_id" to phone.deviceId,
+                "host_root_device_id" to hostRoot.deviceId,
+                "host_root_public_key" to hostRoot.signingPublicKeyBase64Url,
+                "companion_certificate" to LinkStateJson.certificateToMap(phoneCertificate),
+                "host_certificate" to LinkStateJson.certificateToMap(hostCertificate),
+                "enrollment_pending" to false,
+            )))
+            var offline = true
+            var exchanges = 0
+            val transport = object : RelayTransport {
+                override fun exchange(method: String, pathAndQuery: String, headers: Map<String, String>, body: ByteArray): RelayRawResponse {
+                    exchanges++
+                    if (offline) throw java.io.IOException("temporary test outage")
+                    check(method == "POST" && pathAndQuery == "/v1/messages")
+                    val envelope = LinkEnvelope.parse(body.toString(UTF_8))
+                    return RelayRawResponse(200, LinkJson.encode(mapOf(
+                        "message_id" to envelope.header.messageId,
+                        "status" to "queued",
+                        "expires_at_unix_ms" to envelope.header.expiresAtUnixMs,
+                    )))
+                }
+            }
+            val runtime = LinkRuntime(
+                keys = phoneKeys,
+                state = state,
+                storeDir = directory,
+                now = { now },
+                transportFactory = { transport },
+            )
+            val approval = ApprovalReview(
+                approvalId = "a".repeat(32),
+                taskId = "b".repeat(32),
+                operation = "mcp:jarvis_mac:open_app",
+                target = "Calculator",
+                canonicalArgumentsDigest = "c".repeat(64),
+                expiresAtUnixMs = now + 60_000,
+                redactedSummary = "Open the allowlisted Calculator app.",
+            )
+            runtime.recordEvents(listOf(CompanionEvent.ApprovalPending(approval)))
+            val queued = runtime.decideApproval("http://127.0.0.1:8787", approval.approvalId, "approve")
+            check(queued["state"] == "QUEUED" && queued["queued_offline"] == true)
+            check(runtime.pendingApprovals().single().approvalId == approval.approvalId) {
+                "transport queueing must not be presented as supervisor approval"
+            }
+            val duplicateTap = runtime.decideApproval("http://127.0.0.1:8787", approval.approvalId, "approve")
+            check(duplicateTap["message_id"] == queued["message_id"] && exchanges == 1) {
+                "duplicate tap must not create or send a second decision while one is unresolved"
+            }
+
+            offline = false
+            runtime.flush("http://127.0.0.1:8787")
+            check(runtime.approvalDecisionState(approval.approvalId)?.get("state") == "DELIVERED_WAITING_SUPERVISOR")
+            check(runtime.pendingApprovals().single().approvalId == approval.approvalId) {
+                "relay acceptance is not an authoritative supervisor decision"
+            }
+            val decisionMessageId = queued["message_id"] as String
+            val result = mapOf(
+                "kind" to "approval.decision_result",
+                "approval_id" to approval.approvalId,
+                "task_id" to approval.taskId,
+                "decision" to "approve",
+                "status" to "CONSUMED",
+                "execution_state" to "COMPLETED",
+                "executed" to true,
+                "success" to true,
+                "continued" to false,
+                "simulated" to false,
+                "result_summary" to "Calculator opened.",
+            )
+            val wrongCorrelation = LinkJson.encode(mapOf(
+                "task_id" to approval.taskId,
+                "state" to "COMPLETED",
+                "summary" to "wrong correlation",
+                "in_reply_to" to "e".repeat(32),
+                "result" to result,
+            ))
+            runtime.recordEvents(listOf(decodeCompanionEvent("task.result", wrongCorrelation)))
+            check(runtime.pendingApprovals().single().approvalId == approval.approvalId) {
+                "an unrelated result must not consume the visible approval"
+            }
+
+            val correlated = LinkJson.encode(mapOf(
+                "task_id" to approval.taskId,
+                "state" to "COMPLETED",
+                "summary" to "Calculator opened.",
+                "in_reply_to" to decisionMessageId,
+                "result" to result,
+            ))
+            val eventId = "f".repeat(32)
+            check(runtime.persistInboxEvent(eventId, now + 30_000, decodeCompanionEvent("task.result", correlated)))
+            check(runtime.pendingApprovals().isEmpty()) {
+                "approval should leave the actionable list only after the correlated host decision result"
+            }
+            val authoritative = runtime.approvalDecisionState(approval.approvalId)!!
+            check(authoritative["authoritative"] == true && authoritative["execution_state"] == "COMPLETED")
+            check(!runtime.persistInboxEvent(eventId, now + 30_000, decodeCompanionEvent("task.result", correlated))) {
+                "duplicate host result must not be applied twice"
+            }
+            val recent = runtime.recentUpdates().last()["approval_decision_result"] as Map<*, *>
+            check(recent["approval_id"] == approval.approvalId && recent["in_reply_to"] == decisionMessageId)
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     private fun staleProgressCannotReopenTerminalTask() {

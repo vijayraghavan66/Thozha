@@ -2,7 +2,6 @@ package com.jarvis.link
 
 import java.io.IOException
 import java.nio.charset.StandardCharsets.UTF_8
-import java.util.UUID
 
 enum class LinkConnectionState { OFFLINE, CONNECTING, CONNECTED, RECONNECTING, REAUTH_REQUIRED }
 enum class AckStatus { RECEIVED, REJECTED }
@@ -468,16 +467,48 @@ internal fun decodeCompanionEvent(kind: String, payload: String): CompanionEvent
             val text = fields["body"] as? String
             val expected = fields["body_sha256"] as? String
             val verified = text != null && expected != null && sha256Hex(text) == expected
+            val inReplyTo = (fields["in_reply_to"] as? String).orEmpty()
             CompanionEvent.TaskUpdate(
-                fields.string("task_id"), fields.string("state"), fields.string("summary"), (fields["in_reply_to"] as? String).orEmpty(),
+                fields.string("task_id"), fields.string("state"), fields.string("summary"), inReplyTo,
                 body = if (verified) text else null,
                 bodyComplete = fields["body_complete"] != false,
                 integrityFailed = text != null && !verified,
                 eventSeq = if (kind == "task.progress") (fields["event_seq"] as? Number)?.toLong()?.takeIf { it > 0 } else null,
+                approvalDecisionResult = parseApprovalDecisionResult(fields["result"], fields["task_id"] as? String, inReplyTo),
             )
         }
         else -> CompanionEvent.Unknown(kind)
     }
+}
+
+private fun parseApprovalDecisionResult(raw: Any?, envelopeTaskId: String?, inReplyTo: String): CompanionEvent.ApprovalDecisionResult? {
+    val fields = raw as? Map<*, *> ?: return null
+    if (fields["kind"] != "approval.decision_result" || inReplyTo.isBlank()) return null
+    fun text(name: String): String? = fields[name] as? String
+    val approvalId = text("approval_id") ?: return null
+    val taskId = text("task_id") ?: return null
+    val decision = text("decision") ?: return null
+    val status = text("status") ?: return null
+    val executionState = text("execution_state") ?: text("task_state") ?: text("state") ?: status
+    if (!approvalId.matches(Regex("^[0-9a-f]{32}$")) ||
+        !taskId.matches(Regex("^[0-9a-f]{32}$")) ||
+        (envelopeTaskId != null && envelopeTaskId.isNotBlank() && envelopeTaskId != taskId) ||
+        decision !in setOf("approve", "reject") ||
+        executionState !in setOf("APPROVED", "EXECUTION_PENDING", "RUNNING", "COMPLETED", "FAILED", "INDETERMINATE", "REJECTED", "EXPIRED", "CANCELLED", "UNKNOWN")
+    ) return null
+    return CompanionEvent.ApprovalDecisionResult(
+        approvalId = approvalId,
+        taskId = taskId,
+        decision = decision,
+        status = status,
+        executionState = executionState,
+        executed = fields["executed"] as? Boolean ?: false,
+        success = fields["success"] as? Boolean,
+        continued = fields["continued"] as? Boolean ?: false,
+        summary = text("result_summary") ?: text("summary").orEmpty(),
+        inReplyTo = inReplyTo,
+        simulated = fields["simulated"] as? Boolean ?: false,
+    )
 }
 
 private fun sha256Hex(text: String): String =
@@ -486,6 +517,32 @@ private fun sha256Hex(text: String): String =
 
 sealed interface CompanionEvent {
     data class ApprovalPending(val review: ApprovalReview) : CompanionEvent
+    data class ApprovalDecisionResult(
+        val approvalId: String,
+        val taskId: String,
+        val decision: String,
+        val status: String,
+        val executionState: String,
+        val executed: Boolean,
+        val success: Boolean?,
+        val continued: Boolean,
+        val summary: String,
+        val inReplyTo: String,
+        val simulated: Boolean,
+    ) {
+        fun toMap(): Map<String, Any> = linkedMapOf(
+            "approval_id" to approvalId,
+            "task_id" to taskId,
+            "decision" to decision,
+            "status" to status,
+            "execution_state" to executionState,
+            "executed" to executed,
+            "continued" to continued,
+            "summary" to summary,
+            "in_reply_to" to inReplyTo,
+            "simulated" to simulated,
+        ).also { success?.let { value -> it["success"] = value } }
+    }
     /**
      * [inReplyTo] is the envelope message ID of the request this update answers (empty if none).
      * [body] is the complete answer, present only when its SHA-256 matched. [bodyComplete] is false when the Mac
@@ -500,6 +557,7 @@ sealed interface CompanionEvent {
         val bodyComplete: Boolean = true,
         val integrityFailed: Boolean = false,
         val eventSeq: Long? = null,
+        val approvalDecisionResult: ApprovalDecisionResult? = null,
     ) : CompanionEvent
     data class Unknown(val kind: String) : CompanionEvent
 
@@ -511,7 +569,10 @@ sealed interface CompanionEvent {
             "canonical_arguments_digest" to review.canonicalArgumentsDigest, "expires_at_unix_ms" to review.expiresAtUnixMs,
         ).also { event -> review.developmentPlan?.let { event["development_plan"] = it.toWire() } }
         is TaskUpdate -> linkedMapOf<String, Any>("type" to "task_update", "task_id" to taskId, "state" to state, "summary" to summary, "in_reply_to" to inReplyTo)
-            .also { update -> eventSeq?.let { update["event_seq"] = it } }
+            .also { update ->
+                eventSeq?.let { update["event_seq"] = it }
+                approvalDecisionResult?.let { update["approval_decision_result"] = it.toMap() }
+            }
         is Unknown -> linkedMapOf("type" to "unknown", "kind" to kind)
     }
 }
@@ -583,12 +644,13 @@ class JarvisLinkCompanion(
         review: ApprovalReview,
         decision: String,
         expectedDigest: String,
+        idempotencyKey: String,
         continuationObjective: String? = null,
     ): DeliveryResult {
         val payload = review.toDecisionJson(
             decision,
             expectedDigest,
-            UUID.randomUUID().toString(),
+            idempotencyKey,
             now(),
             continuationObjective,
         )

@@ -85,7 +85,7 @@ class LinkRuntime(
     companion object {
         private val stateLock = Any()
         private val syncLock = Any()
-        private val terminalStates = setOf("COMPLETED", "FAILED", "CANCELLED", "REJECTED")
+        private val terminalStates = setOf("COMPLETED", "FAILED", "CANCELLED", "REJECTED", "EXPIRED", "INDETERMINATE")
     }
 
     private fun isStaleAfterTerminal(entry: Map<String, Any>, newState: String): Boolean =
@@ -216,6 +216,21 @@ class LinkRuntime(
     fun recentUpdates(): List<Map<String, Any>> =
         (load()["updates"] as? List<Map<String, Any>>) ?: emptyList()
 
+    /** Last locally persisted approval-decision state, keyed by approval ID. */
+    fun approvalDecisionState(approvalId: String): Map<String, Any>? =
+        approvalDecisionStates()[approvalId]
+
+    private fun approvalDecisionStates(): Map<String, Map<String, Any>> {
+        val raw = load()["approval_decision_states"] as? Map<*, *> ?: return emptyMap()
+        return raw.entries.mapNotNull { (key, value) ->
+            val id = key as? String ?: return@mapNotNull null
+            val fields = value as? Map<*, *> ?: return@mapNotNull null
+            val safe = linkedMapOf<String, Any>()
+            fields.forEach { (k, v) -> if (k is String && v != null) safe[k] = v }
+            id to safe
+        }.toMap()
+    }
+
     /**
      * Sends an approve or reject decision for one pending request. The companion checks expiry and the
      * exact digest locally; the Mac supervisor checks them again and enforces single use.
@@ -224,22 +239,60 @@ class LinkRuntime(
         require(decision == "approve" || decision == "reject") { "decision must be approve or reject" }
         val review = pendingApprovals().firstOrNull { it.approvalId == approvalId }
             ?: throw IllegalStateException("approval is not pending on this phone (expired or already decided)")
+        val existing = approvalDecisionStates()[approvalId]
+        if (existing != null) {
+            require(existing["decision"] == decision) { "a different decision is already in flight for this approval" }
+            if (existing["authoritative"] == true || existing["state"] != "DELIVERY_FAILED") return existing
+        }
         val continuationObjective = if (decision == "approve") {
             conversation().firstOrNull { it["task_id"] == review.taskId }?.get("text") as? String
         } else null
-        val result = companion(relayUrl).decideApproval(
-            review,
-            decision,
-            review.canonicalArgumentsDigest,
-            continuationObjective,
-        )
-        synchronized(stateLock) { save(mapOf("approvals" to storedApprovals().filter { it.approvalId != approvalId }.map(::approvalMap))) }
-        return linkedMapOf(
+        val idempotencyKey = approvalDecisionIdempotencyKey(review, decision)
+        val submitting = linkedMapOf<String, Any>(
             "decision" to decision,
             "approval_id" to approvalId,
-            "queued_offline" to result.queuedOffline,
-            "relay_status" to (result.receipt?.status ?: "queued_locally"),
+            "task_id" to review.taskId,
+            "idempotency_key" to idempotencyKey,
+            "state" to "SUBMITTING",
+            "authoritative" to false,
         )
+        saveDecisionState(approvalId, submitting)
+        return try {
+            val result = companion(relayUrl).decideApproval(
+                review,
+                decision,
+                review.canonicalArgumentsDigest,
+                idempotencyKey,
+                continuationObjective,
+            )
+            val submitted = LinkedHashMap(submitting).apply {
+                put("message_id", result.messageId)
+                put("queued_offline", result.queuedOffline)
+                put("relay_status", result.receipt?.status ?: "queued_locally")
+                put("state", if (result.queuedOffline) "QUEUED" else "DELIVERED_WAITING_SUPERVISOR")
+            }
+            saveDecisionState(approvalId, submitted)
+            approvalDecisionState(approvalId) ?: submitted
+        } catch (failure: Exception) {
+            val failed = LinkedHashMap(submitting).apply {
+                put("state", "DELIVERY_FAILED")
+                put("error_code", errorCode(failure))
+            }
+            saveDecisionState(approvalId, failed)
+            throw failure
+        }
+    }
+
+    private fun approvalDecisionIdempotencyKey(review: ApprovalReview, decision: String): String = LinkCrypto.hex(
+        LinkCrypto.sha256(("jarvis-link-approval-decision-v1|${review.approvalId}|${review.canonicalArgumentsDigest}|$decision")
+            .toByteArray(Charsets.UTF_8)).copyOfRange(0, 16),
+    )
+
+    private fun saveDecisionState(approvalId: String, state: Map<String, Any>) = synchronized(stateLock) {
+        val merged = approvalDecisionStates().toMutableMap()
+        if (merged[approvalId]?.get("authoritative") == true) return@synchronized
+        merged[approvalId] = state
+        save(mapOf("approval_decision_states" to merged))
     }
 
     private fun storedApprovals(): List<ApprovalReview> =
@@ -357,19 +410,37 @@ class LinkRuntime(
     private fun recordEventsLocked(events: List<CompanionEvent>, received: Map<String, Long>?) {
         var approvals = storedApprovals().toMutableList()
         val updates = ((load()["updates"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
+        val decisionStates = approvalDecisionStates().toMutableMap()
         var entries = conversation()
         for (event in events) {
             when (event) {
                 is CompanionEvent.ApprovalPending -> {
-                    approvals = approvals.filter { it.approvalId != event.review.approvalId }.toMutableList()
-                    approvals.add(event.review)
+                    if (decisionStates[event.review.approvalId]?.get("authoritative") != true) {
+                        approvals = approvals.filter { it.approvalId != event.review.approvalId }.toMutableList()
+                        approvals.add(event.review)
+                    }
                 }
                 is CompanionEvent.TaskUpdate -> {
+                    val decisionResult = event.approvalDecisionResult
+                    val acceptedDecision = decisionResult?.takeIf { result ->
+                        val pending = decisionStates[result.approvalId]
+                        val pendingMatches = if (pending != null) {
+                            pending["task_id"] == result.taskId && pending["decision"] == result.decision &&
+                                ((pending["message_id"] as? String).isNullOrBlank() || pending["message_id"] == result.inReplyTo)
+                        } else {
+                            approvals.firstOrNull { it.approvalId == result.approvalId }?.taskId == result.taskId
+                        }
+                        result.taskId == event.taskId && result.inReplyTo == event.inReplyTo && event.inReplyTo.isNotBlank() && pendingMatches
+                    }
+                    val updateState = acceptedDecision?.executionState ?: event.state
+                    val updateSummary = acceptedDecision?.summary?.takeIf { it.isNotBlank() } ?: event.summary
                     fun matches(entry: Map<String, Any>): Boolean = if (event.inReplyTo.isNotBlank())
                         entry["message_id"] == event.inReplyTo else event.taskId.isNotBlank() && entry["task_id"] == event.taskId
                     val matching = entries.filter(::matches)
-                    val stale = matching.isNotEmpty() && matching.all { isStaleAfterTerminal(it, event.state) }
-                    val highestProgressSeq = matching.mapNotNull { (it["progress_seq"] as? Number)?.toLong() }.maxOrNull() ?: 0L
+                    val taskMatching = entries.filter { event.taskId.isNotBlank() && it["task_id"] == event.taskId }
+                    val targetEntries = if (matching.isNotEmpty()) matching else taskMatching
+                    val stale = targetEntries.isNotEmpty() && targetEntries.all { isStaleAfterTerminal(it, updateState) }
+                    val highestProgressSeq = targetEntries.mapNotNull { (it["progress_seq"] as? Number)?.toLong() }.maxOrNull() ?: 0L
                     val staleProgress = event.eventSeq != null && event.eventSeq <= highestProgressSeq
                     val duplicateProgress = event.eventSeq != null && updates.any {
                         it["task_id"] == event.taskId && (it["event_seq"] as? Number)?.toLong() == event.eventSeq
@@ -377,27 +448,41 @@ class LinkRuntime(
                     if (!stale && !staleProgress && !duplicateProgress) {
                         updates.add(linkedMapOf<String, Any>(
                             "task_id" to event.taskId,
-                            "state" to event.state,
-                            "summary" to event.summary,
+                            "state" to updateState,
+                            "summary" to updateSummary,
                             "received_at_unix_ms" to now(),
-                        ).also { event.eventSeq?.let { seq -> it["event_seq"] = seq } })
+                        ).also { update ->
+                            event.eventSeq?.let { seq -> update["event_seq"] = seq }
+                            acceptedDecision?.let { update["approval_decision_result"] = it.toMap() }
+                        })
                     }
                     entries = entries.map { entry ->
-                        if (matches(entry) && !isStaleAfterTerminal(entry, event.state) && !staleProgress && !duplicateProgress) LinkedHashMap(entry).apply {
-                            put("state", event.state); put("summary", event.summary)
+                        val matchesUpdate = matches(entry) || (acceptedDecision != null && event.taskId.isNotBlank() && entry["task_id"] == event.taskId)
+                        if (matchesUpdate && !isStaleAfterTerminal(entry, updateState) && !staleProgress && !duplicateProgress) LinkedHashMap(entry).apply {
+                            put("state", updateState); put("summary", updateSummary)
                             event.eventSeq?.let { put("progress_seq", it) }
                             // The canonical answer is the verified body; the summary is only a preview for cards.
                             if (event.body != null) put("body", event.body) else remove("body")
                             put("body_complete", event.bodyComplete); put("body_integrity_failed", event.integrityFailed)
                             if (event.taskId.isNotBlank()) put("task_id", event.taskId)
+                            acceptedDecision?.let { put("approval_decision_result", it.toMap()) }
                             put("updated_at_unix_ms", now())
                         } else entry
+                    }
+                    acceptedDecision?.let { result ->
+                        val reconciled = LinkedHashMap(result.toMap()).apply {
+                            put("state", result.executionState)
+                            put("authoritative", true)
+                        }
+                        decisionStates[result.approvalId] = reconciled
+                        approvals = approvals.filterNot { it.approvalId == result.approvalId }.toMutableList()
                     }
                 }
                 else -> Unit
             }
         }
-        val changes = linkedMapOf<String, Any?>("approvals" to approvals.map(::approvalMap), "updates" to updates.takeLast(20), "conversation" to entries)
+        val changes = linkedMapOf<String, Any?>("approvals" to approvals.map(::approvalMap), "updates" to updates.takeLast(20), "conversation" to entries,
+            "approval_decision_states" to decisionStates)
         if (received != null) changes["received_event_ids"] = received
         save(changes)
     }
@@ -405,6 +490,22 @@ class LinkRuntime(
     fun flush(relayUrl: String): Map<String, Any> {
         val companion = companion(relayUrl)
         val receipts = companion.flushOutbox()
+        if (receipts.isNotEmpty()) {
+            val delivered = receipts.associate { it.messageId to it.status }
+            val decisions = approvalDecisionStates().toMutableMap()
+            var changed = false
+            for ((approvalId, previous) in decisions.toMap()) {
+                val messageId = previous["message_id"] as? String ?: continue
+                val relayStatus = delivered[messageId] ?: continue
+                decisions[approvalId] = LinkedHashMap(previous).apply {
+                    put("queued_offline", false)
+                    put("relay_status", relayStatus)
+                    put("state", "DELIVERED_WAITING_SUPERVISOR")
+                }
+                changed = true
+            }
+            if (changed) save(mapOf("approval_decision_states" to decisions))
+        }
         return linkedMapOf(
             "delivered" to receipts.size,
             "remaining" to companion.outboxSize(),

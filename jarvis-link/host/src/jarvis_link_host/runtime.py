@@ -229,8 +229,14 @@ class HostRelayRuntime:
 
     def _task_result_envelope(self, original: Mapping[str, Any], cert: DeviceCertificate | Mapping[str, Any], body: Mapping[str, Any], result_digest: str) -> LinkEnvelope:
         message_id = str(original["message_id"])
-        state = str(body.get("state") or body.get("status") or body.get("kind", "accepted"))
-        summary = str(body.get("summary") or f"{body.get('kind', 'result')}: {body.get('status', 'accepted')}")
+        state = str(
+            body.get("execution_state")
+            or body.get("task_state")
+            or body.get("state")
+            or body.get("status")
+            or body.get("kind", "accepted")
+        )
+        summary = str(body.get("result_summary") or body.get("summary") or f"{body.get('kind', 'result')}: {body.get('status', 'accepted')}")
         full = str(body["result_text"]) if isinstance(body.get("result_text"), str) else summary
         # The full text travels once, as the top-level body. It is not repeated inside "result".
         result = {key: value for key, value in body.items() if key != "result_text"}

@@ -87,6 +87,53 @@ def test_preview_is_only_for_activity_and_never_replaces_the_body():
     assert preview("short") == "short"
 
 
+def test_approval_decision_result_uses_execution_state_and_exact_request_correlation():
+    processor, _supervisor, host_identity, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    relay = RelayStub(host_id, {"tenant_id": processor.tenant_id}, phone_cert.to_dict())
+    runtime = HostRelayRuntime(host=processor, relay=relay)
+    decision_message_id = "d" * 32
+    approval_id = "a" * 32
+    task_id = "b" * 32
+    body = {
+        "kind": "approval.decision_result",
+        "approval_id": approval_id,
+        "task_id": task_id,
+        "decision": "approve",
+        "status": "CONSUMED",
+        "task_state": "COMPLETED",
+        "execution_state": "COMPLETED",
+        "executed": True,
+        "success": True,
+        "continued": False,
+        "simulated": False,
+        "result_summary": "Calculator opened.",
+    }
+
+    envelope = runtime._task_result_envelope(
+        {"message_id": decision_message_id, "from_device_id": phone_id},
+        phone_cert.to_dict(),
+        body,
+        hashlib.sha256(b"approval-result").hexdigest(),
+    )
+    payload = decrypt_envelope(
+        envelope,
+        recipient=phone,
+        sender_certificate=host_cert,
+        trusted_host_signing_public_der=host_identity.signing_public_der,
+        expected_tenant_id=processor.tenant_id,
+        expected_recipient_id=phone_id,
+        expected_recipient_certificate_id=phone_cert.certificate_id,
+        expected_sender_id=host_id,
+        expected_issuer_device_id=host_id,
+        expected_sender_role="host",
+    )
+    assert payload["in_reply_to"] == decision_message_id
+    assert payload["state"] == "COMPLETED"
+    assert payload["result"]["approval_id"] == approval_id
+    assert payload["result"]["execution_state"] == "COMPLETED"
+    assert payload["result"]["executed"] is True and payload["result"]["success"] is True
+
+
 def test_task_progress_is_encrypted_and_contains_only_sanitized_stage_fields():
     processor, _supervisor, host_identity, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
     relay = RelayStub(host_id, {"tenant_id": processor.tenant_id}, phone_cert.to_dict())
