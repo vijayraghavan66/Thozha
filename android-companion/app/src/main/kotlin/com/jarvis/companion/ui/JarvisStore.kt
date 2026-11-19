@@ -378,8 +378,13 @@ class JarvisStore(private val app: Context) {
                 when (route) {
                     is RequestRoute.FastCommandUpstream -> when (fastCommand) {
                     FastCommand.MacStatus -> runtime.submitFastCommand(relayUrl, FastCommandRequest.MacStatus, requestId)
+                    FastCommand.MacBatteryStatus -> runtime.submitFastCommand(relayUrl, FastCommandRequest.MacBatteryStatus, requestId)
                     is FastCommand.TaskStatus -> runtime.submitFastCommand(relayUrl, FastCommandRequest.TaskStatus(fastCommand.taskId), requestId)
-                    is FastCommand.OpenApplication -> runtime.submitFastCommand(relayUrl, FastCommandRequest.OpenCalculator(requestId), requestId)
+                    is FastCommand.OpenApplication -> runtime.submitFastCommand(
+                        relayUrl,
+                        FastCommandRequest.OpenApplication(fastCommand.appId.bundleId, requestId),
+                        requestId,
+                    )
                     null -> error("Fast-command route lost its deterministic command")
                     }
                     is RequestRoute.Mac -> runtime.submit(relayUrl, TaskSubmission(text, setOf(SafeCapability.ASSISTANT), clientRequestId = requestId), null)
