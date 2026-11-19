@@ -89,6 +89,10 @@ sealed interface FastCommandRequest {
         override fun toJson() = "{\"command\":\"mac.status\",\"version\":1}"
     }
 
+    data object MacBatteryStatus : FastCommandRequest {
+        override fun toJson() = "{\"command\":\"mac.battery\",\"version\":1}"
+    }
+
     data class TaskStatus(val taskId: String) : FastCommandRequest {
         init { require(taskId.matches(Regex("^[0-9a-f]{32}$"))) }
         override fun toJson() = "{\"command\":\"task.status\",\"task_id\":${FlatJson.quote(taskId)},\"version\":1}"
@@ -97,6 +101,19 @@ sealed interface FastCommandRequest {
     data class OpenCalculator(val idempotencyKey: String = LinkCrypto.newId()) : FastCommandRequest {
         init { require(idempotencyKey.matches(Regex("^[0-9a-f]{32}$"))) }
         override fun toJson() = "{\"app\":\"Calculator\",\"command\":\"app.open\",\"idempotency_key\":${FlatJson.quote(idempotencyKey)},\"version\":1}"
+    }
+
+    /** Ordinary foreground activation for a narrow pre-approved bundle-ID allowlist. */
+    data class OpenApplication(val app: String, val idempotencyKey: String) : FastCommandRequest {
+        init {
+            require(app in trustedApplicationBundleIds) { "application bundle ID is not allowlisted" }
+            require(idempotencyKey.matches(Regex("^[0-9a-f]{32}$")))
+        }
+        override fun toJson() = "{\"app\":${FlatJson.quote(app)},\"command\":\"app.open\",\"idempotency_key\":${FlatJson.quote(idempotencyKey)},\"version\":1}"
+    }
+
+    companion object {
+        private val trustedApplicationBundleIds = setOf("com.apple.calculator", "com.spotify.client")
     }
 }
 
@@ -489,7 +506,11 @@ private fun parseApprovalDecisionResult(raw: Any?, envelopeTaskId: String?, inRe
     val taskId = text("task_id") ?: return null
     val decision = text("decision") ?: return null
     val status = text("status") ?: return null
-    val executionState = text("execution_state") ?: text("task_state") ?: text("state") ?: status
+    val executionState = text("execution_state") ?: text("task_state") ?: text("state") ?: when (status.uppercase()) {
+        "CONSUMED" -> "INDETERMINATE" // legacy responses lack terminal proof; never infer execution success
+        "APPROVED" -> "EXECUTION_PENDING"
+        else -> status.uppercase()
+    }
     if (!approvalId.matches(Regex("^[0-9a-f]{32}$")) ||
         !taskId.matches(Regex("^[0-9a-f]{32}$")) ||
         (envelopeTaskId != null && envelopeTaskId.isNotBlank() && envelopeTaskId != taskId) ||

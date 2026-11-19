@@ -29,6 +29,7 @@ object CompanionProtocolTest {
         enrollmentProofBindsAllKeys(root, host, hostEnc, companion, companionEnc, now)
         assistantTextJsonRoundTrip()
         typedFastCommandEnvelopeIsAllowed(companion, hostCertificate, hostRoot, now)
+        trustedAppAndBatteryFastCommandsAreNarrowlyTyped()
         endToEndEnvelopeRoundTrip(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         staleTimestampRetryKeepsAuthenticatedEnvelopeQueued(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
@@ -70,6 +71,22 @@ object CompanionProtocolTest {
         )
         check(envelope.header.kind == "fast.command" && envelope.header.messageId == requestId) {
             "typed fast command must retain its request correlation ID"
+        }
+    }
+
+    private fun trustedAppAndBatteryFastCommandsAreNarrowlyTyped() {
+        check(LinkJson.parseObject(FastCommandRequest.MacBatteryStatus.toJson()) == mapOf(
+            "command" to "mac.battery", "version" to 1L,
+        )) { "battery status should have a fixed versioned wire shape" }
+        val calculator = LinkJson.parseObject(FastCommandRequest.OpenApplication("com.apple.calculator", "ab".repeat(16)).toJson())
+        check(calculator["app"] == "com.apple.calculator" && calculator["command"] == "app.open")
+        val spotify = LinkJson.parseObject(FastCommandRequest.OpenApplication("com.spotify.client", "cd".repeat(16)).toJson())
+        check(spotify["app"] == "com.spotify.client" && spotify["command"] == "app.open")
+        check(runCatching { FastCommandRequest.OpenApplication("/System/Applications/Calculator.app", "ef".repeat(16)) }.isFailure) {
+            "arbitrary executable paths must never be serialized as app targets"
+        }
+        check(runCatching { FastCommandRequest.OpenApplication("com.apple.calculator --args", "01".repeat(16)) }.isFailure) {
+            "app arguments must never be accepted in the typed app target"
         }
     }
 
@@ -634,6 +651,18 @@ object CompanionProtocolTest {
                 "simulated" to false,
                 "result_summary" to "Calculator opened.",
             )
+            val legacyConsumed = result - "execution_state" - "executed" - "success"
+            val legacyEvent = decodeCompanionEvent("task.result", LinkJson.encode(mapOf(
+                "task_id" to approval.taskId,
+                "state" to "CONSUMED",
+                "summary" to "Approval consumed.",
+                "in_reply_to" to queued["message_id"],
+                "result" to legacyConsumed,
+            ))) as CompanionEvent.TaskUpdate
+            check(legacyEvent.approvalDecisionResult?.executionState == "INDETERMINATE" &&
+                legacyEvent.approvalDecisionResult?.executed == false && legacyEvent.approvalDecisionResult?.success == null) {
+                "legacy consumed responses without terminal evidence must never be treated as completed"
+            }
             val wrongCorrelation = LinkJson.encode(mapOf(
                 "task_id" to approval.taskId,
                 "state" to "COMPLETED",
