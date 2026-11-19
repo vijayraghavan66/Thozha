@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import stat
 import time
@@ -187,6 +188,88 @@ def test_operator_delivery_helpers_return_the_actual_envelope_id():
     )
     assert len(approval_id) == len(task_update_id) == 32
     assert [item["message_id"] for item in relay.responses] == [approval_id, task_update_id]
+
+
+def test_development_plan_approval_envelope_carries_complete_structured_plan(tmp_path):
+    processor, _supervisor, host_identity, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    plan = {
+        "plan_id": "wire-plan-0001",
+        "device_id": phone_id,
+        "user_id": f"device:{phone_id}",
+        "workspace_root": "/tmp/jarvis-project",
+        "allowed_ops": ["run_tests", "write_file"],
+        "allowed_paths": ["src", "tests"],
+        "max_file_bytes": 4096,
+        "max_total_bytes": 8192,
+        "max_writes": 2,
+        "max_test_runs": 1,
+        "max_repairs": 1,
+        "max_duration_s": 900,
+        "ttl_s": 600,
+    }
+    plan_digest = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    placeholder = task_envelope(
+        host_identity, phone, host_id, phone_id, host_cert,
+        {"objective": "safe", "capability_scope": ["read_only"]},
+    ).to_dict()
+    relay = RelayStub(host_id, placeholder, phone_cert.to_dict())
+    relay.fail_first_reply = False
+    runtime = HostRelayRuntime(host=processor, relay=relay)
+    common = {
+        "approval_id": "b" * 32,
+        "task_id": "a" * 32,
+        "operation": "mcp:jarvis_dev:approve_plan",
+        "target": "taskflow:plan:wire-plan-0001",
+        "canonical_arguments_digest": "c" * 64,
+        "expires_at_unix_ms": int(time.time() * 1000) + 30_000,
+        "redacted_summary": "Review the complete bounded plan below.",
+    }
+    approval_id = runtime.send_approval_request(
+        companion_certificate=phone_cert.to_dict(), companion_id=phone_id,
+        request={**common, "development_plan": {**plan, "plan_digest": plan_digest}},
+    )
+    envelope = LinkEnvelope.from_dict(relay.responses[0])
+    clear = decrypt_envelope(
+        envelope,
+        recipient=phone,
+        sender_certificate=host_cert,
+        trusted_host_signing_public_der=host_identity.signing_public_der,
+        expected_tenant_id=processor.tenant_id,
+        expected_recipient_id=phone_id,
+        expected_recipient_certificate_id=phone_cert.certificate_id,
+        expected_sender_id=host_id,
+        expected_issuer_device_id=host_id,
+        expected_sender_role="host",
+    )
+    assert clear["development_plan"] == {**plan, "plan_digest": plan_digest}
+    assert clear["canonical_arguments_digest"] == "c" * 64
+    assert len(approval_id) == 32
+
+
+def test_development_plan_approval_envelope_fails_closed_when_details_are_missing():
+    processor, _supervisor, host_identity, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    placeholder = task_envelope(
+        host_identity, phone, host_id, phone_id, host_cert,
+        {"objective": "safe", "capability_scope": ["read_only"]},
+    ).to_dict()
+    relay = RelayStub(processor.device_id, placeholder, phone_cert.to_dict())
+    relay.fail_first_reply = False
+    runtime = HostRelayRuntime(host=processor, relay=relay)
+    with pytest.raises(ValueError, match="missing complete structured details"):
+        runtime.send_approval_request(
+            companion_certificate=phone_cert.to_dict(),
+            companion_id=phone_id,
+            request={
+                "approval_id": "b" * 32,
+                "task_id": "a" * 32,
+                "operation": "mcp:jarvis_dev:approve_plan",
+                "target": "taskflow:plan:missing-details",
+                "canonical_arguments_digest": "c" * 64,
+                "expires_at_unix_ms": int(time.time() * 1000) + 30_000,
+                "redacted_summary": "truncated only",
+            },
+        )
+    assert relay.responses == []
 
 
 def test_pending_supervisor_approval_is_sent_as_a_separate_encrypted_relay_message(tmp_path):

@@ -238,6 +238,114 @@ class CompanionEnrollment(
     }
 }
 
+/** Complete, verified plan bounds shown before a development-plan approval can be tapped. */
+data class DevelopmentPlanReview(
+    val planId: String,
+    val deviceId: String,
+    val userId: String,
+    val workspaceRoot: String,
+    val allowedOps: List<String>,
+    val allowedPaths: List<String>,
+    val maxFileBytes: Long,
+    val maxTotalBytes: Long,
+    val maxWrites: Long,
+    val maxTestRuns: Long,
+    val maxRepairs: Long,
+    val maxDurationSeconds: Long,
+    val ttlSeconds: Long,
+    val planDigest: String,
+) {
+    init {
+        require(planId.matches(Regex("^[A-Za-z0-9_.-]{8,80}$")))
+        require(deviceId.matches(Regex("^[0-9a-f]{32}$")))
+        require(userId == "device:$deviceId")
+        require(workspaceRoot.startsWith("/") && '\u0000' !in workspaceRoot)
+        require(allowedOps.isNotEmpty() && allowedOps == allowedOps.distinct().sorted())
+        require(allowedOps.all { it in SUPPORTED_OPS })
+        require(allowedPaths.size <= MAX_PATHS && allowedPaths.all(::validPlanPath))
+        require(maxFileBytes in 1..MAX_FILE_BYTES)
+        require(maxTotalBytes in 1..MAX_TOTAL_BYTES)
+        require(maxWrites in 0..MAX_WRITES && maxTestRuns in 0..MAX_TEST_RUNS)
+        require(maxRepairs in 0..MAX_REPAIRS)
+        require(maxDurationSeconds in 1..MAX_DURATION_SECONDS && ttlSeconds in 1..MAX_TTL_SECONDS)
+        require(planDigest.matches(Regex("^[0-9a-f]{64}$")))
+        require(sha256Hex(canonicalJson(canonicalPlanFields()).toByteArray(UTF_8)) == planDigest) {
+            "Development plan fields do not match the plan digest"
+        }
+    }
+
+    fun canonicalPlanFields(): Map<String, Any> = linkedMapOf(
+        "plan_id" to planId,
+        "device_id" to deviceId,
+        "user_id" to userId,
+        "workspace_root" to workspaceRoot,
+        "allowed_ops" to allowedOps,
+        "allowed_paths" to allowedPaths,
+        "max_file_bytes" to maxFileBytes,
+        "max_total_bytes" to maxTotalBytes,
+        "max_writes" to maxWrites,
+        "max_test_runs" to maxTestRuns,
+        "max_repairs" to maxRepairs,
+        "max_duration_s" to maxDurationSeconds,
+        "ttl_s" to ttlSeconds,
+    )
+
+    fun toWire(): Map<String, Any> = linkedMapOf<String, Any>("plan_digest" to planDigest).apply {
+        putAll(canonicalPlanFields())
+    }
+
+    companion object {
+        private const val MAX_PATHS = 24
+        private const val MAX_FILE_BYTES = 256L * 1024L
+        private const val MAX_TOTAL_BYTES = 4L * 1024L * 1024L
+        private const val MAX_WRITES = 200L
+        private const val MAX_TEST_RUNS = 50L
+        private const val MAX_REPAIRS = 5L
+        private const val MAX_DURATION_SECONDS = 4L * 60L * 60L
+        private const val MAX_TTL_SECONDS = 4L * 60L * 60L
+        private val SUPPORTED_OPS = setOf("write_file", "run_tests", "artifact_manifest")
+        private val PLAN_KEYS = setOf(
+            "plan_id", "device_id", "user_id", "workspace_root", "allowed_ops", "allowed_paths",
+            "max_file_bytes", "max_total_bytes", "max_writes", "max_test_runs", "max_repairs",
+            "max_duration_s", "ttl_s", "plan_digest",
+        )
+
+        fun fromMap(value: Any?): DevelopmentPlanReview {
+            val map = value as? Map<*, *> ?: error("Missing structured development plan")
+            require(map.keys == PLAN_KEYS) { "Incomplete or unexpected development plan fields" }
+            fun text(key: String): String = map[key] as? String ?: error("Invalid development plan field: $key")
+            fun integer(key: String): Long = (map[key] as? Number)?.toLong() ?: error("Invalid development plan field: $key")
+            fun strings(key: String): List<String> = (map[key] as? List<*>)
+                ?.map { it as? String ?: error("Invalid development plan list: $key") }
+                ?: error("Invalid development plan field: $key")
+            return DevelopmentPlanReview(
+                planId = text("plan_id"),
+                deviceId = text("device_id"),
+                userId = text("user_id"),
+                workspaceRoot = text("workspace_root"),
+                allowedOps = strings("allowed_ops"),
+                allowedPaths = strings("allowed_paths"),
+                maxFileBytes = integer("max_file_bytes"),
+                maxTotalBytes = integer("max_total_bytes"),
+                maxWrites = integer("max_writes"),
+                maxTestRuns = integer("max_test_runs"),
+                maxRepairs = integer("max_repairs"),
+                maxDurationSeconds = integer("max_duration_s"),
+                ttlSeconds = integer("ttl_s"),
+                planDigest = text("plan_digest"),
+            )
+        }
+
+        private fun validPlanPath(value: String): Boolean {
+            if (value.isEmpty()) return true // empty prefix explicitly means the workspace root
+            if (value.startsWith("/") || value.startsWith("~") || '\\' in value || '\u0000' in value) return false
+            return value.split('/').all { part ->
+                part !in setOf("", ".", "..") && part.matches(Regex("^[A-Za-z0-9_.-]{1,120}$"))
+            }
+        }
+    }
+}
+
 data class ApprovalReview(
     val approvalId: String,
     val taskId: String,
@@ -246,17 +354,44 @@ data class ApprovalReview(
     val canonicalArgumentsDigest: String,
     val expiresAtUnixMs: Long,
     val redactedSummary: String,
+    val developmentPlan: DevelopmentPlanReview? = null,
 ) {
     init {
         require(approvalId.matches(Regex("^[0-9a-f]{32}$")))
         require(taskId.matches(Regex("^[0-9a-f]{32}$")))
         require(operation.isNotBlank() && target.isNotBlank())
         require(canonicalArgumentsDigest.matches(Regex("^[a-f0-9]{64}$")))
+        verifyDevelopmentPlanBinding()
+    }
+
+    private fun verifyDevelopmentPlanBinding() {
+        if (operation == DEVELOPMENT_PLAN_APPROVAL_OPERATION) {
+            val plan = developmentPlan ?: error("Development plan approval omitted complete verified details")
+            require(target == "taskflow:plan:${plan.planId}") { "Development plan target does not match the reviewed plan" }
+            require(sha256Hex(canonicalJson(plan.canonicalPlanFields()).toByteArray(UTF_8)) == plan.planDigest) {
+                "Development plan was modified after verification"
+            }
+            val arguments = linkedMapOf<String, Any>(
+                "plan" to plan.canonicalPlanFields(),
+                "plan_digest" to plan.planDigest,
+            )
+            val operationValue = linkedMapOf<String, Any>(
+                "operation" to operation,
+                "target" to target,
+                "arguments" to arguments,
+            )
+            require(sha256Hex(canonicalJson(operationValue).toByteArray(UTF_8)) == canonicalArgumentsDigest) {
+                "Displayed development plan does not match the approved operation digest"
+            }
+        } else {
+            require(developmentPlan == null) { "Unexpected development plan details on another approval type" }
+        }
     }
 
     fun validateForDecision(expectedDigest: String, nowUnixMs: Long) {
         require(expiresAtUnixMs > nowUnixMs) { "Approval expired" }
         require(expectedDigest == canonicalArgumentsDigest) { "Approval arguments changed" }
+        verifyDevelopmentPlanBinding()
     }
 
     fun toDecisionJson(
@@ -286,6 +421,8 @@ data class ApprovalReview(
     }
 
     companion object {
+        private const val DEVELOPMENT_PLAN_APPROVAL_OPERATION = "mcp:jarvis_dev:approve_plan"
+
         fun parse(payloadJson: String): ApprovalReview {
             val fields = FlatJson.decode(payloadJson)
             return ApprovalReview(
@@ -296,10 +433,31 @@ data class ApprovalReview(
                 canonicalArgumentsDigest = fields.string("canonical_arguments_digest"),
                 expiresAtUnixMs = fields.long("expires_at_unix_ms"),
                 redactedSummary = fields.string("redacted_summary"),
+                developmentPlan = if (fields.containsKey("development_plan")) {
+                    DevelopmentPlanReview.fromMap(fields["development_plan"])
+                } else null,
             )
         }
     }
 }
+
+private fun canonicalJson(value: Any?): String = when (value) {
+    null -> "null"
+    is String -> "\"${LinkJson.escape(value)}\""
+    is Boolean, is Int, is Long -> value.toString()
+    is List<*> -> value.joinToString(prefix = "[", postfix = "]", separator = ",") { canonicalJson(it) }
+    is Map<*, *> -> value.entries
+        .associate { (key, item) -> (key as? String ?: error("Invalid canonical JSON key")) to item }
+        .toSortedMap()
+        .entries
+        .joinToString(prefix = "{", postfix = "}", separator = ",") { (key, item) ->
+            "\"${LinkJson.escape(key)}\":${canonicalJson(item)}"
+        }
+    else -> error("Unsupported canonical JSON type")
+}
+
+private fun sha256Hex(value: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
+    .digest(value).joinToString("") { "%02x".format(it) }
 
 /** Decodes one authenticated host payload. A task body is used only when its SHA-256 matches the one the Mac sent. */
 internal fun decodeCompanionEvent(kind: String, payload: String): CompanionEvent {
@@ -347,11 +505,11 @@ sealed interface CompanionEvent {
 
     /** Plain map for the CLI/JSON output. Contains only decrypted, already-authenticated fields. */
     fun toMap(): Map<String, Any> = when (this) {
-        is ApprovalPending -> linkedMapOf(
+        is ApprovalPending -> linkedMapOf<String, Any>(
             "type" to "approval_pending", "approval_id" to review.approvalId, "task_id" to review.taskId,
             "operation" to review.operation, "target" to review.target,
             "canonical_arguments_digest" to review.canonicalArgumentsDigest, "expires_at_unix_ms" to review.expiresAtUnixMs,
-        )
+        ).also { event -> review.developmentPlan?.let { event["development_plan"] = it.toWire() } }
         is TaskUpdate -> linkedMapOf<String, Any>("type" to "task_update", "task_id" to taskId, "state" to state, "summary" to summary, "in_reply_to" to inReplyTo)
             .also { update -> eventSeq?.let { update["event_seq"] = it } }
         is Unknown -> linkedMapOf("type" to "unknown", "kind" to kind)

@@ -1,6 +1,7 @@
 """The remote host keeps the OpenJarvis master credential on loopback only."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -128,6 +129,82 @@ def test_pending_approval_response_is_reduced_to_encrypted_protocol_fields(tmp_p
     assert approvals[0]["target"] == "TextEdit"
     assert approvals[0]["canonical_arguments_digest"] == "c" * 64
     assert "TextEdit" in approvals[0]["redacted_summary"]
+    client.close()
+
+
+def _development_plan_approval_row():
+    plan = {
+        "allowed_ops": ["artifact_manifest", "run_tests", "write_file"],
+        "allowed_paths": ["src", "tests"],
+        "device_id": "d" * 32,
+        "max_duration_s": 900,
+        "max_file_bytes": 4096,
+        "max_repairs": 1,
+        "max_test_runs": 2,
+        "max_total_bytes": 8192,
+        "max_writes": 3,
+        "plan_id": "approval-plan-0001",
+        "ttl_s": 600,
+        "user_id": "device:" + "d" * 32,
+        "workspace_root": "/tmp/jarvis-taskflow",
+    }
+    canonical = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    plan_digest = hashlib.sha256(canonical(plan).encode()).hexdigest()
+    arguments = {"plan": plan, "plan_digest": plan_digest}
+    operation = "mcp:jarvis_dev:approve_plan"
+    target = f"taskflow:plan:{plan['plan_id']}"
+    operation_payload = {"operation": operation, "target": target, "arguments": arguments}
+    operation_digest = hashlib.sha256(canonical(operation_payload).encode()).hexdigest()
+    return {
+        "id": "a" * 32,
+        "task_id": "b" * 32,
+        "operation": operation,
+        "target_resource": target,
+        "operation_digest": operation_digest,
+        "expires_at": "2099-01-01T00:00:00+00:00",
+        "reason": "Review the complete bounded project plan.",
+        "canonical_arguments": arguments,
+        "status": "PENDING",
+    }
+
+
+def test_development_plan_approval_preserves_complete_verified_details(tmp_path):
+    key = _key(tmp_path / "api-key")
+    row = _development_plan_approval_row()
+    client = httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"approvals": [row]})))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    approval = adapter.list_pending_approvals("b" * 32)[0]
+    assert approval["development_plan"]["workspace_root"] == "/tmp/jarvis-taskflow"
+    assert approval["development_plan"]["allowed_paths"] == ["src", "tests"]
+    assert approval["development_plan"]["max_repairs"] == 1
+    assert approval["development_plan"]["plan_digest"] == row["canonical_arguments"]["plan_digest"]
+    assert "complete bounded development plan" in approval["redacted_summary"]
+    assert len(approval["redacted_summary"]) < 200
+    client.close()
+
+
+@pytest.mark.parametrize("mutation", ["missing_plan", "tampered_plan", "wrong_operation_digest", "oversized_plan"])
+def test_development_plan_approval_fails_closed_without_complete_digest_bound_details(tmp_path, mutation):
+    key = _key(tmp_path / "api-key")
+    row = _development_plan_approval_row()
+    if mutation == "missing_plan":
+        row["canonical_arguments"] = {}
+    elif mutation == "tampered_plan":
+        row["canonical_arguments"]["plan"]["allowed_paths"] = ["src", "private"]
+    elif mutation == "wrong_operation_digest":
+        row["operation_digest"] = "0" * 64
+    elif mutation == "oversized_plan":
+        row["canonical_arguments"]["plan"]["allowed_paths"] = [f"dir{index}" for index in range(25)]
+        plan = row["canonical_arguments"]["plan"]
+        canonical = json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        row["canonical_arguments"]["plan_digest"] = hashlib.sha256(canonical.encode()).hexdigest()
+        arguments = row["canonical_arguments"]
+        op = {"operation": row["operation"], "target": row["target_resource"], "arguments": arguments}
+        row["operation_digest"] = hashlib.sha256(json.dumps(op, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    client = httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"approvals": [row]})))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    with pytest.raises(SupervisorRefused, match="development (approval|plan)"):
+        adapter.list_pending_approvals("b" * 32)
     client.close()
 
 

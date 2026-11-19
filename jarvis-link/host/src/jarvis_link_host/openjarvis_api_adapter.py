@@ -28,6 +28,84 @@ _ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _ALLOWED_SCOPES = {"read_only", "assistant", "development"}
+_PLAN_APPROVAL_OPERATION = "mcp:jarvis_dev:approve_plan"
+_PLAN_KEYS = {
+    "plan_id", "device_id", "user_id", "workspace_root", "allowed_ops", "allowed_paths",
+    "max_file_bytes", "max_total_bytes", "max_writes", "max_test_runs", "max_repairs",
+    "max_duration_s", "ttl_s",
+}
+_MAX_PLAN_DETAIL_BYTES = 16 * 1024
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+
+def _verified_development_plan(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the complete canonical plan against both the plan and supervisor digests."""
+    arguments = row.get("canonical_arguments")
+    if not isinstance(arguments, dict) or set(arguments) != {"plan", "plan_digest"}:
+        raise SupervisorRefused("development approval is missing its complete canonical plan")
+    plan = arguments.get("plan")
+    plan_digest = arguments.get("plan_digest")
+    if not isinstance(plan, dict) or set(plan) != _PLAN_KEYS or not isinstance(plan_digest, str) or not _DIGEST_RE.fullmatch(plan_digest):
+        raise SupervisorRefused("development approval plan fields are incomplete or invalid")
+    if (
+        not isinstance(plan.get("plan_id"), str)
+        or not re.fullmatch(r"[A-Za-z0-9_.-]{8,80}", plan["plan_id"])
+        or not isinstance(plan.get("device_id"), str)
+        or not _ID_RE.fullmatch(plan["device_id"])
+        or not isinstance(plan.get("user_id"), str)
+        or not isinstance(plan.get("workspace_root"), str)
+        or not plan["workspace_root"].startswith("/")
+        or not isinstance(plan.get("allowed_ops"), list)
+        or not all(isinstance(value, str) for value in plan["allowed_ops"])
+        or not isinstance(plan.get("allowed_paths"), list)
+        or not all(isinstance(value, str) for value in plan["allowed_paths"])
+        or len(plan["allowed_paths"]) > 24
+        or not plan["allowed_ops"]
+        or plan["allowed_ops"] != sorted(set(plan["allowed_ops"]))
+        or not set(plan["allowed_ops"]).issubset({"write_file", "run_tests", "artifact_manifest"})
+    ):
+        raise SupervisorRefused("development approval scope fields are invalid")
+    if plan["user_id"] != "device:" + plan["device_id"]:
+        raise SupervisorRefused("development approval user is not bound to its paired device")
+    for relative in plan["allowed_paths"]:
+        if relative == "":
+            continue
+        if relative.startswith(("/", "~")) or "\\" in relative or "\x00" in relative:
+            raise SupervisorRefused("development approval contains a non-relative path")
+        parts = relative.split("/")
+        if any(part in {"", ".", ".."} or not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", part) for part in parts):
+            raise SupervisorRefused("development approval contains an invalid path restriction")
+    integer_fields = ("max_file_bytes", "max_total_bytes", "max_writes", "max_test_runs", "max_repairs", "max_duration_s", "ttl_s")
+    if any(type(plan.get(field)) is not int for field in integer_fields):
+        raise SupervisorRefused("development approval quotas are invalid")
+    if (
+        not 1 <= plan["max_file_bytes"] <= 256 * 1024
+        or not 1 <= plan["max_total_bytes"] <= 4 * 1024 * 1024
+        or not 0 <= plan["max_writes"] <= 200
+        or not 0 <= plan["max_test_runs"] <= 50
+        or not 0 <= plan["max_repairs"] <= 5
+        or not 1 <= plan["max_duration_s"] <= 4 * 60 * 60
+        or not 1 <= plan["ttl_s"] <= 4 * 60 * 60
+    ):
+        raise SupervisorRefused("development approval quota or lifetime is out of bounds")
+    encoded_plan = _canonical_json(plan)
+    if len(encoded_plan.encode("utf-8")) > _MAX_PLAN_DETAIL_BYTES:
+        raise SupervisorRefused("complete development plan is too large to display safely")
+    if hashlib.sha256(encoded_plan.encode("utf-8")).hexdigest() != plan_digest:
+        raise SupervisorRefused("development plan details do not match their plan digest")
+    operation = row.get("operation")
+    target = row.get("target_resource")
+    expected_target = f"taskflow:plan:{plan['plan_id']}"
+    if operation != _PLAN_APPROVAL_OPERATION or target != expected_target:
+        raise SupervisorRefused("development plan operation or target does not match its canonical fields")
+    canonical_arguments_digest = row.get("operation_digest")
+    operation_payload = {"operation": operation, "target": target, "arguments": arguments}
+    if hashlib.sha256(_canonical_json(operation_payload).encode("utf-8")).hexdigest() != canonical_arguments_digest:
+        raise SupervisorRefused("development plan details do not match the supervisor approval digest")
+    return {**plan, "plan_digest": plan_digest}
 
 
 def _result_text(data: Mapping[str, Any]) -> str:
@@ -365,15 +443,23 @@ class OpenJarvisApiSupervisorAdapter:
             if not isinstance(operation, str) or not isinstance(target, str) or not isinstance(digest, str) or not _DIGEST_RE.fullmatch(digest) or not isinstance(expiry, str):
                 raise SupervisorRefused("OpenJarvis supervisor returned an incomplete approval record")
             args = row.get("canonical_arguments", {})
-            pending.append({
+            pending_item = {
                 "approval_id": approval_id,
                 "task_id": task_id,
                 "operation": operation,
                 "target": target,
                 "canonical_arguments_digest": digest,
                 "expires_at_unix_ms": _expiry_ms(expiry),
-                "redacted_summary": (str(row.get("reason") or "Exact operation requires your approval.") + " Arguments: " + json.dumps(args, sort_keys=True, ensure_ascii=False))[:500],
-            })
+            }
+            if operation == _PLAN_APPROVAL_OPERATION:
+                pending_item["redacted_summary"] = "Review the complete bounded development plan below before approving."
+                pending_item["development_plan"] = _verified_development_plan(row)
+            else:
+                pending_item["redacted_summary"] = (
+                    str(row.get("reason") or "Exact operation requires your approval.")
+                    + " Arguments: " + json.dumps(args, sort_keys=True, ensure_ascii=False)
+                )[:500]
+            pending.append(pending_item)
         return pending
 
     def get_approval(self, approval_id: str) -> ApprovalRecord | None:

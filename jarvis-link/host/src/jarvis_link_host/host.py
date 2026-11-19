@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -26,6 +29,7 @@ _CAPABILITIES = {"read_only", "web_research", "desktop_observation", "assistant"
 # The development scope is never granted by a message. Only companion devices listed here (written by the Mac
 # operator, fail-closed when absent) may submit it.
 DEVELOPMENT_ALLOWLIST_PATH = Path.home() / ".jarvis-link-test" / "development-companions.json"
+_DEVELOPMENT_ALLOWLIST_LOCK = threading.RLock()
 
 
 def development_companions(path: Path = DEVELOPMENT_ALLOWLIST_PATH) -> frozenset[str]:
@@ -36,6 +40,105 @@ def development_companions(path: Path = DEVELOPMENT_ALLOWLIST_PATH) -> frozenset
     if not isinstance(data, list):
         return frozenset()
     return frozenset(item for item in data if isinstance(item, str) and re.fullmatch(r"[0-9a-f]{32}", item))
+
+
+def _read_development_allowlist(path: Path) -> set[str]:
+    if path.is_symlink():
+        raise ValueError("development allowlist must not be a symbolic link")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return set()
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("development allowlist is unreadable or malformed") from exc
+    if not isinstance(raw, list) or any(not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{32}", item) for item in raw):
+        raise ValueError("development allowlist contains invalid entries")
+    return set(raw)
+
+
+def _write_development_allowlist(path: Path, entries: set[str]) -> None:
+    parent = path.parent
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if parent.is_symlink() or path.is_symlink():
+        raise ValueError("development allowlist path must not traverse symbolic links")
+    resolved_parent = parent.resolve(strict=True)
+    if resolved_parent != parent.absolute():
+        raise ValueError("development allowlist parent is not canonical")
+    fd, temporary = tempfile.mkstemp(prefix=".development-companions-", suffix=".tmp", dir=resolved_parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(sorted(entries), separators=(",", ":"), ensure_ascii=False))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        directory_fd = os.open(resolved_parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def authorize_development_companion(
+    *,
+    device_id: str,
+    certificate: DeviceCertificate | Mapping[str, Any],
+    trusted_host_signing_public_der: bytes,
+    expected_tenant_id: str,
+    expected_issuer_device_id: str,
+    owner_authorized: bool,
+    path: Path = DEVELOPMENT_ALLOWLIST_PATH,
+    now_ms: int | None = None,
+) -> bool:
+    """Explicitly grant development scope to one already certified companion.
+
+    The caller must first obtain the active certificate from the configured relay and
+    must pass an explicit local-owner authorization. This changes only the development
+    allowlist; it does not enroll, certify, or otherwise alter the companion identity.
+    """
+    if not owner_authorized:
+        raise PermissionError("development enrollment requires explicit Mac-owner authorization")
+    if not isinstance(device_id, str) or not re.fullmatch(r"[0-9a-f]{32}", device_id):
+        raise ValueError("development companion ID is invalid")
+    verified = verify_device_certificate(
+        certificate,
+        trusted_host_signing_public_der=trusted_host_signing_public_der,
+        expected_tenant_id=expected_tenant_id,
+        expected_device_id=device_id,
+        expected_role="companion",
+        expected_issuer_device_id=expected_issuer_device_id,
+        now_ms=now_ms,
+    )
+    with _DEVELOPMENT_ALLOWLIST_LOCK:
+        entries = _read_development_allowlist(path)
+        existed = device_id in entries
+        entries.add(verified.device_id)
+        if not existed:
+            _write_development_allowlist(path, entries)
+        return not existed
+
+
+def revoke_development_companion(
+    *, device_id: str, owner_authorized: bool, path: Path = DEVELOPMENT_ALLOWLIST_PATH
+) -> bool:
+    """Remove one companion's development scope without revoking its normal pairing."""
+    if not owner_authorized:
+        raise PermissionError("development revocation requires explicit Mac-owner authorization")
+    if not isinstance(device_id, str) or not re.fullmatch(r"[0-9a-f]{32}", device_id):
+        raise ValueError("development companion ID is invalid")
+    with _DEVELOPMENT_ALLOWLIST_LOCK:
+        entries = _read_development_allowlist(path)
+        if device_id not in entries:
+            return False
+        entries.remove(device_id)
+        _write_development_allowlist(path, entries)
+        return True
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _FORBIDDEN_KEYS = {"command", "cmd", "shell", "shell_command", "script", "executable", "exec"}
 

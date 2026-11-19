@@ -86,6 +86,25 @@ class HostRelayRuntime:
             "expires_at_unix_ms": int(request["expires_at_unix_ms"]),
             "redacted_summary": str(request["redacted_summary"])[:500],
         }
+        development_plan = request.get("development_plan")
+        if request["operation"] == "mcp:jarvis_dev:approve_plan":
+            if not isinstance(development_plan, dict):
+                raise ValueError("development plan approval is missing complete structured details")
+            if (
+                not isinstance(development_plan.get("plan_id"), str)
+                or request.get("target") != f"taskflow:plan:{development_plan.get('plan_id')}"
+                or not isinstance(development_plan.get("plan_digest"), str)
+                or not isinstance(request.get("canonical_arguments_digest"), str)
+            ):
+                raise ValueError("development plan approval details do not match its target or digest")
+            plan_bytes = json.dumps(
+                development_plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode("utf-8")
+            if len(plan_bytes) > 16 * 1024:
+                raise ValueError("complete development plan exceeds the approval display limit")
+            payload["development_plan"] = development_plan
+        elif development_plan is not None:
+            raise ValueError("development plan details cannot be attached to another approval type")
         return self.host.encrypt_reply(
             recipient_certificate=companion_certificate,
             recipient_id=companion_id,

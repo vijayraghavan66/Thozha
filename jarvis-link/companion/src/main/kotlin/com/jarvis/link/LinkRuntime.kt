@@ -252,10 +252,11 @@ class LinkRuntime(
                 canonicalArgumentsDigest = m.string("canonical_arguments_digest"),
                 expiresAtUnixMs = m.long("expires_at_unix_ms"),
                 redactedSummary = m.string("redacted_summary"),
+                developmentPlan = m["development_plan"]?.let(DevelopmentPlanReview::fromMap),
             )
         } ?: emptyList()
 
-    private fun approvalMap(review: ApprovalReview): Map<String, Any> = linkedMapOf(
+    private fun approvalMap(review: ApprovalReview): Map<String, Any> = linkedMapOf<String, Any>(
         "approval_id" to review.approvalId,
         "task_id" to review.taskId,
         "operation" to review.operation,
@@ -263,7 +264,7 @@ class LinkRuntime(
         "canonical_arguments_digest" to review.canonicalArgumentsDigest,
         "expires_at_unix_ms" to review.expiresAtUnixMs,
         "redacted_summary" to review.redactedSummary,
-    )
+    ).also { fields -> review.developmentPlan?.let { fields["development_plan"] = it.toWire() } }
 
     /** Messages the user sent from Home, newest last. Replies from the Mac update them by in_reply_to. */
     fun conversation(): List<Map<String, Any>> =

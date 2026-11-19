@@ -35,6 +35,7 @@ object CompanionProtocolTest {
         crashAfterRelayAcceptancePreservesExactEnvelope(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         inboxPersistenceBeforeAck(host, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         approvalReviewIsDigestAndExpiryBound()
+        developmentPlanApprovalRequiresCompleteDigestBoundDetails()
         localTaskHistoryIsRestartSafe()
         progressSequenceDeduplicatesOutOfOrderEvents()
         staleProgressCannotReopenTerminalTask()
@@ -410,6 +411,84 @@ object CompanionProtocolTest {
         check(runCatching { review.validateForDecision("c".repeat(64), 2_000) }.isFailure)
         check("approval_id" in review.toDecisionJson("approve", "c".repeat(64), "idem-1", nowUnixMs = 1_000))
     }
+
+    private fun developmentPlanApprovalRequiresCompleteDigestBoundDetails() {
+        val planFields = linkedMapOf<String, Any>(
+            "allowed_ops" to listOf("artifact_manifest", "run_tests", "write_file"),
+            "allowed_paths" to listOf("src", "tests"),
+            "device_id" to "d".repeat(32),
+            "max_duration_s" to 900L,
+            "max_file_bytes" to 4096L,
+            "max_repairs" to 1L,
+            "max_test_runs" to 2L,
+            "max_total_bytes" to 8192L,
+            "max_writes" to 3L,
+            "plan_id" to "plan-approval-0001",
+            "ttl_s" to 600L,
+            "user_id" to "device:" + "d".repeat(32),
+            "workspace_root" to "/tmp/jarvis-project",
+        )
+        val planDigest = sha256Hex(LinkJson.encode(planFields).toByteArray(UTF_8))
+        val plan = DevelopmentPlanReview(
+            planId = "plan-approval-0001",
+            deviceId = "d".repeat(32),
+            userId = "device:" + "d".repeat(32),
+            workspaceRoot = "/tmp/jarvis-project",
+            allowedOps = listOf("artifact_manifest", "run_tests", "write_file"),
+            allowedPaths = listOf("src", "tests"),
+            maxFileBytes = 4096L,
+            maxTotalBytes = 8192L,
+            maxWrites = 3L,
+            maxTestRuns = 2L,
+            maxRepairs = 1L,
+            maxDurationSeconds = 900L,
+            ttlSeconds = 600L,
+            planDigest = planDigest,
+        )
+        val target = "taskflow:plan:${plan.planId}"
+        val arguments = linkedMapOf<String, Any>("plan" to planFields, "plan_digest" to planDigest)
+        val operationPayload = linkedMapOf<String, Any>(
+            "arguments" to arguments,
+            "operation" to "mcp:jarvis_dev:approve_plan",
+            "target" to target,
+        )
+        val operationDigest = sha256Hex(LinkJson.encode(operationPayload).toByteArray(UTF_8))
+        val payload = linkedMapOf<String, Any>(
+            "approval_id" to "a".repeat(32),
+            "task_id" to "b".repeat(32),
+            "operation" to "mcp:jarvis_dev:approve_plan",
+            "target" to target,
+            "canonical_arguments_digest" to operationDigest,
+            "expires_at_unix_ms" to 2_000L,
+            "redacted_summary" to "Review the full bounded plan below.",
+            "development_plan" to plan.toWire(),
+        )
+        val parsed = ApprovalReview.parse(FlatJson.encode(payload))
+        check(parsed.developmentPlan == plan) { "complete plan details should round-trip through the approval event" }
+        check(parsed.canonicalArgumentsDigest == operationDigest)
+
+        val missingPlan = payload.toMutableMap().apply { remove("development_plan") }
+        check(runCatching { ApprovalReview.parse(FlatJson.encode(missingPlan)) }.isFailure) {
+            "development plan approvals must fail closed when structured details are missing"
+        }
+        val tamperedPlan = plan.toWire().toMutableMap().apply { put("max_writes", 999L) }
+        val tampered = payload.toMutableMap().apply { put("development_plan", tamperedPlan) }
+        check(runCatching { ApprovalReview.parse(FlatJson.encode(tampered)) }.isFailure) {
+            "tampered plan details must not appear as an approvable card"
+        }
+        val badOperationDigest = payload.toMutableMap().apply { put("canonical_arguments_digest", "c".repeat(64)) }
+        check(runCatching { ApprovalReview.parse(FlatJson.encode(badOperationDigest)) }.isFailure) {
+            "displayed plan must match the supervisor's exact operation digest"
+        }
+        val mutablePaths = parsed.developmentPlan!!.allowedPaths as MutableList<String>
+        mutablePaths.add("outside-approved-scope")
+        check(runCatching { parsed.validateForDecision(operationDigest, 1_000) }.isFailure) {
+            "mutated plan details must fail closed at the approval action"
+        }
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun localTaskHistoryIsRestartSafe() {
         val directory = java.nio.file.Files.createTempDirectory("jarvis-local-task-history").toFile()

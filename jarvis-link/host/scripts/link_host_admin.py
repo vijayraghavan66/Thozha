@@ -12,6 +12,10 @@ Commands:
   pending    --relay URL                                         list companions awaiting certification
   certify    --relay URL --device-id ID --approve-local          sign a certificate for ONE device
   revoke     --relay URL --device-id ID --approve-local          revoke ONE companion device
+  authorize-development --relay URL --device-id ID --approve-local --confirm-device-id ID
+                                                               grant development scope to an already certified companion
+  revoke-development --device-id ID --approve-local --confirm-device-id ID
+                                                               remove development scope without revoking pairing
   revoke     --relay URL --device-id ID --approve-local          revoke ONE companion device
   request-approval --device-id ID [--message M]                queue a harmless approval; serve sends it
   serve      --relay URL [--interval S]                          supervisor loop: create, receive, resume, publish
@@ -37,7 +41,12 @@ from cryptography.hazmat.primitives import serialization
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from jarvis_link_host.client import RelayClient, relay_failure_log_fields  # noqa: E402
 from jarvis_link_host.crypto import DeviceCertificate, DeviceIdentity, device_id_for_signing_key, issue_device_certificate  # noqa: E402
-from jarvis_link_host.host import JarvisLinkHost  # noqa: E402
+from jarvis_link_host.host import (  # noqa: E402
+    JarvisLinkHost,
+    DEVELOPMENT_ALLOWLIST_PATH,
+    authorize_development_companion,
+    revoke_development_companion,
+)
 from jarvis_link_host.runtime import HostRelayRuntime  # noqa: E402
 from jarvis_link_host.openjarvis_adapter import OpenJarvisSupervisorAdapter  # noqa: E402
 from jarvis_link_host.response_outbox import HostResponseOutbox  # noqa: E402
@@ -337,6 +346,53 @@ def cmd_certify(args, path: Path) -> dict:
     return {"device_id": args.device_id, "status": client.certify_device(cert.to_dict())["status"]}
 
 
+def _require_development_owner_confirmation(args) -> None:
+    if not args.approve_local:
+        raise SystemExit("refusing to change development scope without --approve-local")
+    if not args.device_id or args.confirm_device_id != args.device_id:
+        raise SystemExit("repeat the exact --device-id with --confirm-device-id to authorize this scope change")
+
+
+def cmd_authorize_development(args, path: Path) -> dict:
+    """Allow one already host-certified companion to request development scope."""
+    _require_development_owner_confirmation(args)
+    state, client, identity = _relay(args, path)
+    certificate = _companion_certificate(client, args.device_id)
+    added = authorize_development_companion(
+        device_id=args.device_id,
+        certificate=certificate,
+        trusted_host_signing_public_der=identity.signing_public_der,
+        expected_tenant_id=state["tenant_id"],
+        expected_issuer_device_id=state["host_device_id"],
+        owner_authorized=True,
+        path=DEVELOPMENT_ALLOWLIST_PATH,
+    )
+    return {
+        "device_id": args.device_id,
+        "status": "authorized_for_development" if added else "already_authorized_for_development",
+        "allowlist": str(DEVELOPMENT_ALLOWLIST_PATH),
+        "pairing_changed": False,
+        "relay_certificate_changed": False,
+    }
+
+
+def cmd_revoke_development(args, _path: Path) -> dict:
+    """Remove only development scope; keep normal device pairing and certificate intact."""
+    _require_development_owner_confirmation(args)
+    removed = revoke_development_companion(
+        device_id=args.device_id,
+        owner_authorized=True,
+        path=DEVELOPMENT_ALLOWLIST_PATH,
+    )
+    return {
+        "device_id": args.device_id,
+        "status": "development_scope_revoked" if removed else "not_in_development_allowlist",
+        "allowlist": str(DEVELOPMENT_ALLOWLIST_PATH),
+        "pairing_changed": False,
+        "relay_certificate_changed": False,
+    }
+
+
 def _companion_certificate(client: RelayClient, device_id: str) -> dict:
     return client.signed_request("GET", f"/v1/devices/{device_id}/certificate").json()["certificate"]
 
@@ -514,6 +570,8 @@ def cmd_revoke(args, path: Path) -> dict:
 
 COMMANDS = {"serve": cmd_serve, "bootstrap": cmd_bootstrap, "root": cmd_root, "invite": cmd_invite,
             "pending": cmd_pending, "certify": cmd_certify, "revoke": cmd_revoke,
+            "authorize-development": cmd_authorize_development,
+            "revoke-development": cmd_revoke_development,
             "request-approval": cmd_request_approval}
 
 
@@ -524,6 +582,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--tenant")
     parser.add_argument("--bootstrap-secret")
     parser.add_argument("--device-id")
+    parser.add_argument("--confirm-device-id", help="repeat the exact device ID for development-scope changes")
     parser.add_argument("--approve-local", action="store_true")
     parser.add_argument("--expires", type=int, default=600)
     parser.add_argument("--message", default="JARVIS_SIMULATED_APPROVAL_1")
