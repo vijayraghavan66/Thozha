@@ -86,6 +86,7 @@ class LinkRuntime(
         private val stateLock = Any()
         private val syncLock = Any()
         private val terminalStates = setOf("COMPLETED", "FAILED", "CANCELLED", "REJECTED", "EXPIRED", "INDETERMINATE")
+        private const val QUEUED_DELIVERY_RECONCILIATION_MS = 2 * 60 * 1000L
     }
 
     private fun isStaleAfterTerminal(entry: Map<String, Any>, newState: String): Boolean =
@@ -183,6 +184,7 @@ class LinkRuntime(
         } catch (failure: Exception) {
             error = errorCode(failure)
         }
+        reconcileOrphanedQueuedRequests()
         val newlyPending = mutableListOf<ApprovalReview>()
         try {
             companion(relayUrl).pollInbox(20, ::persistInboxEvent)
@@ -255,6 +257,7 @@ class LinkRuntime(
             "idempotency_key" to idempotencyKey,
             "state" to "SUBMITTING",
             "authoritative" to false,
+            "updated_at_unix_ms" to now(),
         )
         saveDecisionState(approvalId, submitting)
         return try {
@@ -270,6 +273,7 @@ class LinkRuntime(
                 put("queued_offline", result.queuedOffline)
                 put("relay_status", result.receipt?.status ?: "queued_locally")
                 put("state", if (result.queuedOffline) "QUEUED" else "DELIVERED_WAITING_SUPERVISOR")
+                put("updated_at_unix_ms", now())
             }
             saveDecisionState(approvalId, submitted)
             approvalDecisionState(approvalId) ?: submitted
@@ -277,6 +281,7 @@ class LinkRuntime(
             val failed = LinkedHashMap(submitting).apply {
                 put("state", "DELIVERY_FAILED")
                 put("error_code", errorCode(failure))
+                put("updated_at_unix_ms", now())
             }
             saveDecisionState(approvalId, failed)
             throw failure
@@ -490,6 +495,17 @@ class LinkRuntime(
     fun flush(relayUrl: String): Map<String, Any> {
         val companion = companion(relayUrl)
         val receipts = companion.flushOutbox()
+        receipts.forEach { receipt ->
+            val entry = conversation().firstOrNull { it["message_id"] == receipt.messageId }
+            if (entry?.get("state") == "QUEUED") {
+                applyToConversation(
+                    receipt.messageId,
+                    receipt.messageId,
+                    "SENT",
+                    "Relay accepted this request; waiting for Jarvis on the Mac.",
+                )
+            }
+        }
         if (receipts.isNotEmpty()) {
             val delivered = receipts.associate { it.messageId to it.status }
             val decisions = approvalDecisionStates().toMutableMap()
@@ -501,6 +517,7 @@ class LinkRuntime(
                     put("queued_offline", false)
                     put("relay_status", relayStatus)
                     put("state", "DELIVERED_WAITING_SUPERVISOR")
+                    put("updated_at_unix_ms", now())
                 }
                 changed = true
             }
@@ -512,6 +529,57 @@ class LinkRuntime(
             "connection" to companion.connectionState.name,
             "last_error" to (companion.lastErrorCode ?: ""),
         )
+    }
+
+    /** Surface a queued local request when its envelope is gone but no Mac result ever arrived. */
+    private fun reconcileOrphanedQueuedRequests() = synchronized(stateLock) {
+        val timestamp = now()
+        val outbox = FileMessageOutbox(File(storeDir, "outbox.json"))
+        val parsedOutbox = outbox.list().mapNotNull { raw ->
+            runCatching { raw to LinkEnvelope.parse(raw) }.getOrNull()
+        }
+        val expired = parsedOutbox.filter { (_, envelope) -> envelope.header.expiresAtUnixMs <= timestamp }
+        expired.forEach { (_, envelope) -> outbox.remove(envelope.header.messageId) }
+        val liveOutboxIds = parsedOutbox.asSequence()
+            .map { (_, envelope) -> envelope.header }
+            .filter { it.expiresAtUnixMs > timestamp }
+            .map { it.messageId }
+            .toSet()
+        var changed = false
+        val decisions = approvalDecisionStates().toMutableMap()
+        for ((approvalId, previous) in decisions.toMap()) {
+            val messageId = previous["message_id"] as? String ?: continue
+            val stateName = previous["state"] as? String
+            val updatedAt = (previous["updated_at_unix_ms"] as? Number)?.toLong() ?: continue
+            if (stateName == "QUEUED" && messageId !in liveOutboxIds &&
+                timestamp - updatedAt >= QUEUED_DELIVERY_RECONCILIATION_MS
+            ) {
+                decisions[approvalId] = LinkedHashMap(previous).apply {
+                    put("state", "DELIVERY_FAILED")
+                    put("queued_offline", false)
+                    put("error_code", "REQUEST_EXPIRED")
+                    put("updated_at_unix_ms", timestamp)
+                }
+                changed = true
+            }
+        }
+        val updated = conversation().map { entry ->
+            val messageId = entry["message_id"] as? String ?: return@map entry
+            val stateName = (entry["state"] as? String)?.uppercase()
+            val transportName = entry["transport"] as? String
+            val createdAt = (entry["created_at_unix_ms"] as? Number)?.toLong() ?: return@map entry
+            if (stateName == "QUEUED" && transportName in setOf("link", "telegram") &&
+                messageId !in liveOutboxIds && timestamp - createdAt >= QUEUED_DELIVERY_RECONCILIATION_MS
+            ) {
+                changed = true
+                LinkedHashMap(entry).apply {
+                    put("state", "UNCONFIRMED")
+                    put("summary", "No Mac delivery receipt was confirmed for this queued request. Check task status before retrying.")
+                    put("updated_at_unix_ms", timestamp)
+                }
+            } else entry
+        }
+        if (changed) save(mapOf("conversation" to updated, "approval_decision_states" to decisions))
     }
 
     fun status(): LinkStatus {

@@ -592,7 +592,7 @@ object CompanionProtocolTest {
     }
 
     private fun approvalDecisionRequiresAuthoritativeCorrelatedResult() {
-        val now = 1_800_000_000_000L
+        var now = 1_800_000_000_000L
         val directory = java.nio.file.Files.createTempDirectory("approval-decision-state").toFile()
         try {
             val root = LinkCrypto.newSigningIdentity()
@@ -717,6 +717,25 @@ object CompanionProtocolTest {
             }
             val recent = runtime.recentUpdates().last()["approval_decision_result"] as Map<*, *>
             check(recent["approval_id"] == approval.approvalId && recent["in_reply_to"] == decisionMessageId)
+
+            val queuedRequestId = "79".repeat(16)
+            runtime.recordLocalTaskRequest(queuedRequestId, "What is my Mac battery level?", transport = "telegram")
+            offline = true
+            val queuedRequest = runtime.submitFastCommand(
+                "http://127.0.0.1:8787", FastCommandRequest.MacBatteryStatus, queuedRequestId,
+            )
+            check(queuedRequest.queuedOffline)
+            runtime.recordLocalTaskResult(queuedRequestId, queuedRequestId, "QUEUED", "Queued on phone")
+            now += FAST_COMMAND_DEFAULT_TTL_MS + 1
+            val debugOutbox = FileMessageOutbox(File(directory, "outbox.json")).list()
+                .map { raw -> LinkEnvelope.parse(raw).header.let { it.messageId + ":" + it.expiresAtUnixMs } }
+            runtime.syncNow("http://127.0.0.1:8787")
+            val expiredEntry = runtime.conversation().first { it["message_id"] == queuedRequestId }
+            check(expiredEntry["state"] == "UNCONFIRMED") {
+                "an expired local envelope with no Mac receipt must not remain silently queued: now=$now status=${runtime.status()} outbox=$debugOutbox entry=$expiredEntry"
+            }
+            check((expiredEntry["summary"] as String).contains("Check task status"))
+            check(runtime.status().outboxSize == 0)
         } finally {
             directory.deleteRecursively()
         }
