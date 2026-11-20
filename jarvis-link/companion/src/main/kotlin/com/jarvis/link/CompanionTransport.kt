@@ -6,6 +6,11 @@ import java.nio.charset.StandardCharsets.UTF_8
 enum class LinkConnectionState { OFFLINE, CONNECTING, CONNECTED, RECONNECTING, REAUTH_REQUIRED }
 enum class AckStatus { RECEIVED, REJECTED }
 
+// TDLib can impose a server-requested retry_after of several minutes. A 2-minute
+// fast-command envelope expired during a verified 134-second flood wait, so retain
+// typed requests for six minutes (the 300-second client retry bound plus margin).
+internal const val FAST_COMMAND_DEFAULT_TTL_MS = 6 * 60 * 1000L
+
 data class RelayReceipt(val messageId: String, val status: String, val expiresAtUnixMs: Long)
 data class InboxItem(val envelope: LinkEnvelope, val senderCertificate: DeviceCertificate)
 data class InboxPage(val messages: List<InboxItem>, val nextCursor: String?)
@@ -653,7 +658,7 @@ class JarvisLinkCompanion(
         val envelope = LinkCrypto.createEnvelope(
             tenantId, signingIdentity, hostCertificate, hostRoot,
             "fast.command", command.toJson(), nowUnixMs = now(),
-            ttlMs = ttlMs ?: (2 * 60 * 1000L),
+            ttlMs = ttlMs ?: FAST_COMMAND_DEFAULT_TTL_MS,
             messageId = stableId,
         )
         return sendOrQueue(envelope)

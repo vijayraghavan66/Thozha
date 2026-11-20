@@ -30,6 +30,7 @@ object CompanionProtocolTest {
         assistantTextJsonRoundTrip()
         typedFastCommandEnvelopeIsAllowed(companion, hostCertificate, hostRoot, now)
         trustedAppAndBatteryFastCommandsAreNarrowlyTyped()
+        fastCommandExpiryCoversObservedTelegramRetryWindow(now)
         endToEndEnvelopeRoundTrip(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         staleTimestampRetryKeepsAuthenticatedEnvelopeQueued(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
@@ -87,6 +88,28 @@ object CompanionProtocolTest {
         }
         check(runCatching { FastCommandRequest.OpenApplication("com.apple.calculator --args", "01".repeat(16)) }.isFailure) {
             "app arguments must never be accepted in the typed app target"
+        }
+    }
+
+    private fun fastCommandExpiryCoversObservedTelegramRetryWindow(now: Long) {
+        val root = LinkCrypto.newSigningIdentity()
+        val host = LinkCrypto.newSigningIdentity()
+        val hostEncryption = LinkCrypto.newEncryptionIdentity(host)
+        val phone = LinkCrypto.newSigningIdentity()
+        val phoneEncryption = LinkCrypto.newEncryptionIdentity(phone)
+        val hostCertificate = certificate(root, host, hostEncryption, "host", now)
+        val phoneCertificate = certificate(root, phone, phoneEncryption, "companion", now)
+        val relay = MemoryRelay(phone)
+        val companion = JarvisLinkCompanion(
+            "tenant_sim", phone, phoneEncryption, phoneCertificate,
+            TrustedHostRoot(root.deviceId, root.publicKeyBase64), hostCertificate, relay,
+            MemoryMessageOutbox(), MemoryMessageInbox(), now = { now },
+        ).also { it.setOnline(true) }
+        val requestId = "79".repeat(16)
+        companion.submitFastCommand(FastCommandRequest.MacBatteryStatus, clientRequestId = requestId)
+        val envelope = LinkEnvelope.parse(relay.queued.single())
+        check(envelope.header.expiresAtUnixMs - envelope.header.issuedAtUnixMs == FAST_COMMAND_DEFAULT_TTL_MS) {
+            "typed requests must outlive the observed 134-second Telegram 429 backoff"
         }
     }
 
