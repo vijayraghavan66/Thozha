@@ -615,6 +615,87 @@ def test_link_engine_context_selects_basic_mcp_mode(monkeypatch):
         assert handler("mcpServer/tool/call", {"server": "other", "tool": "get_disk_usage"})["isError"] is True
 
 
+def test_development_codex_cwd_and_registered_mcp_are_workspace_scoped(tmp_path, monkeypatch):
+    from pathlib import Path
+    from openjarvis.engine.codex_sdk import _config_overrides, _working_directory_for_current_task
+
+    workspace = tmp_path / "taskflow"
+    workspace.mkdir()
+    monkeypatch.setenv("JARVIS_DEV_WORKSPACE", str(workspace))
+    with bind_task(
+        "a" * 32,
+        source="jarvis_link",
+        scope="development",
+        allowed_capabilities=supervisor.LINK_SCOPE_CAPABILITIES["development"],
+    ):
+        assert Path(_working_directory_for_current_task()) == workspace.resolve()
+        overrides = _config_overrides("control")
+        assert any("mcp_servers.jarvis_dev.command" in entry for entry in overrides)
+        assert not any("mcp_servers.jarvis_mac." in entry for entry in overrides)
+
+    with bind_task(
+        "b" * 32,
+        source="jarvis_link",
+        scope="assistant",
+        allowed_capabilities=supervisor.LINK_SCOPE_CAPABILITIES["assistant"],
+    ):
+        assert Path(_working_directory_for_current_task()) == Path.home() / ".openjarvis"
+
+
+def test_codex_mcp_callback_routes_only_bound_development_tools(link_client, monkeypatch):
+    from openjarvis.engine.codex_sdk import _approval_handler
+
+    _, store, _ = link_client
+    owner = "device:" + "d" * 32
+    run = store.create_link_task(
+        "Create a bounded evaluation project",
+        capability_scope=["development"],
+        idempotency_key="codex-dev-mcp-callback-0001",
+        owner_actor=owner,
+    )
+    task_id = run["task_id"]
+    store.start_link_task(
+        task_id,
+        objective_digest=run["objective_digest"],
+        objective_text_digest=run["objective_digest"],
+        capability_scope=["development"],
+        idempotency_key=run["idempotency_key"],
+    )
+    dispatched = []
+
+    def fake_dev_call(tool, arguments, **authorization):
+        dispatched.append((tool, dict(arguments), authorization))
+        return {"content": [{"type": "text", "text": "isolated dev tool result"}], "isError": False}
+
+    monkeypatch.setattr("openjarvis.engine.codex_sdk._call_local_dev_mcp", fake_dev_call)
+    handler = _approval_handler("control")
+    with bind_task(
+        task_id,
+        source="jarvis_link",
+        scope="development",
+        allowed_capabilities=supervisor.LINK_SCOPE_CAPABILITIES["development"],
+    ):
+        result = handler(
+            "mcpServer/tool/call",
+            {"server": "jarvis_dev", "tool": "list_project_files", "arguments": {"dir": "."}},
+        )
+        denied = handler(
+            "mcpServer/tool/call",
+            {"server": "jarvis_dev", "tool": "shell_exec", "arguments": {"command": "open -a TextEdit"}},
+        )
+    assert result["isError"] is False
+    assert result["content"][0]["text"] == "isolated dev tool result"
+    assert len(dispatched) == 1
+    assert dispatched[0][0:2] == ("list_project_files", {"dir": "."})
+    assert dispatched[0][2] == {
+        "supervisor_task_id": task_id,
+        "supervisor_task_source": "jarvis_link",
+        "supervisor_task_scope": "development",
+    }
+    assert denied["isError"] is True
+    assert len(dispatched) == 1
+
+
 def test_link_executor_denies_code_execution_outside_read_only_scope(tmp_path):
     store = SupervisorStore(str(tmp_path / "supervisor.db"))
     link = store.create_link_task(
