@@ -12,6 +12,7 @@ database schema are not modified; the adapter keeps its idempotency records in i
 from __future__ import annotations
 
 import sqlite3
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,15 +47,27 @@ class OpenJarvisSupervisorAdapter:
         self._db.commit()
 
     # --- SupervisorPort -------------------------------------------------------------------------------
-    def submit_task(self, *, objective: str, capability_scope: list[str], idempotency_key: str) -> dict[str, Any]:
+    def submit_task(self, *, objective: str, capability_scope: list[str], idempotency_key: str,
+                    requester_device_id: str) -> dict[str, Any]:
+        if not re.fullmatch(r"[0-9a-f]{32}", requester_device_id or ""):
+            raise SupervisorRefused("task requester device ID is invalid")
         with self._lock:
             row = self._db.execute("SELECT task_id FROM submit_keys WHERE idempotency_key=?", (idempotency_key,)).fetchone()
             if row is None:
-                task_id = self.store.create_task(objective, capabilities=list(capability_scope), metadata={"source": "jarvis_link"})
+                task_id = self.store.create_task(objective, capabilities=list(capability_scope),
+                                                 metadata={"source": "jarvis_link", "requester_device_id": requester_device_id})
                 self._db.execute("INSERT INTO submit_keys(idempotency_key, task_id) VALUES(?, ?)", (idempotency_key, task_id))
                 self._db.commit()
             else:
                 task_id = row[0]
+                task = self.store.get_task(task_id)
+                try:
+                    import json
+                    metadata = json.loads(task["recovery_json"] or "{}") if task is not None else {}
+                except (TypeError, ValueError):
+                    metadata = {}
+                if metadata.get("requester_device_id") != requester_device_id:
+                    raise SupervisorRefused("task idempotency key belongs to another companion")
         task = self.store.get_task(task_id)
         if task is None:
             raise SupervisorRefused("supervisor did not record the task")
@@ -92,24 +105,40 @@ class OpenJarvisSupervisorAdapter:
 
     def decide_approval(self, *, task_id: str, approval_id: str, decision: str,
                         expected_arguments_digest: str, idempotency_key: str,
+                        requester_device_id: str,
                         continuation_objective: str | None = None) -> dict[str, Any]:
+        if not re.fullmatch(r"[0-9a-f]{32}", requester_device_id or ""):
+            raise SupervisorRefused("approval requester device ID is invalid")
         with self._lock:
             cached = self._db.execute("SELECT result_json FROM decision_keys WHERE idempotency_key=?", (idempotency_key,)).fetchone()
             if cached is not None:
                 import json
-                return json.loads(cached[0])
+                prior = json.loads(cached[0])
+                if prior.get("requester_device_id") != requester_device_id:
+                    raise SupervisorRefused("approval idempotency key belongs to another companion")
+                prior.pop("requester_device_id", None)
+                return prior
+            task = self.store.get_task(task_id)
+            try:
+                import json
+                metadata = json.loads(task["recovery_json"] or "{}") if task is not None else {}
+            except (TypeError, ValueError):
+                metadata = {}
+            if metadata.get("requester_device_id") != requester_device_id:
+                raise SupervisorRefused("approval task belongs to another companion")
             accepted = self.store.decide_approval(
                 approval_id, decision=decision, expected_digest=expected_arguments_digest,
-                task_id=task_id, actor=self.actor, nonce=idempotency_key,
+                task_id=task_id, actor="device:" + requester_device_id, nonce=idempotency_key,
             )
             if not accepted:
                 raise SupervisorRefused("supervisor refused the approval decision (digest, expiry, status, or replay)")
             status = self.store.approval(approval_id)["status"]
-            result = {"task_id": task_id, "approval_id": approval_id, "status": status, "simulated": False}
+            result = {"task_id": task_id, "approval_id": approval_id, "status": status,
+                      "simulated": False, "requester_device_id": requester_device_id}
             import json
             self._db.execute("INSERT INTO decision_keys(idempotency_key, result_json) VALUES(?, ?)", (idempotency_key, json.dumps(result, sort_keys=True)))
             self._db.commit()
-            return result
+            return {k: v for k, v in result.items() if k != "requester_device_id"}
 
     def cancel_task(self, task_id: str, idempotency_key: str) -> dict[str, Any]:
         task = self.store.get_task(task_id)

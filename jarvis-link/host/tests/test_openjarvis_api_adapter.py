@@ -35,6 +35,7 @@ def test_submit_and_approval_decision_use_only_authenticated_loopback(tmp_path):
         objective="Open TextEdit then summarize",
         capability_scope=["assistant"],
         idempotency_key="link-message-id-0001",
+        requester_device_id="d" * 32,
     )
     assert task["task_id"] == "a" * 32
     assert task["state"] == "WAITING_APPROVAL"
@@ -44,6 +45,7 @@ def test_submit_and_approval_decision_use_only_authenticated_loopback(tmp_path):
         "objective": "Open TextEdit then summarize",
         "capability_scope": ["assistant"],
         "idempotency_key": "link-message-id-0001",
+        "requester_device_id": "d" * 32,
     }
     assert "test-local-supervisor-key" not in str(requests[0].url)
 
@@ -53,12 +55,14 @@ def test_submit_and_approval_decision_use_only_authenticated_loopback(tmp_path):
         decision="approve",
         expected_arguments_digest="c" * 64,
         idempotency_key="approval-message-id-001",
+        requester_device_id="d" * 32,
         continuation_objective="Open TextEdit then summarize",
     )
     assert result["status"] == "CONSUMED"
     body = json.loads(requests[1].content)
     assert body["continuation_objective"] == "Open TextEdit then summarize"
     assert body["expected_operation_digest"] == "c" * 64
+    assert body["requester_device_id"] == "d" * 32
     assert "test-local-supervisor-key" not in requests[1].content.decode()
     client.close()
 
@@ -66,38 +70,140 @@ def test_submit_and_approval_decision_use_only_authenticated_loopback(tmp_path):
 def test_fast_command_adapter_sends_only_typed_loopback_requests(tmp_path):
     key = _key(tmp_path / "api-key")
     requests = []
-    approval = {
-        "approval_id": "a" * 32,
-        "task_id": "b" * 32,
-        "operation": "mcp:jarvis_mac:open_app",
-        "target": "Calculator",
-        "canonical_arguments_digest": "c" * 64,
-        "expires_at": "2026-11-18T12:00:00+00:00",
-        "summary": "Open Calculator after approval.",
-    }
     def handler(request):
         requests.append(request)
         body = json.loads(request.content)
         if body["command"] == "mac.status":
-            return httpx.Response(200, json={"command":"mac.status", "state":"ONLINE", "ai_available":True})
+            return httpx.Response(200, json={"command": "mac.status", "state": "COMPLETED",
+                                             "executed": True, "success": True,
+                                             "online": True, "ai_available": True,
+                                             "summary": "Mac is online. AI is available."})
         if body["command"] == "task.status":
             return httpx.Response(200, json={"command":"task.status", "state":"COMPLETED", "task_id":body["task_id"], "summary":"done"})
-        return httpx.Response(200, json={"command":"app.open", "state":"WAITING_APPROVAL", "task_id":approval["task_id"], "approval":approval})
+        return httpx.Response(200, json={
+            "command": "app.open", "state": "COMPLETED", "executed": True,
+            "success": True, "bundle_id": body["app"], "summary": "Calculator opened.",
+        })
     client = httpx.Client(transport=httpx.MockTransport(handler))
     adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
     requester = "d" * 32
-    assert adapter.fast_command(command="mac.status", requester=requester) == {
-        "state":"ONLINE", "ai_available":True,
+    assert adapter.fast_command(command="mac.status", requester_device_id=requester) == {
+        "state": "COMPLETED", "executed": True, "success": True,
+        "online": True, "ai_available": True, "summary": "Mac is online. AI is available.",
     }
-    assert adapter.fast_command(command="task.status", requester=requester, task_id="b" * 32)["summary"] == "done"
-    result = adapter.fast_command(command="app.open", requester=requester,
-                                  idempotency_key="e" * 32, app="Calculator")
-    assert result["state"] == "WAITING_APPROVAL"
-    assert result["approval"]["operation"] == "mcp:jarvis_mac:open_app"
+    assert adapter.fast_command(command="task.status", requester_device_id=requester, task_id="b" * 32)["summary"] == "done"
+    result = adapter.fast_command(command="app.open", requester_device_id=requester,
+                                  idempotency_key="e" * 32, app="com.apple.calculator")
+    assert result == {
+        "state": "COMPLETED", "bundle_id": "com.apple.calculator", "executed": True,
+        "success": True, "summary": "Calculator opened.",
+    }
+    app_request = json.loads(requests[2].content)
+    assert app_request == {
+        "command": "app.open", "requester_device_id": requester, "app": "com.apple.calculator",
+        "idempotency_key": "e" * 32,
+    }
+    assert not ({"path", "argv", "command_line", "arguments"} & set(app_request))
+    assert app_request["requester_device_id"] == requester
+    assert json.loads(requests[0].content) == {
+        "command": "mac.status", "requester_device_id": requester,
+    }
     assert all(r.url == "http://127.0.0.1:8000/v1/jarvis/link/fast-command" for r in requests)
     assert all(r.headers["authorization"] == "Bearer test-local-supervisor-key" for r in requests)
     with pytest.raises(SupervisorRefused):
-        adapter.fast_command(command="app.open", requester=requester, idempotency_key="f" * 32, app="Terminal")
+        adapter.fast_command(command="app.open", requester_device_id=requester, idempotency_key="f" * 32, app="Terminal")
+    with pytest.raises(SupervisorRefused, match="canonical trusted bundle ID"):
+        adapter.fast_command(command="app.open", requester_device_id=requester,
+                             idempotency_key="c" * 32, app="Calculator")
+    client.close()
+
+
+def test_typed_battery_command_requires_fresh_validated_status_fields(tmp_path):
+    key = _key(tmp_path / "api-key")
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={
+            "command": "mac.battery", "state": "COMPLETED", "executed": True,
+            "success": True, "battery_percent": 81, "charging": False,
+            "summary": "Battery level: 81%.",
+        })
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    result = adapter.fast_command(command="mac.battery", requester_device_id="d" * 32)
+    assert result == {"state": "COMPLETED", "executed": True, "success": True,
+                     "battery_percent": 81, "summary": "Battery level: 81%.", "charging": False}
+    assert json.loads(seen[0].content) == {"command": "mac.battery", "requester_device_id": "d" * 32}
+    client.close()
+
+
+@pytest.mark.parametrize("battery_percent", [-1, 101, True, "81"])
+def test_typed_battery_command_rejects_invalid_percentages(tmp_path, battery_percent):
+    key = _key(tmp_path / "api-key")
+    response = {"command": "mac.battery", "state": "COMPLETED", "executed": True,
+                "success": True, "battery_percent": battery_percent, "summary": "Battery."}
+    client = httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=response)))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    with pytest.raises(SupervisorRefused):
+        adapter.fast_command(command="mac.battery", requester_device_id="d" * 32)
+    client.close()
+
+
+@pytest.mark.parametrize("response", [
+    {"command": "app.open", "state": "COMPLETED", "executed": False,
+     "success": True, "bundle_id": "com.apple.calculator", "summary": "opened"},
+    {"command": "app.open", "state": "COMPLETED", "executed": True,
+     "success": True, "bundle_id": "com.fake.app", "summary": "opened"},
+    {"command": "app.open", "state": "COMPLETED", "executed": True,
+     "success": True, "bundle_id": "com.apple.calculator", "summary": ""},
+])
+def test_fast_app_result_requires_truthful_matching_execution_evidence(tmp_path, response):
+    key = _key(tmp_path / "api-key")
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=response)))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    with pytest.raises(SupervisorRefused):
+        adapter.fast_command(command="app.open", requester_device_id="d" * 32,
+                             idempotency_key="e" * 32, app="com.apple.calculator")
+    client.close()
+
+
+def test_fast_app_approval_fallback_is_bound_to_bundle_and_task(tmp_path):
+    key = _key(tmp_path / "api-key")
+    approval = {
+        "approval_id": "a" * 32,
+        "task_id": "b" * 32,
+        "operation": "mcp:jarvis_mac:open_app",
+        "target": "com.apple.calculator",
+        "canonical_arguments_digest": "c" * 64,
+        "expires_at_unix_ms": 1_800_000_000_000,
+    }
+    data = {"command": "app.open", "state": "WAITING_APPROVAL", "bundle_id": "com.apple.calculator",
+            "task_id": approval["task_id"], "approval": approval, "summary": "Approval required."}
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=data)))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    result = adapter.fast_command(command="app.open", requester_device_id="d" * 32,
+                                  idempotency_key="e" * 32, app="com.apple.calculator")
+    assert result == {"state": "WAITING_APPROVAL", "bundle_id": "com.apple.calculator",
+                      "task_id": approval["task_id"], "summary": "Approval required.",
+                      "approval": {**approval,
+                                   "redacted_summary": "Review the exact app activation before approving."}}
+    client.close()
+
+
+@pytest.mark.parametrize("state", ["EXECUTION_PENDING", "RUNNING", "INDETERMINATE"])
+def test_fast_app_inflight_state_is_preserved_without_claiming_completion(tmp_path, state):
+    key = _key(tmp_path / "api-key")
+    response = {"command": "app.open", "state": state, "bundle_id": "com.apple.calculator",
+                "task_id": "b" * 32, "summary": "Jarvis is reconciling the app activation."}
+    client = httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=response)))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    result = adapter.fast_command(command="app.open", requester_device_id="d" * 32,
+                                  idempotency_key="e" * 32, app="com.apple.calculator")
+    assert result == {"state": state, "bundle_id": "com.apple.calculator",
+                      "task_id": "b" * 32, "summary": "Jarvis is reconciling the app activation."}
+    assert "executed" not in result and "success" not in result
     client.close()
 
 
@@ -216,7 +322,8 @@ def test_adapter_refuses_non_loopback_targets_and_unsafe_credential_modes(tmp_pa
     os.chmod(key, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
     adapter = OpenJarvisApiSupervisorAdapter(key_file=key)
     with pytest.raises(SupervisorUnavailable):
-        adapter.submit_task(objective="read", capability_scope=["read_only"], idempotency_key="link-message-id-0002")
+        adapter.submit_task(objective="read", capability_scope=["read_only"], idempotency_key="link-message-id-0002",
+                            requester_device_id="d" * 32)
     adapter.close()
 
 
@@ -236,7 +343,8 @@ def test_adapter_can_read_api_key_from_local_openjarvis_config_only(tmp_path):
         config_file=config,
         http_client=client,
     )
-    adapter.submit_task(objective="read", capability_scope=["read_only"], idempotency_key="link-message-id-0005")
+    adapter.submit_task(objective="read", capability_scope=["read_only"], idempotency_key="link-message-id-0005",
+                        requester_device_id="d" * 32)
     assert seen[0].headers["authorization"] == "Bearer test-config-key"
     client.close()
 
@@ -251,7 +359,8 @@ def test_adapter_refuses_group_or_world_readable_config_credentials(tmp_path):
         http_client=httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"task_id": "a" * 32, "state": "COMPLETED"}))),
     )
     with pytest.raises(SupervisorUnavailable, match="configuration permissions"):
-        adapter.submit_task(objective="read only", capability_scope=["read_only"], idempotency_key="link-message-id-0007")
+        adapter.submit_task(objective="read only", capability_scope=["read_only"], idempotency_key="link-message-id-0007",
+                            requester_device_id="d" * 32)
     adapter.close()
 
 
@@ -260,7 +369,8 @@ def test_loopback_server_503_is_retryable(tmp_path):
     client = httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(503, json={"detail": "private"})))
     adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
     with pytest.raises(SupervisorUnavailable, match="HTTP 503"):
-        adapter.submit_task(objective="read", capability_scope=["read_only"], idempotency_key="link-message-id-0003")
+        adapter.submit_task(objective="read", capability_scope=["read_only"], idempotency_key="link-message-id-0003",
+                            requester_device_id="d" * 32)
     client.close()
 
 
@@ -283,6 +393,7 @@ def test_task_202_is_polled_until_supervisor_approval_state(tmp_path, monkeypatc
         objective="Open TextEdit after one approval",
         capability_scope=["assistant"],
         idempotency_key="link-message-id-0004",
+        requester_device_id="d" * 32,
     )
     assert result["state"] == "WAITING_APPROVAL"
     assert [request.method for request in requests] == ["POST", "GET"]
@@ -314,6 +425,7 @@ def test_async_202_persists_idempotency_mapping_before_receive_loop_returns(tmp_
         objective="a slow but safe task",
         capability_scope=["read_only"],
         idempotency_key="async-ledger-owner-0001",
+        requester_device_id="d" * 32,
     )
     saved = json.loads(ledger.read_text())
     assert result["state"] == "CREATED" and result["task_id"] == "9" * 32
@@ -509,7 +621,8 @@ def test_strict_recovery_keeps_unknown_conflict_unacknowledged_after_restart(tmp
     first_client = httpx.Client(transport=httpx.MockTransport(lost_response))
     first = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=first_client,
                                            submission_ledger=ledger, strict_recovery=True)
-    args = dict(objective="read safely", capability_scope=["read_only"], idempotency_key="lost-reply-unique-0001")
+    args = dict(objective="read safely", capability_scope=["read_only"], idempotency_key="lost-reply-unique-0001",
+                requester_device_id="d" * 32)
     with pytest.raises(SupervisorUnavailable):
         first.submit_task(**args)
     first_client.close()
@@ -539,7 +652,8 @@ def test_strict_cancel_uses_only_known_submission_mapping_and_checks_task_id(tmp
         return httpx.Response(200, json={"task_id": "a" * 32, "state": "COMPLETED"})
     client = httpx.Client(transport=httpx.MockTransport(handler))
     adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client, strict_recovery=True)
-    args = dict(objective="safe", capability_scope=["read_only"], idempotency_key="owned-submission-0001")
+    args = dict(objective="safe", capability_scope=["read_only"], idempotency_key="owned-submission-0001",
+                requester_device_id="d" * 32)
     adapter.submit_task(**args)
     assert adapter.cancel_task("a" * 32, "cancel-key")["state"] == "CANCELLED"
     assert adapter.cancel_task("a" * 32, "cancel-key")["state"] == "CANCELLED"

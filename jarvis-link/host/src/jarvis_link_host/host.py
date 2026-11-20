@@ -24,6 +24,7 @@ from .crypto import (
 )
 from .replay import ReplayCache
 from .supervisor import SupervisorPort
+from .trusted_apps import is_safe_untrusted_app_label, resolve_trusted_app
 
 _CAPABILITIES = {"read_only", "web_research", "desktop_observation", "assistant", "development"}
 # The development scope is never granted by a message. Only companion devices listed here (written by the Mac
@@ -178,6 +179,98 @@ def _task_submit_payload(payload: Mapping[str, Any]) -> tuple[str, list[str]]:
     return objective.strip(), scope
 
 
+def _trusted_app_result(command: str, display_name: str, bundle_id: str,
+                        result: Any) -> dict[str, Any]:
+    """Convert a supervisor app result without manufacturing execution success."""
+    if not isinstance(result, dict):
+        raise TaskEnvelopeError("supervisor returned an invalid app activation result")
+    state = result.get("state")
+    if state == "COMPLETED":
+        if (result.get("executed") is not True or result.get("success") is not True
+                or result.get("bundle_id") != bundle_id):
+            raise TaskEnvelopeError("supervisor did not verify the trusted app activation")
+        summary = result.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            raise TaskEnvelopeError("supervisor returned no verified app activation summary")
+        return {
+            "kind": "fast.result",
+            "command": command,
+            "state": "COMPLETED",
+            "bundle_id": bundle_id,
+            "executed": True,
+            "success": True,
+            "summary": summary.strip()[:500],
+        }
+    if state == "FAILED":
+        summary = result.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            summary = f"Could not open {display_name}. Check that it is installed and try again."
+        return {
+            "kind": "fast.result",
+            "command": command,
+            "state": "FAILED",
+            "bundle_id": bundle_id,
+            "executed": result.get("executed") is True,
+            "success": False,
+            "summary": summary.strip()[:500],
+        }
+    if state in {"EXECUTION_PENDING", "RUNNING", "INDETERMINATE"}:
+        task_id = result.get("task_id")
+        summary = result.get("summary")
+        if (not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id)
+                or not isinstance(summary, str) or not summary.strip()):
+            raise TaskEnvelopeError("supervisor returned an incomplete in-flight app result")
+        return {
+            "kind": "fast.result",
+            "command": command,
+            "state": state,
+            "task_id": task_id,
+            "bundle_id": bundle_id,
+            "summary": summary.strip()[:500],
+        }
+    if state == "WAITING_APPROVAL":
+        task_id = result.get("task_id")
+        approval = result.get("approval")
+        if (not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id)
+                or not isinstance(approval, dict)
+                or approval.get("task_id") != task_id
+                or approval.get("operation") != "mcp:jarvis_mac:open_app"
+                or approval.get("target") not in {bundle_id, display_name}
+                or not isinstance(approval.get("approval_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{32}", approval["approval_id"])
+                or not isinstance(approval.get("canonical_arguments_digest"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", approval["canonical_arguments_digest"])
+                or type(approval.get("expires_at_unix_ms")) is not int
+                or approval["expires_at_unix_ms"] <= 0):
+            raise TaskEnvelopeError("supervisor returned an app approval with a mismatched target")
+        result_task = task_id
+        summary = result.get("summary")
+        safe_approval = {
+            "approval_id": approval["approval_id"],
+            "task_id": task_id,
+            "operation": "mcp:jarvis_mac:open_app",
+            "target": approval["target"],
+            "canonical_arguments_digest": approval["canonical_arguments_digest"],
+            "expires_at_unix_ms": approval["expires_at_unix_ms"],
+            "redacted_summary": (
+                approval["redacted_summary"].strip()[:500]
+                if isinstance(approval.get("redacted_summary"), str) and approval["redacted_summary"].strip()
+                else "Review the exact app activation before approving."
+            ),
+        }
+        return {
+            "kind": "fast.result",
+            "command": command,
+            "state": "WAITING_APPROVAL",
+            "task_id": result_task,
+            "bundle_id": bundle_id,
+            "approval": safe_approval,
+            "summary": (summary.strip()[:500] if isinstance(summary, str) and summary.strip()
+                        else f"Jarvis is waiting for approval to open {display_name}."),
+        }
+    raise TaskEnvelopeError("supervisor returned an unsupported app activation state")
+
+
 class JarvisLinkHost:
     """Processes inbound encrypted envelopes; never runs arbitrary commands."""
     def __init__(
@@ -289,12 +382,41 @@ class JarvisLinkHost:
             if command == "mac.status" and set(payload) == {"command", "version"}:
                 if handler is None:
                     raise TaskEnvelopeError("supervisor fast status is unavailable")
-                result = handler(command=command, requester=envelope.from_device_id)
+                result = handler(command=command, requester_device_id=envelope.from_device_id)
+                if (not isinstance(result, dict) or result.get("state") != "COMPLETED"
+                        or result.get("executed") is not True or result.get("success") is not True
+                        or type(result.get("online")) is not bool or type(result.get("ai_available")) is not bool
+                        or not isinstance(result.get("summary"), str) or not result["summary"].strip()):
+                    raise TaskEnvelopeError("supervisor returned an invalid Mac status result")
                 return {
-                    "kind": "fast.result", "command": command, **result,
-                    "state": "COMPLETED",
-                    "summary": "Mac is online." + (" AI is available." if result.get("ai_available") else " AI is unavailable."),
+                    "kind": "fast.result", "command": command, "state": "COMPLETED",
+                    "executed": True, "success": True,
+                    "online": result["online"], "ai_available": result["ai_available"],
+                    "summary": result["summary"].strip()[:500],
                 }
+            if command == "mac.battery" and set(payload) == {"command", "version"}:
+                if handler is None:
+                    raise TaskEnvelopeError("supervisor fast battery status is unavailable")
+                result = handler(command=command, requester_device_id=envelope.from_device_id)
+                if not isinstance(result, dict):
+                    raise TaskEnvelopeError("supervisor returned an invalid battery status")
+                if result.get("state") == "FAILED":
+                    if result.get("success") is not False or not isinstance(result.get("summary"), str) or not result["summary"].strip():
+                        raise TaskEnvelopeError("supervisor returned an incomplete battery status failure")
+                    return {"kind": "fast.result", "command": command, "state": "FAILED",
+                            "success": False, "summary": result["summary"].strip()[:500]}
+                if (result.get("state") != "COMPLETED" or result.get("executed") is not True
+                        or result.get("success") is not True or type(result.get("battery_percent")) is not int
+                        or not 0 <= result["battery_percent"] <= 100
+                        or not isinstance(result.get("summary"), str) or not result["summary"].strip()
+                        or (result.get("charging") is not None and type(result.get("charging")) is not bool)):
+                    raise TaskEnvelopeError("supervisor returned an invalid battery status")
+                output = {"kind": "fast.result", "command": command, "state": "COMPLETED",
+                          "executed": True, "success": True,
+                          "battery_percent": result["battery_percent"], "summary": result["summary"].strip()[:500]}
+                if "charging" in result:
+                    output["charging"] = result["charging"]
+                return output
             if command == "task.status" and set(payload) == {"command", "task_id", "version"}:
                 task_id = payload.get("task_id")
                 if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
@@ -302,24 +424,65 @@ class JarvisLinkHost:
                 self._require_task_owner(envelope.from_device_id, task_id)
                 if handler is None:
                     raise TaskEnvelopeError("typed task status is unavailable")
-                result = handler(command=command, task_id=task_id, requester=envelope.from_device_id)
+                result = handler(command=command, task_id=task_id,
+                                 requester_device_id=envelope.from_device_id)
                 result.pop("task_id", None)
                 return {"kind": "fast.result", "command": command, "queried_task_id": task_id, **result,
                         "state": "COMPLETED", "summary": f"Task status: {result.get('state', 'unknown')}."}
-            if command == "app.open" and set(payload) == {"app", "command", "idempotency_key", "version"} and payload.get("app") == "Calculator":
+            if command == "app.open" and set(payload) == {"app", "command", "idempotency_key", "version"}:
+                app_value = payload.get("app")
                 if payload.get("idempotency_key") != envelope.message_id:
                     raise TaskEnvelopeError("fast command idempotency does not match signed envelope")
-                if handler is None:
-                    raise TaskEnvelopeError("supervisor fast command approval is unavailable")
-                # Supervisor creates the exact operation approval; host never launches the app here.
-                result = handler(command=command, app="Calculator", requester=envelope.from_device_id,
-                                 idempotency_key=envelope.message_id)
-                task_id = result.get("task_id") if isinstance(result, dict) else None
+                trusted_app = resolve_trusted_app(app_value)
+                if trusted_app is not None:
+                    if handler is None:
+                        raise TaskEnvelopeError("supervisor fast application activation is unavailable")
+                    # Only the canonical bundle ID crosses the host/supervisor boundary.
+                    # No caller-provided path or arguments can reach the executor.
+                    result = handler(command=command, app=trusted_app.bundle_id,
+                                     requester_device_id=envelope.from_device_id,
+                                     idempotency_key=envelope.message_id)
+                    output = _trusted_app_result(command, trusted_app.display_name,
+                                                 trusted_app.bundle_id, result)
+                    task_id = output.get("task_id")
+                    observer = getattr(self, "task_observer", None)
+                    if isinstance(task_id, str) and observer is not None:
+                        observer(task_id=task_id, idempotency_key=envelope.message_id,
+                                 companion_id=envelope.from_device_id)
+                    return output
+
+                # An unknown but plain app label is not implicitly trusted. Route it
+                # through the normal assistant/supervisor path so the existing
+                # exact-operation approval and sandbox policy remain authoritative.
+                if not is_safe_untrusted_app_label(app_value):
+                    raise TaskEnvelopeError("untrusted app target must be a plain application name")
+                objective = (
+                    f"Open the installed application named {app_value!r} in the foreground. "
+                    "This app is outside Jarvis's trusted automatic-launch list. Use only "
+                    "the existing app-open capability and require its normal exact-operation "
+                    "approval before activating it. Do not install software, run commands, "
+                    "open paths, change settings, or take other actions."
+                )
+                accepted = self.supervisor.submit_task(
+                    objective=objective,
+                    capability_scope=["assistant"],
+                    idempotency_key=envelope.message_id,
+                    requester_device_id=envelope.from_device_id,
+                )
+                task_id = accepted.get("task_id") if isinstance(accepted, dict) else None
+                if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
+                    raise RuntimeError("supervisor returned an invalid app-review task")
                 observer = getattr(self, "task_observer", None)
-                if isinstance(task_id, str) and observer is not None:
+                if observer is not None:
                     observer(task_id=task_id, idempotency_key=envelope.message_id,
                              companion_id=envelope.from_device_id)
-                return {"kind": "fast.result", "command": command, "summary": "Calculator requires your approval on this phone.", **result}
+                state = accepted.get("state")
+                return {
+                    "kind": "task.accepted",
+                    "task_id": task_id,
+                    "state": state if isinstance(state, str) else "ACCEPTED",
+                    "summary": "Target is not trusted for automatic launch; sent for normal supervisor review.",
+                }
             raise TaskEnvelopeError("unsupported typed fast command")
 
         if envelope.kind == "task.submit":
@@ -330,6 +493,7 @@ class JarvisLinkHost:
                 objective=objective,
                 capability_scope=capabilities,
                 idempotency_key=envelope.message_id,
+                requester_device_id=envelope.from_device_id,
             )
             if not isinstance(result, dict) or not isinstance(result.get("task_id"), str):
                 raise RuntimeError("supervisor returned an invalid task result")
@@ -390,9 +554,20 @@ class JarvisLinkHost:
                 decision=decision,
                 expected_arguments_digest=digest,
                 idempotency_key=idem,
+                requester_device_id=envelope.from_device_id,
                 continuation_objective=continuation_objective,
             )
-            return {"kind": "approval.decision_result", **result}
+            if (not isinstance(result, dict)
+                    or result.get("task_id") != task_id
+                    or result.get("approval_id") != approval_id
+                    or not isinstance(result.get("status"), str)):
+                raise TaskEnvelopeError("supervisor returned an approval result with mismatched identity")
+            # The host binds the authenticated decision from the signed request
+            # into the encrypted response. The client uses it to reconcile only
+            # the matching local card; it is not proof that an approved operation
+            # has completed.
+            return {**result, "kind": "approval.decision_result", "task_id": task_id,
+                    "approval_id": approval_id, "decision": decision}
 
         raise TaskEnvelopeError(f"host does not accept message kind {envelope.kind}")
 

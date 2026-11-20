@@ -44,8 +44,10 @@ def _event_types(store, task_id):
 def test_submit_is_recorded_once_per_idempotency_key(world):
     store, adapter = world
     key = uuid.uuid4().hex
-    first = adapter.submit_task(objective="Summarise calendar", capability_scope=["read_only"], idempotency_key=key)
-    second = adapter.submit_task(objective="Summarise calendar", capability_scope=["read_only"], idempotency_key=key)
+    first = adapter.submit_task(objective="Summarise calendar", capability_scope=["read_only"], idempotency_key=key,
+                                requester_device_id="d" * 32)
+    second = adapter.submit_task(objective="Summarise calendar", capability_scope=["read_only"], idempotency_key=key,
+                                 requester_device_id="d" * 32)
     assert first["task_id"] == second["task_id"]
     task = store.get_task(first["task_id"])
     assert task["state"] == "CREATED" and task["capabilities_json"] == '["read_only"]'
@@ -54,11 +56,31 @@ def test_submit_is_recorded_once_per_idempotency_key(world):
 
 def test_distinct_messages_create_isolated_tasks(world):
     store, adapter = world
-    a = adapter.submit_task(objective="A", capability_scope=["read_only"], idempotency_key=uuid.uuid4().hex)
-    b = adapter.submit_task(objective="B", capability_scope=["web_research"], idempotency_key=uuid.uuid4().hex)
+    a = adapter.submit_task(objective="A", capability_scope=["read_only"], idempotency_key=uuid.uuid4().hex,
+                            requester_device_id="d" * 32)
+    b = adapter.submit_task(objective="B", capability_scope=["web_research"], idempotency_key=uuid.uuid4().hex,
+                            requester_device_id="d" * 32)
     assert a["task_id"] != b["task_id"]
     assert store.get_task(a["task_id"])["capabilities_json"] == '["read_only"]'
     assert store.get_task(b["task_id"])["capabilities_json"] == '["web_research"]'
+
+
+def test_task_idempotency_and_approval_decisions_are_device_bound(world):
+    store, adapter = world
+    owner = "d" * 32
+    other = "e" * 32
+    key = uuid.uuid4().hex
+    task = adapter.submit_task(objective="Owner task", capability_scope=["read_only"],
+                               idempotency_key=key, requester_device_id=owner)
+    with pytest.raises(SupervisorRefused, match="another companion"):
+        adapter.submit_task(objective="Owner task", capability_scope=["read_only"],
+                            idempotency_key=key, requester_device_id=other)
+    approval_id, digest = store.create_approval(task["task_id"], "shell_exec", "/tmp", {"command": ["true"]}, "test")
+    with pytest.raises(SupervisorRefused, match="another companion"):
+        adapter.decide_approval(task_id=task["task_id"], approval_id=approval_id, decision="approve",
+                                expected_arguments_digest=digest, idempotency_key=uuid.uuid4().hex,
+                                requester_device_id=other)
+    assert store.approval(approval_id)["status"] == "PENDING"
 
 
 def test_encrypted_task_reaches_real_store_and_replay_is_refused(world):
@@ -79,7 +101,8 @@ def test_encrypted_task_reaches_real_store_and_replay_is_refused(world):
 def test_approval_digest_and_single_use_are_enforced_by_the_store(world):
     store, adapter = world
     task_id = adapter.submit_task(objective="Needs approval", capability_scope=["read_only"],
-                                  idempotency_key=uuid.uuid4().hex)["task_id"]
+                                  idempotency_key=uuid.uuid4().hex,
+                                  requester_device_id="d" * 32)["task_id"]
     approval_id, digest = store.create_approval(task_id, "shell_exec", "/tmp",
                                                 {"command": ["echo", "JARVIS_SIMULATED"]}, "simulated approval")
     record = adapter.get_approval(approval_id)
@@ -87,27 +110,33 @@ def test_approval_digest_and_single_use_are_enforced_by_the_store(world):
     assert record.expires_at_unix_ms > int(time.time() * 1000)
     with pytest.raises(SupervisorRefused):
         adapter.decide_approval(task_id=task_id, approval_id=approval_id, decision="approve",
-                                expected_arguments_digest="0" * 64, idempotency_key="d-wrong")
+                                expected_arguments_digest="0" * 64, idempotency_key="d-wrong",
+                                requester_device_id="d" * 32)
     decided = adapter.decide_approval(task_id=task_id, approval_id=approval_id, decision="approve",
-                                      expected_arguments_digest=digest, idempotency_key="d-ok")
+                                      expected_arguments_digest=digest, idempotency_key="d-ok",
+                                      requester_device_id="d" * 32)
     assert decided["status"] == "APPROVED"
     assert adapter.decide_approval(task_id=task_id, approval_id=approval_id, decision="approve",
-                                   expected_arguments_digest=digest, idempotency_key="d-ok") == decided
+                                   expected_arguments_digest=digest, idempotency_key="d-ok",
+                                   requester_device_id="d" * 32) == decided
     with pytest.raises(SupervisorRefused):  # a different decision key cannot decide it again
         adapter.decide_approval(task_id=task_id, approval_id=approval_id, decision="reject",
-                                expected_arguments_digest=digest, idempotency_key="d-second")
+                                expected_arguments_digest=digest, idempotency_key="d-second",
+                                requester_device_id="d" * 32)
     assert store.approval(approval_id)["status"] == "APPROVED"
 
 
 def test_expired_approval_is_refused(world):
     store, adapter = world
     task_id = adapter.submit_task(objective="Short window", capability_scope=["read_only"],
-                                  idempotency_key=uuid.uuid4().hex)["task_id"]
+                                  idempotency_key=uuid.uuid4().hex,
+                                  requester_device_id="d" * 32)["task_id"]
     approval_id, digest = store.create_approval(task_id, "shell_exec", "/tmp", {"command": ["true"]}, "short", ttl_seconds=1)
     time.sleep(1.5)
     with pytest.raises(SupervisorRefused):
         adapter.decide_approval(task_id=task_id, approval_id=approval_id, decision="approve",
-                                expected_arguments_digest=digest, idempotency_key="late")
+                                expected_arguments_digest=digest, idempotency_key="late",
+                                requester_device_id="d" * 32)
     assert store.approval(approval_id)["status"] != "APPROVED"
 
 
@@ -115,7 +144,8 @@ def test_reject_pauses_the_task_and_forged_digest_never_reaches_the_store(world)
     store, adapter = world
     hostproc, _s, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
     hostproc.supervisor = adapter
-    task_id = adapter.submit_task(objective="Reject me", capability_scope=["read_only"], idempotency_key=uuid.uuid4().hex)["task_id"]
+    task_id = adapter.submit_task(objective="Reject me", capability_scope=["read_only"],
+                                  idempotency_key=uuid.uuid4().hex, requester_device_id=phone_id)["task_id"]
     approval_id, digest = store.create_approval(task_id, "shell_exec", "/tmp", {"command": ["true"]}, "reject case")
     now = int(time.time() * 1000)
     forged = task_envelope(host, phone, host_id, phone_id, host_cert, {
@@ -134,7 +164,8 @@ def test_reject_pauses_the_task_and_forged_digest_never_reaches_the_store(world)
 
 def test_progress_and_cancellation_are_recorded(world):
     store, adapter = world
-    task_id = adapter.submit_task(objective="Cancel me", capability_scope=["read_only"], idempotency_key=uuid.uuid4().hex)["task_id"]
+    task_id = adapter.submit_task(objective="Cancel me", capability_scope=["read_only"],
+                                  idempotency_key=uuid.uuid4().hex, requester_device_id="d" * 32)["task_id"]
     adapter.report_progress(task_id, "planning", "a" * 64)
     assert "link.progress" in _event_types(store, task_id)
     assert adapter.cancel_task(task_id, "cancel-1")["state"] == "CANCELLED"

@@ -21,7 +21,8 @@ def _key(path):
 
 
 def _submit(adapter, objective="Open TextEdit then summarize"):
-    return adapter.submit_task(objective=objective, capability_scope=["assistant"], idempotency_key=KEY)
+    return adapter.submit_task(objective=objective, capability_scope=["assistant"], idempotency_key=KEY,
+                               requester_device_id="d" * 32)
 
 
 def test_replay_of_the_same_request_returns_the_existing_task(tmp_path):
@@ -44,6 +45,25 @@ def test_replay_of_the_same_request_returns_the_existing_task(tmp_path):
     assert replay["task_id"] == TASK
     assert replay["state"] == "WAITING_APPROVAL"
     assert replay["replayed"] is True
+    client.close()
+
+
+def test_same_idempotency_key_cannot_be_reused_by_another_device(tmp_path):
+    key = _key(tmp_path / "api-key")
+    posts = []
+
+    def handler(request):
+        posts.append(request)
+        return httpx.Response(200, json={"task_id": TASK, "state": "CREATED"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
+    adapter.submit_task(objective="Open TextEdit then summarize", capability_scope=["assistant"],
+                        idempotency_key=KEY, requester_device_id="d" * 32)
+    with pytest.raises(SupervisorRefused, match="already used for a different request"):
+        adapter.submit_task(objective="Open TextEdit then summarize", capability_scope=["assistant"],
+                            idempotency_key=KEY, requester_device_id="e" * 32)
+    assert len(posts) == 1
     client.close()
 
 

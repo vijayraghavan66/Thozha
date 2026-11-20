@@ -23,6 +23,7 @@ import httpx
 
 from .openjarvis_adapter import SupervisorRefused
 from .supervisor import ApprovalRecord
+from .trusted_apps import resolve_trusted_app
 
 _ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -127,9 +128,10 @@ def _expiry_ms(value: str) -> int:
     return int(parsed.timestamp() * 1000)
 
 
-def _submission_digest(objective: str, capability_scope: list[str]) -> str:
+def _submission_digest(objective: str, capability_scope: list[str], requester_device_id: str) -> str:
     """Identifies one exact submission without storing the objective text."""
-    canonical = json.dumps({"objective": objective, "capability_scope": capability_scope},
+    canonical = json.dumps({"objective": objective, "capability_scope": capability_scope,
+                            "requester_device_id": requester_device_id},
                            sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -288,14 +290,17 @@ class OpenJarvisApiSupervisorAdapter:
             raise SupervisorRefused(f"OpenJarvis supervisor refused the request (HTTP {response.status_code})")
         return response.status_code, data
 
-    def submit_task(self, *, objective: str, capability_scope: list[str], idempotency_key: str) -> dict[str, Any]:
+    def submit_task(self, *, objective: str, capability_scope: list[str], idempotency_key: str,
+                    requester_device_id: str) -> dict[str, Any]:
         if not isinstance(objective, str) or not objective.strip() or len(objective.encode("utf-8")) > 4096:
             raise SupervisorRefused("task objective is invalid")
         if len(capability_scope) != 1 or capability_scope[0] not in _ALLOWED_SCOPES:
             raise SupervisorRefused("task capability scope is unsupported")
         if not _IDEMPOTENCY_RE.fullmatch(idempotency_key):
             raise SupervisorRefused("task idempotency key is invalid")
-        digest = _submission_digest(objective.strip(), capability_scope)
+        if not _ID_RE.fullmatch(requester_device_id or ""):
+            raise SupervisorRefused("task requester device ID is invalid")
+        digest = _submission_digest(objective.strip(), capability_scope, requester_device_id)
         # Bind the key before posting, including when multiple workers race.
         known = self._ledger.reserve(idempotency_key, digest)
         submit_path = "/v1/jarvis/link/tasks?mode=async" if self.async_submission else "/v1/jarvis/link/tasks"
@@ -303,6 +308,7 @@ class OpenJarvisApiSupervisorAdapter:
             "objective": objective.strip(),
             "capability_scope": capability_scope,
             "idempotency_key": idempotency_key,
+            "requester_device_id": requester_device_id,
         }, accept_statuses=frozenset({409}))
         if status == 409:
             # The supervisor already holds this key. Accept it only when this ledger recorded the same digest before
@@ -393,33 +399,107 @@ class OpenJarvisApiSupervisorAdapter:
             safe_events.append({"seq": seq, "event_type": event_type, "payload": payload})
         return {"task_id": task_id, "events": safe_events, "next_seq": next_seq}
 
-    def fast_command(self, *, command: str, requester: str, idempotency_key: str | None = None,
+    def fast_command(self, *, command: str, requester_device_id: str, idempotency_key: str | None = None,
                      task_id: str | None = None, app: str | None = None) -> dict[str, Any]:
         """Dispatch only the versioned, allowlisted deterministic command contract to loopback."""
-        if not re.fullmatch(r"[0-9a-f]{32}", requester or ""):
+        if not _ID_RE.fullmatch(requester_device_id or ""):
             raise SupervisorRefused("fast command requester is invalid")
-        body: dict[str, Any] = {"command": command, "requester": requester}
+        body: dict[str, Any] = {"command": command, "requester_device_id": requester_device_id}
         if command == "task.status":
             if not re.fullmatch(r"[0-9a-f]{32}", task_id or ""):
                 raise SupervisorRefused("fast task ID is invalid")
             body["task_id"] = task_id
-        elif command == "app.open" and app == "Calculator":
+        elif command == "mac.battery":
+            pass
+        elif command == "app.open":
             if not re.fullmatch(r"[0-9a-f]{32}", idempotency_key or ""):
                 raise SupervisorRefused("fast command idempotency key is invalid")
+            trusted_app = resolve_trusted_app(app)
+            if trusted_app is None or app != trusted_app.bundle_id:
+                raise SupervisorRefused("fast app activation requires a canonical trusted bundle ID")
             body.update({"app": app, "idempotency_key": idempotency_key})
         elif command != "mac.status":
             raise SupervisorRefused("fast command is not supported")
         _, data = self._request("POST", "/v1/jarvis/link/fast-command", body)
         if data.get("command") != command or not isinstance(data.get("state"), str):
             raise SupervisorRefused("OpenJarvis returned an invalid fast command result")
+        if command == "mac.status":
+            if (data.get("state") != "COMPLETED" or data.get("executed") is not True
+                    or data.get("success") is not True or type(data.get("online")) is not bool
+                    or type(data.get("ai_available")) is not bool
+                    or not isinstance(data.get("summary"), str) or not data["summary"].strip()):
+                raise SupervisorRefused("OpenJarvis returned an invalid Mac status result")
+            return {k: data[k] for k in ("state", "executed", "success", "online", "ai_available", "summary")}
+        if command == "mac.battery":
+            if data.get("state") == "FAILED":
+                if data.get("success") is not False or not isinstance(data.get("summary"), str) or not data["summary"].strip():
+                    raise SupervisorRefused("OpenJarvis returned an incomplete battery failure")
+                return {"state": "FAILED", "success": False, "summary": data["summary"].strip()[:500]}
+            if (data.get("state") != "COMPLETED" or data.get("executed") is not True
+                    or data.get("success") is not True or type(data.get("battery_percent")) is not int
+                    or not 0 <= data["battery_percent"] <= 100
+                    or not isinstance(data.get("summary"), str) or not data["summary"].strip()
+                    or (data.get("charging") is not None and type(data.get("charging")) is not bool)):
+                raise SupervisorRefused("OpenJarvis returned an invalid battery status result")
+            result = {"state": "COMPLETED", "executed": True, "success": True,
+                      "battery_percent": data["battery_percent"], "summary": data["summary"].strip()[:500]}
+            if "charging" in data:
+                result["charging"] = data["charging"]
+            return result
         if command == "app.open":
-            task = data.get("task_id")
-            approval = data.get("approval")
-            if (not isinstance(task, str) or not _ID_RE.fullmatch(task) or data["state"] != "WAITING_APPROVAL"
-                    or not isinstance(approval, dict) or approval.get("task_id") != task
-                    or approval.get("operation") != "mcp:jarvis_mac:open_app"
-                    or approval.get("target") != "Calculator"):
-                raise SupervisorRefused("OpenJarvis returned an invalid Calculator approval")
+            if data.get("bundle_id") != app:
+                raise SupervisorRefused("OpenJarvis app result is bound to a different bundle ID")
+            state = data["state"]
+            if state == "COMPLETED":
+                if data.get("executed") is not True or data.get("success") is not True:
+                    raise SupervisorRefused("OpenJarvis did not confirm app activation")
+                if not isinstance(data.get("summary"), str) or not data["summary"].strip():
+                    raise SupervisorRefused("OpenJarvis returned no verified app result")
+                return {k: data[k] for k in ("state", "bundle_id", "executed", "success", "summary")}
+            if state == "FAILED":
+                if data.get("success") is not False or not isinstance(data.get("summary"), str) or not data["summary"].strip():
+                    raise SupervisorRefused("OpenJarvis returned an incomplete app failure")
+                return {k: data[k] for k in ("state", "bundle_id", "executed", "success", "summary") if k in data}
+            if state in {"EXECUTION_PENDING", "RUNNING", "INDETERMINATE"}:
+                task = data.get("task_id")
+                if (not isinstance(task, str) or not _ID_RE.fullmatch(task)
+                        or not isinstance(data.get("summary"), str) or not data["summary"].strip()):
+                    raise SupervisorRefused("OpenJarvis returned an incomplete in-flight app result")
+                return {"state": state, "bundle_id": app, "task_id": task,
+                        "summary": data["summary"].strip()[:500]}
+            if state == "WAITING_APPROVAL":
+                task = data.get("task_id")
+                approval = data.get("approval")
+                if not isinstance(task, str) or not _ID_RE.fullmatch(task) or not isinstance(approval, dict):
+                    raise SupervisorRefused("OpenJarvis returned an invalid trusted-app approval")
+                approval_id = approval.get("approval_id")
+                approval_digest = approval.get("canonical_arguments_digest")
+                approval_expiry = approval.get("expires_at_unix_ms")
+                if (approval.get("task_id") != task
+                        or approval.get("operation") != "mcp:jarvis_mac:open_app"
+                        or approval.get("target") not in (app, trusted_app.display_name)
+                        or not isinstance(approval_id, str) or not _ID_RE.fullmatch(approval_id)
+                        or not isinstance(approval_digest, str) or not _DIGEST_RE.fullmatch(approval_digest)
+                        or type(approval_expiry) is not int or approval_expiry <= 0):
+                    raise SupervisorRefused("OpenJarvis returned an approval with invalid scope or expiry")
+                summary = approval.get("redacted_summary")
+                if not isinstance(summary, str) or not summary.strip():
+                    summary = "Review the exact app activation before approving."
+                safe_approval = {
+                    "approval_id": approval_id,
+                    "task_id": task,
+                    "operation": "mcp:jarvis_mac:open_app",
+                    "target": approval["target"],
+                    "canonical_arguments_digest": approval_digest,
+                    "expires_at_unix_ms": approval_expiry,
+                    "redacted_summary": summary.strip()[:500],
+                }
+                result = {"state": state, "bundle_id": app, "task_id": task,
+                          "approval": safe_approval}
+                if isinstance(data.get("summary"), str):
+                    result["summary"] = data["summary"].strip()[:500]
+                return result
+            raise SupervisorRefused("OpenJarvis returned an unsupported app activation state")
         return {k: data[k] for k in ("state", "online", "ai_available", "task_id", "summary", "approval") if k in data}
 
     def list_pending_approvals(self, task_id: str) -> list[dict[str, Any]]:
@@ -489,14 +569,18 @@ class OpenJarvisApiSupervisorAdapter:
         decision: str,
         expected_arguments_digest: str,
         idempotency_key: str,
+        requester_device_id: str,
         continuation_objective: str | None = None,
     ) -> dict[str, Any]:
         if not _ID_RE.fullmatch(task_id) or not _ID_RE.fullmatch(approval_id) or decision not in {"approve", "reject"} or not _DIGEST_RE.fullmatch(expected_arguments_digest):
             raise SupervisorRefused("approval decision fields are invalid")
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128 or "\n" in idempotency_key or "\r" in idempotency_key:
             raise SupervisorRefused("approval decision idempotency key is invalid")
+        if not _ID_RE.fullmatch(requester_device_id or ""):
+            raise SupervisorRefused("approval requester device ID is invalid")
         body: dict[str, Any] = {
             "task_id": task_id,
+            "requester_device_id": requester_device_id,
             "decision": decision,
             "expected_operation_digest": expected_arguments_digest,
             "idempotency_key": idempotency_key,
@@ -506,15 +590,28 @@ class OpenJarvisApiSupervisorAdapter:
                 raise SupervisorRefused("approval continuation objective is invalid")
             body["continuation_objective"] = continuation_objective.strip()
         _, data = self._request("POST", f"/v1/jarvis/approvals/{approval_id}/decision", body)
+        execution_state = data.get("execution_state") or data.get("task_state") or data.get("state") or data.get("status", "UNKNOWN")
+        if not isinstance(execution_state, str):
+            raise SupervisorRefused("OpenJarvis returned an invalid approval execution state")
+        summary = data.get("result_summary") or data.get("summary") or ""
+        if not isinstance(summary, str):
+            raise SupervisorRefused("OpenJarvis returned an invalid approval result summary")
+        executed = data.get("executed")
+        success = data.get("success")
+        continued = data.get("continued")
+        if any(value is not None and type(value) is not bool for value in (executed, success, continued)):
+            raise SupervisorRefused("OpenJarvis returned invalid approval execution flags")
         return {
             "task_id": task_id,
             "approval_id": approval_id,
+            "decision": decision,
             "status": data.get("status", "UNKNOWN"),
-            "state": data.get("task_state") or data.get("state") or data.get("status", "UNKNOWN"),
-            "summary": str(data.get("result_summary") or "")[:1000],
-            "executed": bool(data.get("executed")),
-            "continued": bool(data.get("continued")),
-            "success": data.get("success"),
+            "state": execution_state,
+            "execution_state": execution_state,
+            "summary": summary[:1000],
+            "executed": executed is True,
+            "continued": continued is True,
+            "success": success,
             "simulated": False,
         }
 

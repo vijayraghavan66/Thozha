@@ -420,7 +420,8 @@ def _create_and_send(state, client, identity, store, adapter, item: dict) -> dic
     message = item["message"]
     submission_key = uuid.uuid4().hex
     task_id = adapter.submit_task(objective=f"Simulated echo: {message}", capability_scope=["read_only"],
-                                  idempotency_key=submission_key)["task_id"]
+                                  idempotency_key=submission_key,
+                                  requester_device_id=item["device_id"])["task_id"]
     _record_task_watch(task_id=task_id, idempotency_key=submission_key, companion_id=item["device_id"])
     approval_id, digest = store.create_approval(
         task_id, SIMULATED_OPERATION, SIMULATED_TARGET, simulated_arguments(message),

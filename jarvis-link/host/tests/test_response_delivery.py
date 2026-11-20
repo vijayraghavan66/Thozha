@@ -276,8 +276,10 @@ def test_pending_supervisor_approval_is_sent_as_a_separate_encrypted_relay_messa
     processor, base_supervisor, host_identity, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
 
     class ApprovalSupervisor(type(base_supervisor)):
-        def submit_task(self, *, objective, capability_scope, idempotency_key):
-            accepted = super().submit_task(objective=objective, capability_scope=capability_scope, idempotency_key=idempotency_key)
+        def submit_task(self, *, objective, capability_scope, idempotency_key, requester_device_id):
+            accepted = super().submit_task(objective=objective, capability_scope=capability_scope,
+                                           idempotency_key=idempotency_key,
+                                           requester_device_id=requester_device_id)
             task_id = accepted["task_id"]
             accepted["state"] = "WAITING_APPROVAL"
             self.tasks[task_id]["state"] = "WAITING_APPROVAL"

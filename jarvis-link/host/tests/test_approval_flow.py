@@ -28,7 +28,8 @@ class Flow:
 
     def request(self, ttl: int = 300, message: str = MESSAGE):
         task_id = self.adapter.submit_task(objective=f"Simulated echo: {message}", capability_scope=["read_only"],
-                                           idempotency_key=uuid.uuid4().hex)["task_id"]
+                                           idempotency_key=uuid.uuid4().hex,
+                                           requester_device_id=self.companion_id)["task_id"]
         approval_id, digest = self.store.create_approval(
             task_id, SIMULATED_OPERATION, SIMULATED_TARGET, simulated_arguments(message),
             "Harmless simulated echo (test)", ttl_seconds=ttl)
@@ -71,7 +72,10 @@ def test_request_is_shown_exactly_and_approve_resumes_the_task(flow):
     assert shown["operation"] == SIMULATED_OPERATION and shown["target"] == SIMULATED_TARGET
     assert shown["digest"] == digest and shown["expires_at_unix_ms"] == expires
     decided = json.loads(cli(flow.state, "approve", "--approval-id", approval_id, relay=flow.world.url).stdout)
-    assert decided == {"decision": "approve", "approval_id": approval_id, "queued_offline": False, "relay_status": "queued"}
+    assert decided["decision"] == "approve" and decided["approval_id"] == approval_id
+    assert decided["queued_offline"] is False and decided["relay_status"] == "queued"
+    assert decided["state"] == "DELIVERED_WAITING_SUPERVISOR"
+    assert decided["task_id"] == task_id and decided["authoritative"] is False
     assert flow.world.runtime.poll_once() == {"received": 1, "rejected": 0, "replied": 1}
     assert flow.store.approval(approval_id)["status"] == "APPROVED"
     outcome = resume_approved(flow.store, task_id=task_id, approval_id=approval_id, message=MESSAGE)
@@ -110,7 +114,8 @@ def test_expired_approval_is_not_shown_and_cannot_be_decided(flow):
     # The supervisor refuses too, even if a decision were forged past the phone.
     with pytest.raises(SupervisorRefused):
         flow.adapter.decide_approval(task_id=task_id, approval_id=approval_id, decision="approve",
-                                     expected_arguments_digest=digest, idempotency_key=uuid.uuid4().hex)
+                                     expected_arguments_digest=digest, idempotency_key=uuid.uuid4().hex,
+                                     requester_device_id=flow.companion_id)
     assert flow.store.approval(approval_id)["status"] == "EXPIRED"
     assert flow.store.get_task(task_id)["state"] == "WAITING_APPROVAL"
 
@@ -120,12 +125,15 @@ def test_replay_of_a_decision_and_second_execution_are_refused(flow):
     flow.phone_poll()
     key = "decision-" + uuid.uuid4().hex
     first = flow.adapter.decide_approval(task_id=task_id, approval_id=approval_id, decision="approve",
-                                         expected_arguments_digest=digest, idempotency_key=key)
+                                         expected_arguments_digest=digest, idempotency_key=key,
+                                         requester_device_id=flow.companion_id)
     assert flow.adapter.decide_approval(task_id=task_id, approval_id=approval_id, decision="approve",
-                                        expected_arguments_digest=digest, idempotency_key=key) == first
+                                        expected_arguments_digest=digest, idempotency_key=key,
+                                        requester_device_id=flow.companion_id) == first
     with pytest.raises(SupervisorRefused):  # a fresh key cannot decide the same approval again
         flow.adapter.decide_approval(task_id=task_id, approval_id=approval_id, decision="approve",
-                                     expected_arguments_digest=digest, idempotency_key=uuid.uuid4().hex)
+                                     expected_arguments_digest=digest, idempotency_key=uuid.uuid4().hex,
+                                     requester_device_id=flow.companion_id)
     assert resume_approved(flow.store, task_id=task_id, approval_id=approval_id, message=MESSAGE)["outcome"] == "COMPLETED"
     assert resume_approved(flow.store, task_id=task_id, approval_id=approval_id, message=MESSAGE) == {"outcome": "NOT_CONSUMED"}
     assert [e["event_type"] for e in flow.store.events(task_id)].count("simulated.result") == 1
