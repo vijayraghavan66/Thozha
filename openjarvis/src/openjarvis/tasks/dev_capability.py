@@ -136,10 +136,29 @@ def _check_relative(rel: str, allow_empty: bool = False) -> list[str]:
 
 
 def canonical_workspace(path: str) -> str:
-    root = os.path.realpath(os.path.expanduser(path))
+    candidate = Path(os.path.abspath(os.path.expanduser(path)))
+    _reject_workspace_symlinks(candidate)
+    root = os.path.realpath(candidate)
     if not os.path.isdir(root):
         raise CapabilityError("WORKSPACE_INVALID", "workspace root must be an existing directory")
     return root
+
+
+def _reject_workspace_symlinks(candidate: Path) -> None:
+    """Reject symlinks in every existing path component, including root ancestors."""
+    current = Path(candidate.anchor)
+    for segment in candidate.parts[1:]:
+        current = current / segment
+        try:
+            metadata = os.lstat(current)
+        except OSError as exc:
+            raise CapabilityError(
+                "WORKSPACE_INVALID", "workspace path cannot be inspected safely"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise CapabilityError(
+                "WORKSPACE_INVALID", "workspace path components must not be symlinks"
+            )
 
 
 def _resolve_inside(root: str, rel: str, *, for_write: bool) -> str:

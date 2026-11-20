@@ -261,3 +261,37 @@ def test_plan_workspace_is_exact_precreated_taskflow_root(tmp_path, monkeypatch)
     monkeypatch.setenv("JARVIS_DEV_WORKSPACE", str(alias))
     with pytest.raises(PermissionError):
         jarvis_plan_mcp._workspace_root()
+
+
+@pytest.mark.parametrize(
+    "symlink_component", ["Documents", "Jarvis-Lab", "agent-evaluation", "taskflow"]
+)
+def test_plan_workspace_rejects_symlink_at_each_path_component(
+    tmp_path, monkeypatch, symlink_component
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    target_root = tmp_path / "real-tree"
+    components = ["Documents", "Jarvis-Lab", "agent-evaluation", "taskflow"]
+    target_path = target_root.joinpath(*components)
+    target_path.mkdir(parents=True)
+
+    current = home
+    link_target = target_root
+    for component in components:
+        if component == symlink_component:
+            (current / component).symlink_to(
+                link_target / component, target_is_directory=True
+            )
+            break
+        current = current / component
+        current.mkdir()
+        link_target = link_target / component
+
+    monkeypatch.setattr(jarvis_plan_mcp, "REAL_HOME", home)
+    monkeypatch.setenv(
+        "JARVIS_DEV_WORKSPACE",
+        str(home / "Documents" / "Jarvis-Lab" / "agent-evaluation" / "taskflow"),
+    )
+    with pytest.raises(PermissionError, match="symlink"):
+        jarvis_plan_mcp._workspace_root()

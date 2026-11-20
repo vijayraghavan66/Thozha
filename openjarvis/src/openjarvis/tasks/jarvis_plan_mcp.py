@@ -13,6 +13,7 @@ import json
 import os
 import pwd
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -140,21 +141,45 @@ def _task_binding(store: SupervisorStore) -> tuple[str, str, str]:
 def _workspace_root() -> Path:
     """Use only the pre-created evaluation workspace; never a caller-supplied path."""
     configured = os.environ.get("JARVIS_DEV_WORKSPACE")
-    expected = REAL_HOME / "Documents" / "Jarvis-Lab" / "agent-evaluation"
-    raw = Path(configured).expanduser() if configured else expected / "taskflow"
-    if raw.is_symlink():
-        raise PermissionError("evaluation workspace root must not be a symlink")
+    expected = REAL_HOME / "Documents" / "Jarvis-Lab" / "agent-evaluation" / "taskflow"
+    raw = Path(configured).expanduser() if configured else expected
+    if Path(os.path.abspath(raw)) != Path(os.path.abspath(expected)):
+        raise PermissionError("plan workspace must be the fixed taskflow workspace")
+    _reject_symlink_components(REAL_HOME, expected)
     try:
         resolved = raw.resolve(strict=True)
-        allowed_parent = expected.resolve(strict=True)
-        taskflow_root = (allowed_parent / "taskflow").resolve(strict=True)
     except FileNotFoundError as exc:
         raise PermissionError(
             "pre-created evaluation workspace is unavailable"
         ) from exc
-    if not resolved.is_dir() or resolved != taskflow_root:
+    if not resolved.is_dir() or resolved != Path(os.path.abspath(expected)):
         raise PermissionError("plan workspace must be the isolated taskflow workspace")
     return resolved
+
+
+def _reject_symlink_components(base: Path, target: Path) -> None:
+    """Reject any existing symlink from the trusted home down to the workspace."""
+    root = Path(os.path.abspath(base))
+    destination = Path(os.path.abspath(target))
+    if not destination.is_relative_to(root):
+        raise PermissionError("plan workspace is outside the trusted home")
+    current = root
+    try:
+        metadata = os.lstat(current)
+    except OSError as exc:
+        raise PermissionError("trusted home is unavailable") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise PermissionError("trusted home must not be a symlink")
+    for part in destination.relative_to(root).parts:
+        current = current / part
+        try:
+            metadata = os.lstat(current)
+        except OSError as exc:
+            raise PermissionError(
+                "pre-created evaluation workspace is unavailable"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise PermissionError("workspace path components must not be symlinks")
 
 
 def _plan_input(value: Any) -> dict[str, Any]:

@@ -12,6 +12,7 @@ from openjarvis.tasks.dev_capability import (
     CapabilityError,
     CapabilityStore,
     build_spec,
+    canonical_workspace,
     plan_approval_arguments,
     plan_approval_target,
 )
@@ -345,10 +346,38 @@ def test_workspace_root_cannot_be_a_symlink_to_elsewhere(world):
     (real / "src").mkdir()
     link_root = world["tmp"] / "linked-workspace"
     os.symlink(real, link_root)
-    cap = issue(world, workspace=link_root)
-    # Canonicalisation happens at issuance: the capability is bound to the real directory, not the link.
-    spec_row = world["store"]._db.execute("SELECT spec_json FROM dev_capabilities WHERE capability_id=?", (cap,)).fetchone()
-    assert str(real.resolve()) in spec_row[0]
+    with pytest.raises(CapabilityError) as caught:
+        canonical_workspace(str(link_root))
+    assert caught.value.code == "WORKSPACE_INVALID"
+
+
+@pytest.mark.parametrize(
+    "symlink_component", ["Documents", "Jarvis-Lab", "agent-evaluation", "taskflow"]
+)
+def test_workspace_parent_symlinks_are_rejected(world, symlink_component):
+    components = ["Documents", "Jarvis-Lab", "agent-evaluation", "taskflow"]
+    case = world["tmp"] / f"case-{symlink_component}"
+    target = case / "target"
+    target.joinpath(*components).mkdir(parents=True)
+    home = case / "home"
+    home.mkdir(parents=True)
+
+    current = home
+    target_parent = target
+    for component in components:
+        if component == symlink_component:
+            (current / component).symlink_to(
+                target_parent / component, target_is_directory=True
+            )
+            break
+        current = current / component
+        current.mkdir()
+        target_parent = target_parent / component
+
+    candidate = home.joinpath(*components)
+    with pytest.raises(CapabilityError) as caught:
+        canonical_workspace(str(candidate))
+    assert caught.value.code == "WORKSPACE_INVALID"
 
 
 # ---- quotas --------------------------------------------------------------------------------------
