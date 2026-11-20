@@ -17,6 +17,7 @@ import json
 import os
 import re
 import resource
+import stat
 import subprocess
 import sys
 import tempfile
@@ -53,8 +54,18 @@ class Workspace:
         candidate = Path(root or DEFAULT_WORKSPACE).expanduser()
         if not candidate.is_absolute():
             raise WorkspaceError("workspace must be an absolute path")
-        if candidate.is_symlink():
-            raise WorkspaceError("workspace root must not be a symbolic link")
+        candidate = Path(os.path.abspath(candidate))
+        current = Path(candidate.anchor)
+        for segment in candidate.parts[1:]:
+            current = current / segment
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError as exc:
+                raise WorkspaceError("workspace does not exist") from exc
+            except OSError as exc:
+                raise WorkspaceError("workspace path cannot be inspected safely") from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise WorkspaceError("workspace path components must not be symbolic links")
         if not candidate.is_dir():
             raise WorkspaceError("workspace does not exist")
         return cls(root=candidate.resolve(strict=True))

@@ -75,6 +75,34 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(dw.WorkspaceError):
             dw.Workspace.open(link_root)
 
+    def test_symlinks_in_workspace_root_ancestors_are_refused(self):
+        components = ["Documents", "Jarvis-Lab", "agent-evaluation", "taskflow"]
+        for link_component in components:
+            with self.subTest(component=link_component):
+                case = self.root.parent / f"ancestor-{link_component}"
+                home = case / "home"
+                target = case / "target"
+                target.joinpath(*components).mkdir(parents=True)
+                home.mkdir(parents=True)
+
+                current = home
+                target_parent = target
+                for component in components:
+                    if component == link_component:
+                        os.symlink(
+                            target_parent / component,
+                            current / component,
+                            target_is_directory=True,
+                        )
+                        break
+                    current = current / component
+                    current.mkdir()
+                    target_parent = target_parent / component
+
+                candidate = home.joinpath(*components)
+                with self.assertRaises(dw.WorkspaceError):
+                    dw.Workspace.open(candidate)
+
     def test_listing_never_reveals_or_follows_symlinks(self):
         (self.root / "visible.py").write_text("x")
         os.symlink(self.outside / "secret.txt", self.root / "hidden-link")
