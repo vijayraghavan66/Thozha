@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from typing import Any, Mapping
@@ -90,13 +91,32 @@ class HostRelayRuntime:
         if request["operation"] == "mcp:jarvis_dev:approve_plan":
             if not isinstance(development_plan, dict):
                 raise ValueError("development plan approval is missing complete structured details")
+            plan_digest = development_plan.get("plan_digest")
+            plan = {key: value for key, value in development_plan.items() if key != "plan_digest"}
+            supplied_arguments_digest = request.get("canonical_arguments_digest")
             if (
                 not isinstance(development_plan.get("plan_id"), str)
                 or request.get("target") != f"taskflow:plan:{development_plan.get('plan_id')}"
-                or not isinstance(development_plan.get("plan_digest"), str)
-                or not isinstance(request.get("canonical_arguments_digest"), str)
+                or not isinstance(plan_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", plan_digest)
+                or not isinstance(supplied_arguments_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", supplied_arguments_digest)
             ):
                 raise ValueError("development plan approval details do not match its target or digest")
+            canonical_plan = json.dumps(
+                plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+            ).encode("utf-8")
+            if hashlib.sha256(canonical_plan).hexdigest() != plan_digest:
+                raise ValueError("development plan details do not match their plan digest")
+            arguments = {"plan": plan, "plan_digest": plan_digest}
+            operation = str(request["operation"])
+            target = str(request["target"])
+            canonical_arguments = json.dumps(
+                {"operation": operation, "target": target, "arguments": arguments},
+                sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+            ).encode("utf-8")
+            if hashlib.sha256(canonical_arguments).hexdigest() != supplied_arguments_digest:
+                raise ValueError("development plan details do not match the supervisor approval digest")
             plan_bytes = json.dumps(
                 development_plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
             ).encode("utf-8")

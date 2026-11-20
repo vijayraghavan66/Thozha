@@ -208,6 +208,13 @@ def test_development_plan_approval_envelope_carries_complete_structured_plan(tmp
         "ttl_s": 600,
     }
     plan_digest = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    operation = "mcp:jarvis_dev:approve_plan"
+    target = "taskflow:plan:wire-plan-0001"
+    arguments = {"plan": plan, "plan_digest": plan_digest}
+    canonical_arguments_digest = hashlib.sha256(json.dumps(
+        {"operation": operation, "target": target, "arguments": arguments},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()).hexdigest()
     placeholder = task_envelope(
         host_identity, phone, host_id, phone_id, host_cert,
         {"objective": "safe", "capability_scope": ["read_only"]},
@@ -218,9 +225,9 @@ def test_development_plan_approval_envelope_carries_complete_structured_plan(tmp
     common = {
         "approval_id": "b" * 32,
         "task_id": "a" * 32,
-        "operation": "mcp:jarvis_dev:approve_plan",
-        "target": "taskflow:plan:wire-plan-0001",
-        "canonical_arguments_digest": "c" * 64,
+        "operation": operation,
+        "target": target,
+        "canonical_arguments_digest": canonical_arguments_digest,
         "expires_at_unix_ms": int(time.time() * 1000) + 30_000,
         "redacted_summary": "Review the complete bounded plan below.",
     }
@@ -242,8 +249,58 @@ def test_development_plan_approval_envelope_carries_complete_structured_plan(tmp
         expected_sender_role="host",
     )
     assert clear["development_plan"] == {**plan, "plan_digest": plan_digest}
-    assert clear["canonical_arguments_digest"] == "c" * 64
+    assert clear["canonical_arguments_digest"] == canonical_arguments_digest
     assert len(approval_id) == 32
+
+
+@pytest.mark.parametrize("tamper", ["plan_digest", "operation_digest"])
+def test_development_plan_approval_rejects_digest_mismatch(tamper):
+    processor, _supervisor, _host_identity, _phone, _host_id, phone_id, _host_cert, phone_cert = setup_host()
+    plan = {
+        "plan_id": "wire-plan-0002",
+        "device_id": phone_id,
+        "user_id": f"device:{phone_id}",
+        "workspace_root": "/tmp/jarvis-project",
+        "allowed_ops": ["write_file"],
+        "allowed_paths": ["src"],
+        "max_file_bytes": 4096,
+        "max_total_bytes": 8192,
+        "max_writes": 2,
+        "max_test_runs": 1,
+        "max_repairs": 1,
+        "max_duration_s": 900,
+        "ttl_s": 600,
+    }
+    plan_digest = hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    operation = "mcp:jarvis_dev:approve_plan"
+    target = f"taskflow:plan:{plan['plan_id']}"
+    arguments = {"plan": plan, "plan_digest": plan_digest}
+    operation_digest = hashlib.sha256(json.dumps(
+        {"operation": operation, "target": target, "arguments": arguments},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    ).encode()).hexdigest()
+    detail = {**plan, "plan_digest": plan_digest}
+    digest = operation_digest
+    if tamper == "plan_digest":
+        detail["allowed_paths"] = ["src", "private"]
+    else:
+        digest = "c" * 64
+    runtime = HostRelayRuntime(host=processor, relay=None)
+    with pytest.raises(ValueError, match="digest"):
+        runtime._approval_envelope(
+            companion_certificate=phone_cert.to_dict(),
+            companion_id=phone_id,
+            request={
+                "approval_id": "b" * 32,
+                "task_id": "a" * 32,
+                "operation": operation,
+                "target": target,
+                "canonical_arguments_digest": digest,
+                "expires_at_unix_ms": int(time.time() * 1000) + 30_000,
+                "redacted_summary": "Review the complete bounded plan below.",
+                "development_plan": detail,
+            },
+        )
 
 
 def test_development_plan_approval_envelope_fails_closed_when_details_are_missing():
