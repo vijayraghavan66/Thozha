@@ -297,6 +297,8 @@ class JarvisLinkHost:
             raise EnvelopeError("host ID does not match its signing key")
         self.supervisor = supervisor
         self.replay_cache = replay_cache or ReplayCache()
+        self._approval_decision_claims: dict[str, tuple[Any, ...]] = {}
+        self._approval_decision_claims_lock = threading.RLock()
 
     def receive(
         self,
@@ -327,7 +329,13 @@ class JarvisLinkHost:
         current = int(time.time() * 1000) if now_ms is None else now_ms
         if not self.replay_cache.claim(envelope.message_id, envelope.expires_at_unix_ms, now_ms=current) and not allow_duplicate:
             raise ReplayDetected("message was already processed")
-        result = self._dispatch(envelope, payload, now_ms=current)
+        envelope_bytes = json.dumps(
+            dict(raw_envelope), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+        ).encode("utf-8")
+        result = self._dispatch(
+            envelope, payload, now_ms=current,
+            envelope_digest=hashlib.sha256(envelope_bytes).hexdigest(),
+        )
         result_message_id = hashlib.sha256(json.dumps(result, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         return {
             "message_id": envelope.message_id,
@@ -372,7 +380,14 @@ class JarvisLinkHost:
             expected_recipient_role="companion",
         )
 
-    def _dispatch(self, envelope: LinkEnvelope, payload: dict[str, Any], *, now_ms: int) -> dict[str, Any]:
+    def _dispatch(
+        self,
+        envelope: LinkEnvelope,
+        payload: dict[str, Any],
+        *,
+        now_ms: int,
+        envelope_digest: str,
+    ) -> dict[str, Any]:
         if envelope.kind == "fast.command":
             if not isinstance(payload, dict) or payload.get("version") != 1:
                 raise TaskEnvelopeError("fast command version is invalid")
@@ -543,10 +558,49 @@ class JarvisLinkHost:
             approval = self.supervisor.get_approval(approval_id)
             if approval is None or approval.task_id != task_id:
                 raise TaskEnvelopeError("approval does not match task")
-            if approval.status != "PENDING" or approval.expires_at_unix_ms <= now_ms:
-                raise TaskEnvelopeError("approval is expired or no longer pending")
+            if approval.status not in {"PENDING", "APPROVED", "CONSUMED", "REJECTED", "EXPIRED"}:
+                raise TaskEnvelopeError("approval has an unsupported decision state")
             if approval.arguments_digest != digest:
                 raise TaskEnvelopeError("approval operation digest does not match")
+            if approval.status == "PENDING" and approval.expires_at_unix_ms <= now_ms:
+                raise TaskEnvelopeError("approval is expired or no longer pending")
+            claim = getattr(self, "approval_decision_claim", None)
+            if callable(claim):
+                claim_result = claim(
+                    tenant_id=envelope.tenant_id,
+                    approval_id=approval_id,
+                    task_id=task_id,
+                    sender_device_id=envelope.from_device_id,
+                    message_id=envelope.message_id,
+                    envelope_digest=envelope_digest,
+                    decision=decision,
+                    operation_digest=digest,
+                    idempotency_key=idem,
+                    envelope_expires_at_ms=envelope.expires_at_unix_ms,
+                    allow_new=approval.status == "PENDING" and approval.expires_at_unix_ms > now_ms,
+                    now_ms=now_ms,
+                )
+                if claim_result not in {"claimed", "replay"}:
+                    raise TaskEnvelopeError("approval decision was not the exact previously claimed envelope")
+                exact_replay = claim_result == "replay"
+            else:
+                # In-memory test/local mode can replay within one process, but
+                # production must provide the persistent outbox claim callback.
+                identity = (task_id, envelope.from_device_id, envelope.message_id, envelope_digest,
+                            decision, digest, idem, envelope.expires_at_unix_ms)
+                with self._approval_decision_claims_lock:
+                    prior = self._approval_decision_claims.get(approval_id)
+                    if prior is None:
+                        if approval.status != "PENDING" or approval.expires_at_unix_ms <= now_ms:
+                            raise TaskEnvelopeError("approval is expired or no longer pending")
+                        self._approval_decision_claims[approval_id] = identity
+                        exact_replay = False
+                    elif prior == identity:
+                        exact_replay = True
+                    else:
+                        raise TaskEnvelopeError("approval decision envelope conflicts with its first decision")
+            if approval.status != "PENDING" and not exact_replay:
+                raise TaskEnvelopeError("approval is expired or no longer pending")
             result = self.supervisor.decide_approval(
                 task_id=task_id,
                 approval_id=approval_id,

@@ -352,6 +352,38 @@ def test_valid_approval_decision_is_revalidated_and_forwarded():
     assert supervisor.calls[-1][1]["requester_device_id"] == phone_id
 
 
+def test_exact_approval_envelope_retry_reconciles_without_a_second_decision():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "shell_exec", "/tmp", digest, now + 60_000))
+    supervisor.task_owners[task_id] = phone_id
+    payload = {"task_id": task_id, "approval_id": approval_id, "decision": "approve",
+               "operation_digest": digest, "idempotency_key": "decision-exact-retry"}
+    env = task_envelope(host, phone, host_id, phone_id, host_cert, payload,
+                        kind="approval.decision", now=now, message_id="e" * 32)
+
+    first = hostproc.receive(env.to_dict(), sender_certificate=phone_cert,
+                             expected_sender_id=phone_id, now_ms=now)
+    replay = hostproc.receive(env.to_dict(), sender_certificate=phone_cert,
+                              expected_sender_id=phone_id, now_ms=now, allow_duplicate=True)
+
+    assert first["result"] == replay["result"]
+    assert [call[0] for call in supervisor.calls].count("decide_approval") == 1
+
+    altered_payloads = [
+        {**payload, "idempotency_key": "decision-different-key"},
+        {**payload, "decision": "reject"},
+    ]
+    for altered_payload in altered_payloads:
+        altered = task_envelope(host, phone, host_id, phone_id, host_cert, altered_payload,
+                               kind="approval.decision", now=now, message_id=env.message_id)
+        with pytest.raises(TaskEnvelopeError, match="decision envelope"):
+            hostproc.receive(altered.to_dict(), sender_certificate=phone_cert,
+                             expected_sender_id=phone_id, now_ms=now, allow_duplicate=True)
+    assert [call[0] for call in supervisor.calls].count("decide_approval") == 1
+
+
 def test_approval_decision_cannot_be_forwarded_under_another_device_owner():
     hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
     now = int(time.time() * 1000)

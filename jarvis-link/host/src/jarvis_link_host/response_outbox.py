@@ -1,8 +1,9 @@
-"""Durable encrypted-response outbox for relay delivery retries.
+"""Durable encrypted-response outbox and approval replay ledger.
 
-Only signed/encrypted relay envelopes are stored. Decrypted task objectives,
-approval arguments, API credentials, and supervisor results are never written
-to this table.
+Signed/encrypted relay envelopes are stored for delivery. The replay ledger
+contains only approval/task/device IDs, digests, decision, idempotency key,
+message ID and expiry; it never stores decrypted task objectives, approval
+arguments, API credentials, or supervisor results.
 """
 from __future__ import annotations
 
@@ -72,6 +73,23 @@ class HostResponseOutbox:
                  created_at_ms INTEGER NOT NULL,
                  delivered_at_ms INTEGER,
                  PRIMARY KEY(task_id,event_seq)
+               )"""
+        )
+        self._db.execute(
+            """CREATE TABLE IF NOT EXISTS relay_approval_decision_claims(
+                 tenant_id TEXT NOT NULL,
+                 approval_id TEXT NOT NULL,
+                 task_id TEXT NOT NULL,
+                 sender_device_id TEXT NOT NULL,
+                 message_id TEXT NOT NULL,
+                 envelope_digest TEXT NOT NULL,
+                 decision TEXT NOT NULL,
+                 operation_digest TEXT NOT NULL,
+                 idempotency_key TEXT NOT NULL,
+                 envelope_expires_at_ms INTEGER NOT NULL,
+                 created_at_ms INTEGER NOT NULL,
+                 PRIMARY KEY(tenant_id,approval_id),
+                 UNIQUE(tenant_id,sender_device_id,message_id)
                )"""
         )
         columns = {row[1] for row in self._db.execute("PRAGMA table_info(relay_response_outbox)")}
@@ -173,6 +191,87 @@ class HostResponseOutbox:
                 (task_id,),
             ).fetchall()
         return len(owners) == 1 and owners[0][0] == companion_id
+
+    def claim_approval_decision(
+        self,
+        *,
+        tenant_id: str,
+        approval_id: str,
+        task_id: str,
+        sender_device_id: str,
+        message_id: str,
+        envelope_digest: str,
+        decision: str,
+        operation_digest: str,
+        idempotency_key: str,
+        envelope_expires_at_ms: int,
+        allow_new: bool,
+        now_ms: int | None = None,
+    ) -> str:
+        """Bind one approval to one signed decision envelope before dispatch.
+
+        Returns ``claimed`` for the first pending decision, ``replay`` only for
+        the exact same authenticated envelope, and fails closed for a changed
+        decision, sender, digest, key, or envelope. No plaintext arguments are
+        stored in this ledger.
+        """
+        id_fields = (tenant_id, approval_id, task_id, sender_device_id, message_id)
+        if any(not isinstance(value, str) or not value for value in id_fields):
+            raise ValueError("approval decision identity is invalid")
+        if (
+            decision not in {"approve", "reject"}
+            or not isinstance(envelope_digest, str) or len(envelope_digest) != 64
+            or not isinstance(operation_digest, str) or len(operation_digest) != 64
+            or not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128
+            or type(envelope_expires_at_ms) is not int or envelope_expires_at_ms <= 0
+            or type(allow_new) is not bool
+        ):
+            raise ValueError("approval decision binding is invalid")
+        now = int(time.time() * 1000) if now_ms is None else now_ms
+        identity = (
+            task_id, sender_device_id, message_id, envelope_digest, decision,
+            operation_digest, idempotency_key, envelope_expires_at_ms,
+        )
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    "DELETE FROM relay_approval_decision_claims WHERE envelope_expires_at_ms<=?",
+                    (now,),
+                )
+                row = self._db.execute(
+                    """SELECT task_id,sender_device_id,message_id,envelope_digest,decision,
+                              operation_digest,idempotency_key,envelope_expires_at_ms
+                       FROM relay_approval_decision_claims WHERE tenant_id=? AND approval_id=?""",
+                    (tenant_id, approval_id),
+                ).fetchone()
+                if row is not None:
+                    self._db.commit()
+                    return "replay" if tuple(row) == identity else "conflict"
+                message_claim = self._db.execute(
+                    """SELECT approval_id FROM relay_approval_decision_claims
+                       WHERE tenant_id=? AND sender_device_id=? AND message_id=?""",
+                    (tenant_id, sender_device_id, message_id),
+                ).fetchone()
+                if message_claim is not None:
+                    self._db.commit()
+                    return "conflict"
+                if not allow_new or envelope_expires_at_ms <= now:
+                    self._db.commit()
+                    return "not_found"
+                self._db.execute(
+                    """INSERT INTO relay_approval_decision_claims(
+                           tenant_id,approval_id,task_id,sender_device_id,message_id,
+                           envelope_digest,decision,operation_digest,idempotency_key,
+                           envelope_expires_at_ms,created_at_ms)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (tenant_id, approval_id, *identity, now),
+                )
+                self._db.commit()
+                return "claimed"
+            except BaseException:
+                self._db.rollback()
+                raise
 
     def approvals_checked(self, envelope: Mapping[str, Any]) -> bool:
         tenant, sender, message_id, _expiry, request_digest = self._canonical_request(envelope)

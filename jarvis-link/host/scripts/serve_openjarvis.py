@@ -89,6 +89,7 @@ async def _serve(args: argparse.Namespace) -> None:
         supervisor=supervisor,
     )
     host.task_authorizer = outbox.owns_task
+    host.approval_decision_claim = outbox.claim_approval_decision
     runtime = HostRelayRuntime(host=host, relay=relay, response_outbox=outbox)
     host_id = state["host_device_id"]
     ws_url = relay.base_url.replace("https://", "wss://", 1).replace("http://", "ws://", 1) + f"/v1/devices/{host_id}/stream"

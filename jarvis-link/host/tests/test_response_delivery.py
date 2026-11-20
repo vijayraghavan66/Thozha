@@ -48,6 +48,23 @@ class RelayStub:
         return {"status": "acked"}
 
 
+class FailFirstOutboxPut:
+    """Inject the crash window after supervisor decision but before response persistence."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.fail_next_put = True
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def put(self, *args, **kwargs):
+        if self.fail_next_put:
+            self.fail_next_put = False
+            raise OSError("injected response persistence failure")
+        return self.inner.put(*args, **kwargs)
+
+
 def test_lost_reply_delivery_reuses_encrypted_outbox_after_host_restart(tmp_path):
     processor, supervisor, host_identity, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
     now = int(time.time() * 1000)
@@ -301,6 +318,95 @@ def test_development_plan_approval_rejects_digest_mismatch(tamper):
                 "development_plan": detail,
             },
         )
+
+
+def test_lost_approval_reply_reconciles_exact_envelope_after_host_restart(tmp_path):
+    processor, supervisor, host_identity, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = "a" * 32, "b" * 32, "c" * 64
+    supervisor.add_approval(ApprovalRecord(
+        approval_id, task_id, "mcp:jarvis_mac:open_app", "com.apple.calculator", digest, now + 60_000,
+    ))
+    supervisor.task_owners[task_id] = phone_id
+    payload = {
+        "task_id": task_id, "approval_id": approval_id, "decision": "approve",
+        "operation_digest": digest, "idempotency_key": "decision-lost-reply-001",
+    }
+    request = task_envelope(
+        host_identity, phone, host_id, phone_id, host_cert, payload,
+        kind="approval.decision", now=now, message_id="d" * 32,
+    ).to_dict()
+    outbox_path = tmp_path / "response-outbox.db"
+    outbox = HostResponseOutbox(outbox_path)
+    processor.approval_decision_claim = outbox.claim_approval_decision
+
+    first = processor.receive(request, sender_certificate=phone_cert.to_dict(),
+                              expected_sender_id=phone_id, now_ms=now)
+    assert first["result"]["status"] == "APPROVED"
+    outbox.close()
+
+    reopened = HostResponseOutbox(outbox_path)
+    restarted = JarvisLinkHost(
+        tenant_id=processor.tenant_id,
+        device_id=host_id,
+        identity=host_identity,
+        host_certificate=host_cert,
+        supervisor=supervisor,
+    )
+    restarted.task_authorizer = lambda **_: True
+    restarted.approval_decision_claim = reopened.claim_approval_decision
+    replay = restarted.receive(request, sender_certificate=phone_cert.to_dict(),
+                               expected_sender_id=phone_id, now_ms=now)
+    assert replay["result"] == first["result"]
+    assert [call[0] for call in supervisor.calls].count("decide_approval") == 1
+    for altered_payload in (
+        {**payload, "idempotency_key": "decision-lost-reply-different"},
+        {**payload, "decision": "reject"},
+    ):
+        altered = task_envelope(
+            host_identity, phone, host_id, phone_id, host_cert, altered_payload,
+            kind="approval.decision", now=now, message_id=request["message_id"],
+        ).to_dict()
+        with pytest.raises(ValueError, match="decision was not the exact previously claimed envelope"):
+            restarted.receive(altered, sender_certificate=phone_cert.to_dict(),
+                              expected_sender_id=phone_id, now_ms=now, allow_duplicate=True)
+    assert [call[0] for call in supervisor.calls].count("decide_approval") == 1
+    reopened.close()
+
+
+def test_decision_retry_after_response_outbox_failure_uses_exact_envelope_once(tmp_path):
+    processor, supervisor, host_identity, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = "1" * 32, "2" * 32, "3" * 64
+    supervisor.add_approval(ApprovalRecord(
+        approval_id, task_id, "mcp:jarvis_mac:open_app", "com.apple.calculator", digest, now + 60_000,
+    ))
+    supervisor.task_owners[task_id] = phone_id
+    payload = {
+        "task_id": task_id, "approval_id": approval_id, "decision": "approve",
+        "operation_digest": digest, "idempotency_key": "decision-outbox-retry-001",
+    }
+    request = task_envelope(
+        host_identity, phone, host_id, phone_id, host_cert, payload,
+        kind="approval.decision", now=now, message_id="4" * 32,
+    ).to_dict()
+    relay = RelayStub(host_id, request, phone_cert.to_dict())
+    relay.fail_first_reply = False
+    outbox = HostResponseOutbox(tmp_path / "response-outbox.db")
+    processor.approval_decision_claim = outbox.claim_approval_decision
+    runtime = HostRelayRuntime(host=processor, relay=relay, response_outbox=FailFirstOutboxPut(outbox))
+
+    first = runtime.poll_once(now_ms=now)
+    assert first == {"received": 0, "rejected": 0, "replied": 0}
+    assert relay.acks == [] and relay.responses == []
+    assert supervisor.approvals[approval_id].status == "APPROVED"
+    assert [call[0] for call in supervisor.calls].count("decide_approval") == 1
+
+    second = runtime.poll_once(now_ms=now)
+    assert second == {"received": 1, "rejected": 0, "replied": 1}
+    assert len(relay.responses) == 1 and len(relay.acks) == 1
+    assert [call[0] for call in supervisor.calls].count("decide_approval") == 1
+    outbox.close()
 
 
 def test_development_plan_approval_envelope_fails_closed_when_details_are_missing():
