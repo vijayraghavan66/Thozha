@@ -185,7 +185,7 @@ private fun connectionHeader(entries: List<Map<String, Any>>, transport: Transpo
         now - ((answered["updated_at_unix_ms"] as? Number)?.toLong() ?: 0L) < 30 * 60_000L -> AiEvidence.ANSWERED
         else -> AiEvidence.NO_RECENT_ANSWER
     }
-    val lastMacUpdate = entries.filter { (it["state"] as? String) !in setOf("QUEUED", "SENT") }
+    val lastMacUpdate = entries.filter { (it["state"] as? String) !in setOf("QUEUED", "SENT", "UNCONFIRMED") }
         .mapNotNull { (it["updated_at_unix_ms"] as? Number)?.toLong() }
         .maxOrNull()
     val summary = ConnectionPresentation.summary(transport, lastMacUpdate, ai, now) { ageLabel(it) }

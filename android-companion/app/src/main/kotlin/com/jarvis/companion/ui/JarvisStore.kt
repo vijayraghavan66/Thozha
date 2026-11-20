@@ -37,7 +37,7 @@ enum class Tab(val label: String) { HOME("Home"), ACTIVITY("Activity"), APPROVAL
 enum class Overlay { SETTINGS, HISTORY }
 
 /** States the Mac reports while work is still open. Used for polling and for the presence signal. */
-val ActiveStates = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "SENT", "QUEUED")
+val ActiveStates = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "SENT", "QUEUED", "UNCONFIRMED")
 
 /**
  * Holds everything the Compose screens show. All values come from LinkRuntime, the Telegram session, and the

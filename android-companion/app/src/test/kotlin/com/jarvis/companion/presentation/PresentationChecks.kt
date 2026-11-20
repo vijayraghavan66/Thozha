@@ -70,6 +70,10 @@ fun main() {
     check(sections.flatMap { it.rows }.size == 6, "duplicate and id-less records are dropped")
     check(rows.getValue("b").requestId == "b", "rows carry the request id the cancel path uses")
     check(TimelinePresentation.sections(emptyList(), fmt).isEmpty(), "no tasks yields the empty state")
+    check(TaskStates.toneFor("UNCONFIRMED") == TaskTone.UNKNOWN, "unconfirmed delivery is not presented as success or active execution")
+    check(ConversationPresentation.replyFor(
+        "UNCONFIRMED", TaskTone.UNKNOWN, "No Mac delivery receipt was confirmed. Check task status before retrying.",
+    )?.first?.contains("No Mac delivery receipt") == true, "unconfirmed delivery explains the uncertainty instead of hanging")
 
     // --- approvals -----------------------------------------------------------------------------------------------
     val now = 10_000_000L
