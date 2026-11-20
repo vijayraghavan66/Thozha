@@ -70,6 +70,10 @@ def link_client(tmp_path, monkeypatch):
     store = SupervisorStore(str(tmp_path / "supervisor.db"))
     monkeypatch.setattr(supervisor, "_STORE_INSTANCE", store)
     monkeypatch.setenv("OPENJARVIS_API_KEY", "link-test-admin-key")
+    monkeypatch.setenv("JARVIS_MCP_OPEN_APP_ENABLED", "1")
+    # Exercise the approval-enabled path explicitly; production defaults this
+    # MCP capability off until an operator sets the narrow runtime flag.
+    monkeypatch.setenv("JARVIS_MCP_OPEN_APP_ENABLED", "1")
     app = FastAPI()
     app.include_router(router)
     app.state.engine = FakeCodexEngine()
@@ -241,6 +245,8 @@ def test_trusted_bundle_fast_open_is_durable_and_bypasses_codex(link_client, mon
     import openjarvis.server.supervisor_routes as routes
 
     client, store, agent = link_client
+    # The MCP kill switch is scoped away from this typed, trusted fast path.
+    monkeypatch.setenv("JARVIS_MCP_OPEN_APP_ENABLED", "0")
     monkeypatch.setattr(routes.sys, "platform", "darwin")
     calls = []
 
@@ -846,6 +852,69 @@ def test_phone_assistant_reject_never_dispatches_or_continues(link_client, monke
     assert len(agent.calls) == 1
 
 
+def test_disabled_mcp_open_app_blocks_approval_consumption_but_allows_reject(link_client, monkeypatch):
+    client, store, _ = link_client
+    monkeypatch.setenv("JARVIS_MCP_OPEN_APP_ENABLED", "0")
+    device_id = "e" * 32
+    objective = "Open an app only if the MCP launch gate permits it."
+    run = store.create_link_task(
+        objective,
+        capability_scope=["assistant"],
+        idempotency_key="disabled-mcp-open-app-approval-0001",
+        owner_actor="device:" + device_id,
+    )
+    task_id = run["task_id"]
+    store.start_link_task(
+        task_id,
+        objective_digest=run["objective_digest"],
+        objective_text_digest=run["objective_digest"],
+        capability_scope=["assistant"],
+        idempotency_key=run["idempotency_key"],
+    )
+    arguments = {"name": "MCP Gate Probe"}
+    approval_id, digest = store.create_approval(
+        task_id, "mcp:jarvis_mac:open_app", "MCP Gate Probe", arguments, "isolated test",
+    )
+    store.mark_link_task_waiting_approval(task_id, approval_id)
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+
+    blocked = client.post(
+        f"/v1/jarvis/approvals/{approval_id}/decision",
+        headers=headers,
+        json={
+            "decision": "approve", "task_id": task_id,
+            "expected_operation_digest": digest,
+            "requester_device_id": device_id,
+            "idempotency_key": "disabled-mcp-open-app-approve-0001",
+            "continuation_objective": objective,
+        },
+    )
+    assert blocked.status_code == 409
+    assert store.approval(approval_id)["status"] == "PENDING"
+    assert store._db.execute(
+        "SELECT 1 FROM mcp_approval_dispatches WHERE approval_id=?", (approval_id,),
+    ).fetchone() is None
+
+    rejected = client.post(
+        f"/v1/jarvis/approvals/{approval_id}/decision",
+        headers=headers,
+        json={
+            "decision": "reject", "task_id": task_id,
+            "expected_operation_digest": digest,
+            "requester_device_id": device_id,
+            "idempotency_key": "disabled-mcp-open-app-reject-0001",
+            "continuation_objective": objective,
+        },
+    )
+    assert rejected.status_code == 200
+    assert rejected.json()["status"] == "REJECTED"
+    assert store.approval(approval_id)["status"] == "REJECTED"
+    assert store.link_task_run(task_id)["status"] == "REJECTED"
+    assert store._db.execute(
+        "SELECT 1 FROM mcp_approval_dispatches WHERE approval_id=?", (approval_id,),
+    ).fetchone() is None
+
+
 def test_link_approval_requires_matching_requester_device_before_decision(link_client, monkeypatch):
     client, store, _ = link_client
     agent = _install_control_agent(client, monkeypatch)
@@ -1263,6 +1332,7 @@ def test_real_mac_mcp_bridge_queues_then_claims_only_the_exact_approval(tmp_path
 
     monkeypatch.setenv("OPENJARVIS_HOME", str(tmp_path))
     monkeypatch.setenv("JARVIS_DESKTOP_MODE", "control")
+    monkeypatch.setenv("JARVIS_MCP_OPEN_APP_ENABLED", "1")
     task_id = "f" * 32
     store = SupervisorStore()
     link = store.create_link_task(
@@ -1284,7 +1354,7 @@ def test_real_mac_mcp_bridge_queues_then_claims_only_the_exact_approval(tmp_path
     monkeypatch.setenv("JARVIS_SUPERVISOR_APPROVED_OPERATION", "0")
     spec = importlib.util.spec_from_file_location(
         "jarvis_test_mac_desktop_mcp",
-        Path.home() / ".openjarvis" / "mcp" / "mac_desktop_mcp.py",
+        Path(__file__).resolve().parents[2] / "src" / "openjarvis" / "mac_desktop_mcp.py",
     )
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -1326,5 +1396,179 @@ def test_real_mac_mcp_bridge_queues_then_claims_only_the_exact_approval(tmp_path
     replay = module.call_tool("open_app", arguments)
     assert replay["isError"] is True
     assert len(executed) == 1
+    boundary_events = [event for event in store.events(task_id) if event["event_type"].startswith("mac.open_app.")]
+    stages = {event["event_type"] for event in boundary_events}
+    assert {
+        "mac.open_app.approval_requested",
+        "mac.open_app.dispatch_claim",
+        "mac.open_app.execution_attempt",
+        "mac.open_app.execution_result",
+    }.issubset(stages)
+    claim_event = next(event for event in boundary_events if event["event_type"] == "mac.open_app.dispatch_claim")
+    assert claim_event["payload"]["task_id"] == task_id
+    assert claim_event["payload"]["approval_id"] == approval["id"]
+    assert claim_event["payload"]["requested_application"] == "TextEdit"
+    assert claim_event["payload"]["dispatch_claim_outcome"] == "claimed"
+    assert claim_event["payload"]["execution_attempted"] is False
+    attempt_event = next(event for event in boundary_events if event["event_type"] == "mac.open_app.execution_attempt")
+    result_event = next(event for event in boundary_events if event["event_type"] == "mac.open_app.execution_result")
+    assert attempt_event["payload"]["execution_attempted"] is True
+    assert attempt_event["payload"]["process_context"]["pid"] > 0
+    assert result_event["payload"]["result"] == "launch_command_accepted"
+    assert result_event["payload"]["exit_code"] == 0
+    assert not {"stdout", "stderr", "arguments"}.intersection(result_event["payload"])
     module._STORE.close()
     store.close()
+
+
+@pytest.mark.parametrize("invalid_state", ["rejected", "expired", "unconsumed", "mismatched"])
+def test_mac_mcp_open_app_never_calls_launch_handler_without_exact_consumed_approval(
+    tmp_path, monkeypatch, invalid_state,
+):
+    import importlib.util
+    import subprocess
+    from pathlib import Path
+
+    monkeypatch.setenv("OPENJARVIS_HOME", str(tmp_path))
+    monkeypatch.setenv("JARVIS_DESKTOP_MODE", "control")
+    monkeypatch.setenv("JARVIS_MCP_OPEN_APP_ENABLED", "1")
+    store = SupervisorStore(str(tmp_path / "supervisor.db"))
+    owner = "device:" + "b" * 32
+    run = store.create_link_task(
+        "Open a test app only after approval",
+        capability_scope=["assistant"],
+        idempotency_key=f"mcp-invalid-{invalid_state}-0001",
+        owner_actor=owner,
+    )
+    task_id = run["task_id"]
+    store.start_link_task(
+        task_id,
+        objective_digest=run["objective_digest"],
+        objective_text_digest=run["objective_digest"],
+        capability_scope=["assistant"],
+        idempotency_key=run["idempotency_key"],
+    )
+    arguments = {"name": "MCP Gate Probe"}
+    operation = "mcp:jarvis_mac:open_app"
+    approval_id, digest = store.create_approval(task_id, operation, "MCP Gate Probe", arguments, "isolated test")
+    store.mark_link_task_waiting_approval(task_id, approval_id)
+    call_arguments = arguments
+    if invalid_state == "rejected":
+        assert store.decide_approval(
+            approval_id, decision="reject", expected_digest=digest, task_id=task_id,
+            actor=owner, nonce=f"mcp-invalid-reject-{invalid_state}",
+        )
+        store.reject_link_task_after_approval(task_id, approval_id)
+    elif invalid_state == "expired":
+        store.expire_approval(approval_id, reason="isolated_test_expiry")
+    elif invalid_state == "unconsumed":
+        assert store.decide_approval(
+            approval_id, decision="approve", expected_digest=digest, task_id=task_id,
+            actor=owner, nonce=f"mcp-invalid-approve-{invalid_state}",
+        )
+    else:
+        assert store.decide_approval(
+            approval_id, decision="approve", expected_digest=digest, task_id=task_id,
+            actor=owner, nonce=f"mcp-invalid-approve-{invalid_state}",
+        )
+        assert store.consume_approval(
+            approval_id, task_id=task_id, operation=operation, target="MCP Gate Probe", arguments=arguments,
+        )
+        store.resume_link_task_after_approval(task_id, approval_id)
+        call_arguments = {"name": "Different App"}
+
+    monkeypatch.setenv("JARVIS_SUPERVISOR_TASK_ID", task_id)
+    monkeypatch.setenv("JARVIS_SUPERVISOR_TASK_SOURCE", "jarvis_link")
+    monkeypatch.setenv("JARVIS_SUPERVISOR_TASK_SCOPE", "assistant")
+    monkeypatch.setenv("JARVIS_SUPERVISOR_APPROVED_OPERATION", "1")
+    monkeypatch.setenv("JARVIS_SUPERVISOR_APPROVAL_ID", approval_id)
+    monkeypatch.setenv("JARVIS_SUPERVISOR_OPERATION", operation)
+    monkeypatch.setenv("JARVIS_SUPERVISOR_TARGET", "MCP Gate Probe")
+    monkeypatch.setenv("JARVIS_SUPERVISOR_OPERATION_DIGEST", digest)
+    spec = importlib.util.spec_from_file_location(
+        f"jarvis_test_mac_mcp_{invalid_state}",
+        Path(__file__).resolve().parents[2] / "src" / "openjarvis" / "mac_desktop_mcp.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    module._STORE = store
+    module._SUPERVISOR_APPROVAL_CONSUMED = True
+    module._SUPERVISOR_APPROVAL_ID = approval_id
+    module._SUPERVISOR_TASK_ID = task_id
+    module._SUPERVISOR_OPERATION = operation
+    module._SUPERVISOR_TARGET = "MCP Gate Probe"
+    module._SUPERVISOR_DIGEST = digest
+    launches = []
+    monkeypatch.setattr(
+        module, "run",
+        lambda command, timeout=15: launches.append(list(command)) or subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    result = module.call_tool("open_app", call_arguments)
+    assert result["isError"] is True
+    assert launches == []
+    assert store._db.execute(
+        "SELECT 1 FROM mcp_approval_dispatches WHERE approval_id=?", (approval_id,),
+    ).fetchone() is None
+    boundary = [event for event in store.events(task_id) if event["event_type"] == "mac.open_app.dispatch_claim"]
+    assert boundary
+    assert boundary[-1]["payload"]["execution_attempted"] is False
+    module._STORE = None
+    store.close()
+
+
+def test_mcp_open_app_is_default_off_and_does_not_change_trusted_fast_path(link_client, monkeypatch):
+    import importlib.util
+    import subprocess
+    from pathlib import Path
+    from openjarvis.engine.codex_sdk import _approval_handler, _call_local_mcp, _config_overrides
+
+    _, store, _ = link_client
+    monkeypatch.setenv("JARVIS_DESKTOP_MODE", "control")
+    monkeypatch.delenv("JARVIS_MCP_OPEN_APP_ENABLED", raising=False)
+    assert 'mcp_servers.jarvis_mac.env.JARVIS_MCP_OPEN_APP_ENABLED="0"' in _config_overrides("control")
+
+    spec = importlib.util.spec_from_file_location(
+        "jarvis_test_mac_mcp_disabled",
+        Path(__file__).resolve().parents[2] / "src" / "openjarvis" / "mac_desktop_mcp.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    assert "open_app" not in {tool["name"] for tool in module.tool_list()}
+    launches = []
+    monkeypatch.setattr(module, "run", lambda command, timeout=15: launches.append(list(command) or []) or subprocess.CompletedProcess(command, 0, "", ""))
+    assert module.call_tool("open_app", {"name": "MCP Gate Probe"})["isError"] is True
+    assert launches == []
+
+    task = store.create_link_task(
+        "Open an app only through the configured MCP gate",
+        capability_scope=["assistant"],
+        idempotency_key="mcp-open-app-disabled-callback-0001",
+        owner_actor="device:" + "c" * 32,
+    )
+    store.start_link_task(
+        task["task_id"], objective_digest=task["objective_digest"],
+        objective_text_digest=task["objective_digest"], capability_scope=["assistant"],
+        idempotency_key=task["idempotency_key"],
+    )
+    with bind_task(
+        task["task_id"], source="jarvis_link", scope="assistant",
+        allowed_capabilities=supervisor.LINK_SCOPE_CAPABILITIES["assistant"],
+    ):
+        callback_result = _approval_handler("control")(
+            "mcpServer/tool/call",
+            {"server": "jarvis_mac", "tool": "open_app", "arguments": {"name": "MCP Gate Probe"}},
+        )
+    assert callback_result["isError"] is True
+    assert not [approval for approval in store.pending_approvals(20) if approval["task_id"] == task["task_id"]]
+
+    # Even a direct call through the parent local-MCP bridge must stop before
+    # spawning the child while the kill switch is off.
+    monkeypatch.setattr(
+        "openjarvis.engine.codex_sdk.subprocess.Popen",
+        lambda *args, **kwargs: pytest.fail("disabled open_app must not spawn the MCP child"),
+    )
+    blocked = _call_local_mcp("open_app", {"name": "MCP Gate Probe"}, "control", supervisor_approved=True)
+    assert blocked["isError"] is True

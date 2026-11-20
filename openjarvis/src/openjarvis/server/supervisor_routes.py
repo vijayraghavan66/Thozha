@@ -1328,6 +1328,20 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
         task_id = existing["task_id"]
     if existing["task_id"] != task_id or existing["args_digest"] != digest:
         raise HTTPException(status_code=409, detail="Approval task or operation digest does not match")
+    if (
+        decision == "approve"
+        and existing["operation"] == "mcp:jarvis_mac:open_app"
+        and existing["status"] in {"PENDING", "APPROVED"}
+    ):
+        from openjarvis.security.mac_mcp_policy import open_app_mcp_enabled
+
+        if not open_app_mcp_enabled():
+            # Keep a disabled launch approval pending so the owner can reject
+            # it or let it expire; never consume it or dispatch as a fallback.
+            raise HTTPException(
+                status_code=409,
+                detail="Approval-gated MCP app launching is temporarily disabled on this Mac.",
+            )
     repeated = existing["decision_nonce"] == nonce and existing["status"] in {"APPROVED", "REJECTED", "CONSUMED"}
     expected_status = "APPROVED" if decision == "approve" else "REJECTED"
     if repeated and existing["status"] not in {expected_status, "CONSUMED" if decision == "approve" else expected_status}:

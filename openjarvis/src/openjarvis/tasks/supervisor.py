@@ -701,7 +701,7 @@ class SupervisorStore:
         with self._tx() as db:
             if db.execute("SELECT 1 FROM operation_approvals WHERE decision_nonce=?", (nonce,)).fetchone():
                 return False
-            row = db.execute("SELECT task_id,args_digest,status,expires_at FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
+            row = db.execute("SELECT task_id,operation,target,args_digest,status,expires_at FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
             if row is None or row["task_id"] != task_id or row["args_digest"] != expected_digest or row["status"] != "PENDING":
                 return False
             if row["expires_at"] <= now:
@@ -711,6 +711,19 @@ class SupervisorStore:
             cur = db.execute("UPDATE operation_approvals SET status=?,decided_at=?,decided_by=?,decision_nonce=? WHERE id=? AND task_id=? AND args_digest=? AND status='PENDING' AND expires_at>?", (status, now, actor, nonce, approval_id, task_id, expected_digest, now))
             if cur.rowcount != 1: return False
             self._event(db, task_id, "approval.decision", {"approval_id": approval_id, "decision": decision, "actor": actor, "args_digest": expected_digest})
+            if row["operation"] == "mcp:jarvis_mac:open_app":
+                self._event(db, task_id, "mac.open_app.decision", {
+                    "task_id": task_id,
+                    "approval_id": approval_id,
+                    "operation": row["operation"],
+                    "requested_application": row["target"][:120],
+                    "decision": decision,
+                    "dispatch_claim_outcome": "not_attempted",
+                    "execution_attempted": False,
+                    "result": status.lower(),
+                    "timestamp_utc": now,
+                    "process_context": {"pid": os.getpid(), "ppid": os.getppid()},
+                })
             if status == "REJECTED":
                 db.execute("UPDATE tasks SET state='PAUSED',updated_at=? WHERE id=? AND state='WAITING_APPROVAL'", (now, task_id))
                 self._event(db, task_id, "task.state", {"from": "WAITING_APPROVAL", "to": "PAUSED", "step": "approval_rejected"})

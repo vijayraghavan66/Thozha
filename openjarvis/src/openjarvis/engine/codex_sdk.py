@@ -13,12 +13,16 @@ from pathlib import Path
 from typing import Any
 
 from openjarvis.core.registry import EngineRegistry
-from openjarvis.engine._base import EngineConnectionError, InferenceEngine
 from openjarvis.core.types import Message
+from openjarvis.engine._base import EngineConnectionError, InferenceEngine
+from openjarvis.security.mac_mcp_policy import (
+    open_app_mcp_enabled,
+    record_open_app_event,
+)
 
 MODEL = "gpt-6-luna"
 CODEX_HOME = Path.home() / ".openjarvis" / "codex-home"
-MAC_MCP = Path.home() / ".openjarvis" / "mcp" / "mac_desktop_mcp.py"
+MAC_MCP = Path(__file__).resolve().parent.parent / "mac_desktop_mcp.py"
 DEV_MCP = Path.home() / ".openjarvis" / "mcp" / "jarvis_dev_mcp.py"
 PYTHON = Path.home() / ".openjarvis" / "src" / ".venv" / "bin" / "python"
 
@@ -33,6 +37,38 @@ def _serialize_messages(messages: list[Message]) -> str:
         if content.strip():
             lines.append(f"{role}: {content.strip()}")
     return "\n\n".join(lines) or "USER: Hello."
+
+
+def _audit_open_app_event(
+    stage: str,
+    *,
+    task_id: str,
+    approval_id: str = "",
+    application: str = "",
+    dispatch_claim_outcome: str,
+    execution_attempted: bool,
+    result: str,
+    error_code: str = "",
+    exit_code: int | None = None,
+) -> None:
+    try:
+        from openjarvis.tasks.supervisor import get_supervisor_store
+
+        store = get_supervisor_store() if task_id else None
+    except Exception:
+        store = None
+    record_open_app_event(
+        store,
+        stage=stage,
+        task_id=task_id,
+        approval_id=approval_id,
+        application=application,
+        dispatch_claim_outcome=dispatch_claim_outcome,
+        execution_attempted=execution_attempted,
+        result=result,
+        error_code=error_code,
+        exit_code=exit_code,
+    )
 
 
 def _config_overrides(mode: str) -> tuple[str, ...]:
@@ -60,6 +96,7 @@ def _config_overrides(mode: str) -> tuple[str, ...]:
         f'mcp_servers.jarvis_mac.command="{PYTHON}"',
         f'mcp_servers.jarvis_mac.args=["{MAC_MCP}"]',
         f'mcp_servers.jarvis_mac.env.JARVIS_DESKTOP_MODE="{mode}"',
+        f'mcp_servers.jarvis_mac.env.JARVIS_MCP_OPEN_APP_ENABLED="{1 if open_app_mcp_enabled() else 0}"',
     ]
     if (
         context is not None
@@ -107,6 +144,27 @@ def _call_local_mcp(
     supervisor_operation_digest: str = "",
 ) -> dict[str, Any]:
     """Handle app-server MCP tool requests through Jarvis's local stdio bridge."""
+    if tool == "open_app" and not open_app_mcp_enabled():
+        task_id = supervisor_task_id
+        if not task_id:
+            try:
+                from openjarvis.tasks.supervisor import current_task_context
+                context = current_task_context()
+                task_id = context.task_id if context is not None else ""
+            except Exception:
+                task_id = ""
+        _audit_open_app_event(
+            "disabled", task_id=task_id,
+            approval_id=supervisor_approval_id,
+            application=str((arguments or {}).get("name") or ""),
+            dispatch_claim_outcome="not_attempted",
+            execution_attempted=False,
+            result="open_app_mcp_disabled",
+        )
+        return {
+            "content": [{"type": "text", "text": "Approval-gated MCP app launching is temporarily disabled; no application was opened."}],
+            "isError": True,
+        }
     env = os.environ.copy()
     env["JARVIS_DESKTOP_MODE"] = mode
     env["JARVIS_SUPERVISOR_APPROVED_OPERATION"] = "1" if supervisor_approved else "0"
@@ -229,7 +287,9 @@ def _call_local_dev_mcp(
 def _approval_handler(mode: str):
     """Route state-changing Mac MCP calls through durable exact-operation approval."""
     read_only_tools = {"get_disk_usage", "get_active_app", "capture_screen"}
-    control_tools = {"click", "type_text", "press_key", "scroll", "open_app", "open_browser_workspace"}
+    control_tools = {"click", "type_text", "press_key", "scroll", "open_browser_workspace"}
+    if open_app_mcp_enabled():
+        control_tools.add("open_app")
     try:
         # The SDK may invoke this callback on its own worker thread. Capture the
         # server-bound context before handing the callback to that client.
@@ -260,6 +320,17 @@ def _approval_handler(mode: str):
             arguments = params.get("arguments") or {}
             if not isinstance(arguments, dict):
                 return refusal("Mac tool arguments must be an object.")
+            if tool == "open_app" and not open_app_mcp_enabled():
+                context = task_context()
+                _audit_open_app_event(
+                    "disabled",
+                    task_id=context.task_id if context is not None else "",
+                    application=str(arguments.get("name") or ""),
+                    dispatch_claim_outcome="not_attempted",
+                    execution_attempted=False,
+                    result="open_app_mcp_disabled",
+                )
+                return refusal("Approval-gated MCP app launching is temporarily disabled; no application was opened.")
             if tool in read_only_tools:
                 if arguments:
                     return refusal("Read-only Mac tools do not accept arguments.")
@@ -298,6 +369,16 @@ def _approval_handler(mode: str):
                     "target": target,
                     "operation_digest": digest,
                 })
+                if tool == "open_app":
+                    _audit_open_app_event(
+                        "approval_requested",
+                        task_id=context.task_id,
+                        approval_id=approval_id,
+                        application=str(arguments.get("name") or ""),
+                        dispatch_claim_outcome="not_attempted",
+                        execution_attempted=False,
+                        result="awaiting_owner_decision",
+                    )
                 return refusal(f"Exact Mac operation is waiting for approval. approval_id={approval_id}")
             except Exception as exc:  # fail closed if the supervisor store is unavailable
                 return refusal(f"Mac control was blocked because authorization could not be recorded ({type(exc).__name__}).")
