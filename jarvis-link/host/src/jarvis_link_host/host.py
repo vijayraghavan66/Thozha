@@ -180,7 +180,7 @@ def _task_submit_payload(payload: Mapping[str, Any]) -> tuple[str, list[str]]:
 
 
 def _trusted_app_result(command: str, display_name: str, bundle_id: str,
-                        result: Any) -> dict[str, Any]:
+                        request_id: str, result: Any) -> dict[str, Any]:
     """Convert a supervisor app result without manufacturing execution success."""
     if not isinstance(result, dict):
         raise TaskEnvelopeError("supervisor returned an invalid app activation result")
@@ -215,16 +215,15 @@ def _trusted_app_result(command: str, display_name: str, bundle_id: str,
             "summary": summary.strip()[:500],
         }
     if state in {"EXECUTION_PENDING", "RUNNING", "INDETERMINATE"}:
-        task_id = result.get("task_id")
         summary = result.get("summary")
-        if (not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id)
+        if (result.get("request_id") != request_id
                 or not isinstance(summary, str) or not summary.strip()):
             raise TaskEnvelopeError("supervisor returned an incomplete in-flight app result")
         return {
             "kind": "fast.result",
             "command": command,
             "state": state,
-            "task_id": task_id,
+            "request_id": request_id,
             "bundle_id": bundle_id,
             "summary": summary.strip()[:500],
         }
@@ -443,7 +442,7 @@ class JarvisLinkHost:
                                      requester_device_id=envelope.from_device_id,
                                      idempotency_key=envelope.message_id)
                     output = _trusted_app_result(command, trusted_app.display_name,
-                                                 trusted_app.bundle_id, result)
+                                                 trusted_app.bundle_id, envelope.message_id, result)
                     task_id = output.get("task_id")
                     observer = getattr(self, "task_observer", None)
                     if isinstance(task_id, str) and observer is not None:

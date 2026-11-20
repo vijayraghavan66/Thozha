@@ -461,11 +461,10 @@ class OpenJarvisApiSupervisorAdapter:
                     raise SupervisorRefused("OpenJarvis returned an incomplete app failure")
                 return {k: data[k] for k in ("state", "bundle_id", "executed", "success", "summary") if k in data}
             if state in {"EXECUTION_PENDING", "RUNNING", "INDETERMINATE"}:
-                task = data.get("task_id")
-                if (not isinstance(task, str) or not _ID_RE.fullmatch(task)
-                        or not isinstance(data.get("summary"), str) or not data["summary"].strip()):
+                if (not isinstance(data.get("summary"), str) or not data["summary"].strip()):
                     raise SupervisorRefused("OpenJarvis returned an incomplete in-flight app result")
-                return {"state": state, "bundle_id": app, "task_id": task,
+                return {"state": state, "bundle_id": app, "request_id": idempotency_key,
+                        "executed": False, "success": False,
                         "summary": data["summary"].strip()[:500]}
             if state == "WAITING_APPROVAL":
                 task = data.get("task_id")

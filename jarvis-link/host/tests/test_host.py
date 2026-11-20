@@ -214,22 +214,22 @@ def test_trusted_app_approval_fallback_is_exact_and_sanitized():
 @pytest.mark.parametrize("state", ["EXECUTION_PENDING", "RUNNING", "INDETERMINATE"])
 def test_inflight_app_result_is_preserved_and_observed_without_claiming_success(state):
     hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
-    supervisor.app_open_result = {
-        "state": state, "task_id": "b" * 32, "bundle_id": "com.apple.calculator",
-        "summary": "Jarvis is reconciling the Calculator activation.",
-    }
     observed = []
     hostproc.task_observer = lambda **kwargs: observed.append(kwargs)
     idem = uuid.uuid4().hex
+    supervisor.app_open_result = {
+        "state": state, "request_id": idem, "bundle_id": "com.apple.calculator",
+        "summary": "Jarvis is reconciling the Calculator activation.",
+    }
     env = task_envelope(host, phone, host_id, phone_id, host_cert,
                         {"app": "Calculator", "command": "app.open", "idempotency_key": idem, "version": 1},
                         kind="fast.command", message_id=idem)
     result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)["result"]
     assert result["state"] == state
-    assert result["task_id"] == "b" * 32
+    assert result["request_id"] == idem
     assert result["bundle_id"] == "com.apple.calculator"
     assert "executed" not in result and "success" not in result
-    assert observed == [{"task_id": "b" * 32, "idempotency_key": idem, "companion_id": phone_id}]
+    assert observed == []  # a typed in-flight fast action has no supervisor task to observe
 
 
 def test_trusted_app_approval_with_mismatched_digest_or_target_fails_closed():

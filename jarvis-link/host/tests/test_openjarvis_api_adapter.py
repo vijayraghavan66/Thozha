@@ -196,14 +196,14 @@ def test_fast_app_approval_fallback_is_bound_to_bundle_and_task(tmp_path):
 def test_fast_app_inflight_state_is_preserved_without_claiming_completion(tmp_path, state):
     key = _key(tmp_path / "api-key")
     response = {"command": "app.open", "state": state, "bundle_id": "com.apple.calculator",
-                "task_id": "b" * 32, "summary": "Jarvis is reconciling the app activation."}
+                "summary": "Jarvis is reconciling the app activation."}
     client = httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=response)))
     adapter = OpenJarvisApiSupervisorAdapter(key_file=key, http_client=client)
     result = adapter.fast_command(command="app.open", requester_device_id="d" * 32,
                                   idempotency_key="e" * 32, app="com.apple.calculator")
     assert result == {"state": state, "bundle_id": "com.apple.calculator",
-                      "task_id": "b" * 32, "summary": "Jarvis is reconciling the app activation."}
-    assert "executed" not in result and "success" not in result
+                      "request_id": "e" * 32, "executed": False, "success": False,
+                      "summary": "Jarvis is reconciling the app activation."}
     client.close()
 
 
