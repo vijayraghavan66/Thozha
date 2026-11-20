@@ -96,6 +96,10 @@ def _config_overrides(mode: str) -> tuple[str, ...]:
             f'mcp_servers.jarvis_dev.env.JARVIS_SUPERVISOR_TASK_ID="{context.task_id}"',
             'mcp_servers.jarvis_dev.env.JARVIS_SUPERVISOR_TASK_SOURCE="jarvis_link"',
             'mcp_servers.jarvis_dev.env.JARVIS_SUPERVISOR_TASK_SCOPE="development"',
+            # Autonomous development is executed only by the bounded jarvis_dev MCP.
+            # The Codex shell tool is unavailable in this scope.
+            'features.shell_tool=false',
+            'features.unified_exec_tty=false',
         )
     overrides = [
         f'mcp_servers.jarvis_mac.command="{PYTHON}"',

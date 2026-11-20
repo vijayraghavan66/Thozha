@@ -632,6 +632,8 @@ def test_development_codex_cwd_and_registered_mcp_are_workspace_scoped(tmp_path,
         overrides = _config_overrides("control")
         assert any("mcp_servers.jarvis_dev.command" in entry for entry in overrides)
         assert not any("mcp_servers.jarvis_mac." in entry for entry in overrides)
+        assert "features.shell_tool=false" in overrides
+        assert "features.unified_exec_tty=false" in overrides
 
     with bind_task(
         "b" * 32,
@@ -640,6 +642,8 @@ def test_development_codex_cwd_and_registered_mcp_are_workspace_scoped(tmp_path,
         allowed_capabilities=supervisor.LINK_SCOPE_CAPABILITIES["assistant"],
     ):
         assert Path(_working_directory_for_current_task()) == Path.home() / ".openjarvis"
+        assistant_overrides = _config_overrides("control")
+        assert "features.shell_tool=false" not in assistant_overrides
 
 
 def test_codex_mcp_callback_routes_only_bound_development_tools(link_client, monkeypatch):
