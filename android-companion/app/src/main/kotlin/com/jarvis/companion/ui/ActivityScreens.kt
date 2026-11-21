@@ -1,5 +1,8 @@
 package com.jarvis.companion.ui
 
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -41,6 +44,7 @@ import com.jarvis.companion.presentation.ApprovalDecisionPresentation
 import com.jarvis.companion.presentation.ApprovalDecisionStatus
 import com.jarvis.link.ApprovalReview
 import com.jarvis.link.DevelopmentPlanReview
+import com.jarvis.companion.model.TaskArtifact
 
 @Composable
 fun ScreenHeader(title: String, subtitle: String) {
@@ -54,6 +58,12 @@ fun ScreenHeader(title: String, subtitle: String) {
 /** Task records from the Mac, grouped by real state. Nothing is shown as done until the Mac reports it. */
 @Composable
 fun ActivityScreen(store: JarvisStore) {
+    var pendingArtifact by remember { mutableStateOf<TaskArtifact?>(null) }
+    val saveArchive = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        val artifact = pendingArtifact
+        pendingArtifact = null
+        if (uri != null && artifact != null) store.saveTaskArtifact(artifact, uri)
+    }
     val sections = remember(store.entries, store.now) { TimelinePresentation.sections(store.entries) { clockTime(it) } }
     Column(Modifier.fillMaxSize()) {
         ScreenHeader("Activity", "Tasks as the Mac has reported them. Unconfirmed requests stay marked as such.")
@@ -73,7 +83,10 @@ fun ActivityScreen(store: JarvisStore) {
                         val progress = remember(row.taskId, row.requestId, store.taskUpdates) {
                             TaskProgressPresentation.eventsFor(row.taskId, store.taskUpdates) { clockTime(it) }
                         }
-                        TaskRow(row, progress)
+                        TaskRow(row, progress, store) { artifact ->
+                            pendingArtifact = artifact
+                            saveArchive.launch(artifact.fileName)
+                        }
                     }
                 }
                 item { Spacer(Modifier.height(16.dp)) }
@@ -83,7 +96,8 @@ fun ActivityScreen(store: JarvisStore) {
 }
 
 @Composable
-private fun TaskRow(row: TimelineRow, progress: List<TaskProgressEvent>) {
+private fun TaskRow(row: TimelineRow, progress: List<TaskProgressEvent>, store: JarvisStore, onSaveArtifact: (TaskArtifact) -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     var showAllProgress by remember(row.requestId) { mutableStateOf(false) }
     val visibleProgress = if (showAllProgress) progress else progress.takeLast(1)
     SurfaceCard {
@@ -111,6 +125,40 @@ private fun TaskRow(row: TimelineRow, progress: List<TaskProgressEvent>) {
             if (footer.isNotBlank()) {
                 Spacer(Modifier.height(8.dp))
                 BasicText(footer, style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+            }
+            if (row.tone == TaskTone.COMPLETED && row.taskId.matches(Regex("[0-9a-f]{32}"))) {
+                Spacer(Modifier.height(10.dp))
+                val artifacts = store.taskArtifacts[row.taskId]
+                if (artifacts.isNullOrEmpty()) {
+                    TextAction(
+                        if (row.taskId in store.artifactLoadingTasks) "Checking project files…" else "Find project files",
+                        filled = false,
+                        enabled = row.taskId !in store.artifactLoadingTasks,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { store.loadTaskArtifacts(row.taskId) }
+                } else {
+                    SectionLabel("Project files")
+                    Spacer(Modifier.height(6.dp))
+                    artifacts.forEach { artifact ->
+                        BasicText(
+                            "${artifact.fileName} · ${artifact.sizeBytes} bytes · SHA-256 ${artifact.archiveSha256.take(16)}…",
+                            style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        TextAction("Download verified ZIP", filled = true, modifier = Modifier.fillMaxWidth()) {
+                            onSaveArtifact(artifact)
+                        }
+                        store.savedArtifacts[artifact.artifactId]?.let { uri ->
+                            Spacer(Modifier.height(6.dp))
+                            TextAction("Open or share ZIP", filled = false, modifier = Modifier.fillMaxWidth()) {
+                                val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/zip")
+                                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                runCatching { context.startActivity(Intent.createChooser(view, "Open project archive")) }
+                                    .onFailure { store.notice = "The archive is saved and verified. Open it from My Files or share it from the selected folder." }
+                            }
+                        }
+                    }
+                }
             }
             if (progress.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))

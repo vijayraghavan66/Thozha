@@ -35,6 +35,16 @@ data class TaskEvent(
 
 data class TaskDetail(val task: JarvisTask, val events: List<TaskEvent>)
 
+data class TaskArtifact(
+    val taskId: String,
+    val artifactId: String,
+    val fileName: String,
+    val sizeBytes: Long,
+    val archiveSha256: String,
+    val manifestSha256: String,
+    val downloadPath: String,
+)
+
 data class LinkTaskResult(
     val taskId: String,
     val state: String,

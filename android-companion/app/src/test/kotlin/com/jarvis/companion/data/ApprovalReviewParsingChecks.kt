@@ -8,7 +8,7 @@ fun main() {
         "device_id" to "d".repeat(32),
         "user_id" to "device:" + "d".repeat(32),
         "workspace_root" to "/Users/REDACTED/Documents/Jarvis-Lab/agent-evaluation/taskflow",
-        "allowed_ops" to listOf("artifact_manifest", "run_tests", "write_file"),
+        "allowed_ops" to listOf("artifact_export", "artifact_manifest", "run_tests", "write_file"),
         "allowed_paths" to listOf("README.md", "src", "tests"),
         "max_file_bytes" to 65_536L,
         "max_total_bytes" to 262_144L,
@@ -18,8 +18,8 @@ fun main() {
         "max_duration_s" to 1_800L,
         "ttl_s" to 1_800L,
     )
-    val planDigest = "938fcba7327677cbe353687415bac63b4b59378e92f5b4f449763ecfe65e0652"
-    val operationDigest = "07c0bfec451af5337bb033c5eda749570d0cae40d9186f453c827c98f137b63b"
+    val planDigest = "7fa780c010332ef3f18985c8b4abf3c6c3745311251daec14cc0c4b146e7acc5"
+    val operationDigest = "12be6b00fd5eba1b10aa88c47aded2654e7915ec448936d1179b65c46f945d19"
     val approvalPayload = mapOf(
         "canonical_arguments" to mapOf("plan" to plan, "plan_digest" to planDigest),
     )
@@ -41,6 +41,7 @@ fun main() {
     check(verified.developmentPlan?.planDigest == planDigest)
     check(verified.canonicalArgumentsDigest == operationDigest)
     check(verified.developmentPlan?.allowedPaths == listOf("README.md", "src", "tests"))
+    check("artifact_export" in verified.developmentPlan!!.allowedOps)
 
     val missingPlan = mapOf("canonical_arguments" to emptyMap<String, Any>())
     check(runCatching { parseSupervisorApprovalReview(missingPlan, approval) }.exceptionOrNull() is ApiException)
@@ -48,5 +49,5 @@ fun main() {
     val tampered = mapOf("canonical_arguments" to mapOf("plan" to changedPlan, "plan_digest" to planDigest))
     check(runCatching { parseSupervisorApprovalReview(tampered, approval) }.exceptionOrNull() is ApiException)
 
-    println("OpenJarvis approval review checks passed: 7 assertions")
+    println("OpenJarvis approval review checks passed: 8 assertions")
 }

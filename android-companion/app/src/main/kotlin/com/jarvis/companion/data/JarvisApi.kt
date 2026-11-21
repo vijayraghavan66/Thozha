@@ -23,6 +23,7 @@ import com.jarvis.companion.model.PairingStatus
 import com.jarvis.companion.model.PairedDevice
 import com.jarvis.companion.model.TaskDetail
 import com.jarvis.companion.model.TaskEvent
+import com.jarvis.companion.model.TaskArtifact
 import com.jarvis.link.ApprovalReview
 import com.jarvis.link.DevelopmentPlanReview
 
@@ -512,6 +513,99 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             )
         }
         return TaskDetail(task, events)
+    }
+
+    /** Lists only archives already associated with this authenticated device's completed task. */
+    fun getTaskArtifacts(taskId: String): List<TaskArtifact> {
+        require(taskId.matches(Regex("[0-9a-f]{32}")))
+        val token = secureStore.token()?.takeIf { it.isNotBlank() }
+            ?: throw ApiException("This phone is not paired with the Mac.", 401)
+        val json = request(
+            requireBaseUrl(), "/v1/jarvis/tasks/${pathSegment(taskId)}/artifacts", "GET", null,
+            token, connectTimeoutMs = 10_000, readTimeoutMs = 25_000, allowLocalWifi = true,
+        )
+        return json.requiredArrayOf("artifacts").map { item ->
+            val artifactId = item.requiredString("artifact_id")
+            val fileName = item.requiredString("file_name")
+            val size = item.optLong("size_bytes", -1)
+            val archiveDigest = item.requiredString("archive_sha256")
+            val manifestDigest = item.requiredString("manifest_sha256")
+            if (!artifactId.matches(Regex("[0-9a-f]{64}")) ||
+                !fileName.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,100}\\.zip")) ||
+                size !in 1..5_242_880 ||
+                !archiveDigest.matches(Regex("[0-9a-f]{64}")) ||
+                !manifestDigest.matches(Regex("[0-9a-f]{64}"))
+            ) throw ApiException("The Mac returned invalid project archive metadata.")
+            TaskArtifact(
+                taskId = taskId, artifactId = artifactId, fileName = fileName,
+                sizeBytes = size, archiveSha256 = archiveDigest, manifestSha256 = manifestDigest,
+                downloadPath = "/v1/jarvis/tasks/${pathSegment(taskId)}/artifacts/$artifactId/download",
+            )
+        }
+    }
+
+    /** Downloads an archive with the paired TLS identity, then verifies size and SHA-256 before returning bytes. */
+    fun downloadTaskArtifact(artifact: TaskArtifact): ByteArray {
+        require(artifact.taskId.matches(Regex("[0-9a-f]{32}")))
+        require(artifact.artifactId.matches(Regex("[0-9a-f]{64}")))
+        require(artifact.sizeBytes in 1..5_242_880)
+        val token = secureStore.token()?.takeIf { it.isNotBlank() }
+            ?: throw ApiException("This phone is not paired with the Mac.", 401)
+        val base = requireBaseUrl()
+        val wifiPin = runCatching { secureStore.localGatewayPin() }.getOrNull()
+        val wifiEndpoint = wifiPin?.let { LocalGatewayDiscovery.discover(context, it) }
+        val effectiveBase = if (wifiEndpoint != null) "https://${wifiEndpoint.hostname}:${wifiEndpoint.port}" else base
+        val connection = (URL(effectiveBase + artifact.downloadPath).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            instanceFollowRedirects = false
+            connectTimeout = 10_000
+            readTimeout = 60_000
+            setRequestProperty("Accept", "application/zip")
+            setRequestProperty("X-Jarvis-Client", "android-companion/0.1")
+            setRequestProperty("Authorization", "Bearer $token")
+        }
+        if (wifiPin != null && wifiEndpoint != null) {
+            val tls = connection as? javax.net.ssl.HttpsURLConnection
+                ?: throw ApiException("The discovered Mac gateway did not use HTTPS.")
+            tls.sslSocketFactory = LocalGatewayTls.socketFactory(wifiPin.certificateSha256)
+        }
+        try {
+            val status = connection.responseCode
+            if (status !in 200..299) {
+                val detail = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                val message = runCatching { JSONObject(detail).optString("detail", "HTTP $status") }.getOrDefault("HTTP $status")
+                throw ApiException(message.take(240), status)
+            }
+            if (connection.getHeaderField("X-Content-SHA256") != artifact.archiveSha256) {
+                throw ApiException("The project archive identity changed during download.")
+            }
+            val declaredLength = connection.contentLengthLong
+            if (declaredLength != artifact.sizeBytes) throw ApiException("The project archive size did not match its listing.")
+            val data = connection.inputStream.use { input ->
+                val output = java.io.ByteArrayOutputStream(artifact.sizeBytes.toInt())
+                val buffer = ByteArray(32 * 1024)
+                var total = 0
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    total += count
+                    if (total > 5_242_880 || total > artifact.sizeBytes) throw ApiException("The project archive exceeded its verified size.")
+                    output.write(buffer, 0, count)
+                }
+                output.toByteArray()
+            }
+            val digest = MessageDigest.getInstance("SHA-256").digest(data).joinToString("") { "%02x".format(it) }
+            if (data.size.toLong() != artifact.sizeBytes || digest != artifact.archiveSha256) {
+                throw ApiException("The downloaded project archive failed its SHA-256 check.")
+            }
+            return data
+        } catch (error: ApiException) {
+            throw error
+        } catch (error: Exception) {
+            throw ApiException(error.message ?: "The project archive could not be downloaded safely.")
+        } finally {
+            connection.disconnect()
+        }
     }
 
     fun decide(approval: Approval, decision: String, continuationObjective: String? = null): JSONObject {

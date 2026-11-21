@@ -21,6 +21,7 @@ import com.jarvis.companion.localai.LocalAiRequestMode
 import com.jarvis.companion.localai.RequestRoute
 import com.jarvis.companion.localai.RequestRoutingPolicy
 import com.jarvis.companion.model.ApiException
+import com.jarvis.companion.model.TaskArtifact
 import com.jarvis.companion.model.Approval
 import com.jarvis.companion.data.JarvisApi
 import com.jarvis.companion.data.SecureStore
@@ -66,6 +67,9 @@ class JarvisStore(private val app: Context) {
     /** Authenticated task-update envelopes persisted by LinkRuntime; rendered as real activity only. */
     var taskUpdates by mutableStateOf<List<Map<String, Any>>>(emptyList())
     var approvals by mutableStateOf<List<ApprovalReview>>(emptyList())
+    var taskArtifacts by mutableStateOf<Map<String, List<TaskArtifact>>>(emptyMap())
+    var artifactLoadingTasks by mutableStateOf<Set<String>>(emptySet())
+    var savedArtifacts by mutableStateOf<Map<String, android.net.Uri>>(emptyMap())
     /** Pending OpenJarvis API approvals, keyed by the authenticated Mac approval ID. */
     private var supervisorApprovals: Map<String, Approval> = emptyMap()
     /** Persisted UI reconciliation only; supervisor remains authoritative for every decision and action. */
@@ -292,6 +296,53 @@ class JarvisStore(private val app: Context) {
     fun onTelegramSnapshot(snapshot: TelegramSnapshot) = ui { telegram = snapshot }
 
     /** Retries queued sends and polls the Mac for updates. Safe to call repeatedly; only one sync runs at a time. */
+    fun loadTaskArtifacts(taskId: String) = ui {
+        if (!taskId.matches(Regex("[0-9a-f]{32}")) || taskId in artifactLoadingTasks) return@ui
+        artifactLoadingTasks = artifactLoadingTasks + taskId
+        background(lanes.sync) {
+            val result = runCatching { jarvisApi.getTaskArtifacts(taskId) }
+            ui {
+                artifactLoadingTasks = artifactLoadingTasks - taskId
+                result.onSuccess { artifacts ->
+                    taskArtifacts = taskArtifacts + (taskId to artifacts)
+                    notice = if (artifacts.isEmpty()) "No downloadable archive is recorded for this completed task."
+                    else "${artifacts.size} verified project archive${if (artifacts.size == 1) "" else "s"} available."
+                }.onFailure { failure -> notice = deliveryError(failure) }
+            }
+        }
+    }
+
+    fun saveTaskArtifact(artifact: TaskArtifact, destination: android.net.Uri) = ui {
+        notice = "Downloading and verifying ${artifact.fileName}…"
+        background(lanes.sync) {
+            val result = runCatching {
+                val bytes = jarvisApi.downloadTaskArtifact(artifact)
+                val output = app.contentResolver.openOutputStream(destination, "wt")
+                    ?: error("Android could not open the selected save location.")
+                output.use { it.write(bytes) }
+                val savedDigest = app.contentResolver.openInputStream(destination)?.use { input ->
+                    val digest = java.security.MessageDigest.getInstance("SHA-256")
+                    val buffer = ByteArray(32 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        digest.update(buffer, 0, count)
+                    }
+                    digest.digest().joinToString("") { "%02x".format(it) }
+                } ?: error("Android could not verify the saved archive.")
+                check(savedDigest == artifact.archiveSha256) { "The saved archive failed its SHA-256 check." }
+                bytes.size
+            }
+            ui {
+                    if (result.isSuccess) savedArtifacts = savedArtifacts + (artifact.artifactId to destination)
+                notice = result.fold(
+                    onSuccess = { "Saved ${artifact.fileName} (${it} bytes). SHA-256 verified." },
+                    onFailure = { "Project download failed: ${deliveryError(it)}" },
+                )
+            }
+        }
+    }
+
     fun syncNow() = ui {
         if (syncing) return@ui
         syncing = true
