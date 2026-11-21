@@ -40,6 +40,7 @@ object CompanionProtocolTest {
         approvalDecisionRequiresAuthoritativeCorrelatedResult()
         developmentPlanApprovalRequiresCompleteDigestBoundDetails()
         localTaskHistoryIsRestartSafe()
+        authenticatedTaskStatusCorrectsOnlyTheLocalMissingRecordMarker()
         progressSequenceDeduplicatesOutOfOrderEvents()
         staleProgressCannotReopenTerminalTask()
         concurrentLocalStateAndOutbox(hostCertificate, hostRoot, companion, now)
@@ -592,6 +593,27 @@ object CompanionProtocolTest {
         check(runCatching {
             recovered.recordLocalTaskRequest("local-usb-task-20261116-000000000002", "bad scope", capabilityScope = "mac_root")
         }.isFailure)
+        directory.deleteRecursively()
+    }
+
+    private fun authenticatedTaskStatusCorrectsOnlyTheLocalMissingRecordMarker() {
+        val directory = java.nio.file.Files.createTempDirectory("jarvis-missing-task-reconcile").toFile()
+        val id = "local-status-reconcile-20261121"
+        val taskId = "a".repeat(32)
+        val runtime = LinkRuntime(
+            keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+            state = FileLinkStateStore(File(directory, "state.json")),
+            storeDir = directory,
+        )
+        runtime.recordLocalTaskRequest(id, "Check task status", transport = "api", capabilityScope = "development")
+        runtime.recordLocalTaskResult(id, "", "FAILED", "The Mac no longer has this task record.")
+        check(runtime.reconcileMissingApiTaskResult(id, taskId, "WAITING_APPROVAL", "Waiting for your approval."))
+        val reconciled = runtime.conversation().single()
+        check(reconciled["task_id"] == taskId && reconciled["state"] == "WAITING_APPROVAL")
+        check(reconciled["summary"] == "Waiting for your approval.")
+        runtime.recordLocalTaskResult(id, "", "FAILED", "An unrelated terminal error.")
+        check(!runtime.reconcileMissingApiTaskResult(id, taskId, "COMPLETED", "Stale response"))
+        check(runtime.conversation().single()["summary"] == "An unrelated terminal error.")
         directory.deleteRecursively()
     }
 

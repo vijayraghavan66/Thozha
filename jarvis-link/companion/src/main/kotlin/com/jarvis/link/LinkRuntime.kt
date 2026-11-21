@@ -360,6 +360,34 @@ class LinkRuntime(
         applyToConversation(idempotencyKey, taskId, state.uppercase(), summary)
     }
 
+    /** Corrects only the exact local 404 terminal marker after a fresh authenticated Mac status response. */
+    fun reconcileMissingApiTaskResult(idempotencyKey: String, taskId: String, state: String, summary: String): Boolean {
+        require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid task idempotency key" }
+        require(taskId.matches(Regex("[0-9a-f]{32}"))) { "invalid supervisor task ID" }
+        val normalizedState = state.trim().uppercase()
+        require(normalizedState in setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "COMPLETED", "FAILED", "CANCELLED")) { "invalid supervisor task state" }
+        synchronized(stateLock) {
+            var repaired = false
+            val entries = conversation().map { entry ->
+                if (
+                    entry["message_id"] == idempotencyKey && entry["transport"] == "api" &&
+                    entry["state"] == "FAILED" && entry["task_id"] == "" &&
+                    entry["summary"] == "The Mac no longer has this task record."
+                ) {
+                    repaired = true
+                    LinkedHashMap(entry).apply {
+                        put("task_id", taskId)
+                        put("state", normalizedState)
+                        put("summary", summary)
+                        put("updated_at_unix_ms", now())
+                    }
+                } else entry
+            }
+            if (repaired) save(mapOf("conversation" to entries))
+            return repaired
+        }
+    }
+
     /** Sends a typed request to the Mac supervisor. Queued locally if the relay is unreachable. */
     fun sendRequest(relayUrl: String, text: String): Map<String, Any> {
         val cleaned = text.trim()
