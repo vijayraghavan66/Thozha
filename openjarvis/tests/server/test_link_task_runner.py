@@ -536,8 +536,10 @@ def test_fast_task_status_reports_approval_expiry_without_running_the_operation(
     assert response.status_code == 200
     assert response.json()["state"] == "EXPIRED"
     assert "expired" in response.json()["summary"].lower()
-    # Status inspection does not rewrite task history, consume approval, or execute Calculator.
-    assert store.get_task(task_id)["state"] == "WAITING_APPROVAL"
+    # Expiry is terminal, but never consumes approval or executes Calculator.
+    assert store.get_task(task_id)["state"] == "FAILED"
+    assert store.get_task(task_id)["last_error"] == "approval_expired"
+    assert store.link_task_run(task_id)["status"] == "FAILED"
     assert store.approval(approval_id)["status"] == "EXPIRED"
     assert agent.calls == []
 
@@ -1100,8 +1102,42 @@ def test_expired_link_approval_returns_terminal_expired_without_execution(link_c
     assert response.json()["executed"] is False
     assert response.json()["success"] is False
     assert store.approval(approval["id"])["status"] == "EXPIRED"
-    assert store.get_task(task_id)["state"] == "WAITING_APPROVAL"
+    assert store.get_task(task_id)["state"] == "FAILED"
+    assert store.get_task(task_id)["current_step"] == "approval_expired"
+    assert store.link_task_run(task_id)["status"] == "FAILED"
+    assert store.link_task_run(task_id)["last_error"] == "approval_expired"
     assert dispatched == []
+
+
+def test_old_expired_link_approval_is_reconciled_to_terminal_on_status_read(link_client, monkeypatch):
+    client, store, _ = link_client
+    _install_control_agent(client, monkeypatch)
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    idempotency_key = "expired-link-status-reconcile-01"
+    accepted = client.post("/v1/jarvis/link/tasks", headers=headers, json={
+        "objective": "Open TextEdit if approved.",
+        "capability_scope": ["assistant"],
+        "idempotency_key": idempotency_key,
+        "requester_device_id": "a" * 32,
+    })
+    assert accepted.status_code == 202
+    task_id = accepted.json()["task_id"]
+    approval = next(item for item in store.pending_approvals(20) if item["task_id"] == task_id)
+    # Model the previously persisted state: approval row expired, task/run still waiting.
+    store._db.execute(
+        "UPDATE operation_approvals SET status='EXPIRED',expires_at=? WHERE id=?",
+        ("2000-01-01T00:00:00+00:00", approval["id"]),
+    )
+    store._db.commit()
+    assert store.get_task(task_id)["state"] == "WAITING_APPROVAL"
+
+    status = client.get(f"/v1/jarvis/link/tasks/{idempotency_key}", headers=headers)
+    assert status.status_code == 200
+    assert status.json()["state"] == "FAILED"
+    assert "Approval expired" in status.json()["summary"]
+    assert store.get_task(task_id)["current_step"] == "approval_expired"
+    assert store.link_task_run(task_id)["status"] == "FAILED"
+    assert store.pending_approvals(20) == []
 
 
 def test_approved_operation_without_authorized_executor_fails_durably(link_client, monkeypatch):

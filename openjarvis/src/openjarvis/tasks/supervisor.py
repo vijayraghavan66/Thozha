@@ -693,6 +693,42 @@ class SupervisorStore:
                 return
             db.execute("UPDATE operation_approvals SET status='EXPIRED',last_error=? WHERE id=? AND status IN ('PENDING','APPROVED')", (reason[:500], approval_id))
             self._event(db, row["task_id"], "approval.expired", {"approval_id": approval_id, "reason": reason[:500]})
+            self._terminalize_expired_link_approval(db, row["task_id"], approval_id, now=now)
+
+    def _terminalize_expired_link_approval(
+        self, db: sqlite3.Connection, task_id: str, approval_id: str, *, now: str,
+    ) -> bool:
+        """Make an expired Link approval's wait terminal without resuming or dispatching it."""
+        task = db.execute("SELECT state,recovery_json FROM tasks WHERE id=?", (task_id,)).fetchone()
+        run = db.execute("SELECT status FROM link_task_runs WHERE task_id=?", (task_id,)).fetchone()
+        if task is None or run is None or task["state"] not in {"WAITING_APPROVAL", "PAUSED"} or run["status"] != "WAITING_APPROVAL":
+            return False
+        try:
+            metadata = json.loads(task["recovery_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if metadata.get("source") != "jarvis_link":
+            return False
+        other = db.execute(
+            "SELECT 1 FROM operation_approvals WHERE task_id=? AND id<>? AND status IN ('PENDING','APPROVED') AND expires_at>? LIMIT 1",
+            (task_id, approval_id, now),
+        ).fetchone()
+        if other:
+            return False
+        previous = task["state"]
+        db.execute(
+            "UPDATE tasks SET state='FAILED',current_step='approval_expired',updated_at=?,last_error='approval_expired' WHERE id=? AND state IN ('WAITING_APPROVAL','PAUSED')",
+            (now, task_id),
+        )
+        db.execute(
+            "UPDATE link_task_runs SET status='FAILED',objective_text=NULL,result_summary='',result_text=NULL,completed_at=?,last_error='approval_expired' WHERE task_id=? AND status='WAITING_APPROVAL'",
+            (now, task_id),
+        )
+        self._event(db, task_id, "link_task.failed", {"error": "approval_expired", "approval_id": approval_id})
+        self._event(db, task_id, "task.state", {
+            "from": previous, "to": "FAILED", "step": "approval_expired", "error": "approval_expired",
+        })
+        return True
 
     def decide_approval(self, approval_id: str, *, decision: str, expected_digest: str, task_id: str, actor: str, nonce: str) -> bool:
         status = "APPROVED" if decision == "approve" else "REJECTED" if decision == "reject" else None
@@ -707,6 +743,7 @@ class SupervisorStore:
             if row["expires_at"] <= now:
                 db.execute("UPDATE operation_approvals SET status='EXPIRED',last_error='approval expired before decision' WHERE id=? AND status='PENDING'", (approval_id,))
                 self._event(db, task_id, "approval.expired", {"approval_id": approval_id, "reason": "decision_after_expiry"})
+                self._terminalize_expired_link_approval(db, task_id, approval_id, now=now)
                 return False
             cur = db.execute("UPDATE operation_approvals SET status=?,decided_at=?,decided_by=?,decision_nonce=? WHERE id=? AND task_id=? AND args_digest=? AND status='PENDING' AND expires_at>?", (status, now, actor, nonce, approval_id, task_id, expected_digest, now))
             if cur.rowcount != 1: return False
@@ -923,6 +960,16 @@ class SupervisorStore:
             for row in stale:
                 db.execute("UPDATE operation_approvals SET status='EXPIRED',last_error='approval expired' WHERE id=?", (row["id"],))
                 self._event(db, row["task_id"], "approval.expired", {"approval_id": row["id"], "reason": "expired_during_listing"})
+                self._terminalize_expired_link_approval(db, row["task_id"], row["id"], now=now)
+            # Older versions expired the approval row but left its Link task waiting forever.
+            # Reconcile that durable state without replaying or consuming the approval.
+            expired_waits = db.execute(
+                "SELECT a.id,a.task_id FROM operation_approvals a JOIN tasks t ON t.id=a.task_id "
+                "JOIN link_task_runs r ON r.task_id=t.id "
+                "WHERE a.status='EXPIRED' AND t.state IN ('WAITING_APPROVAL','PAUSED') AND r.status='WAITING_APPROVAL'"
+            ).fetchall()
+            for row in expired_waits:
+                self._terminalize_expired_link_approval(db, row["task_id"], row["id"], now=now)
             rows = db.execute("SELECT * FROM operation_approvals WHERE status='PENDING' ORDER BY created_at LIMIT ?", (max(1, min(limit, 500)),)).fetchall()
         result = []
         for row in rows:

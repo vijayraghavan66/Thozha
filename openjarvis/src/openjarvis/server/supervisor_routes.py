@@ -698,7 +698,9 @@ async def get_link_task_status(idempotency_key: str, request: Request) -> dict[s
     actor = authorize_supervisor_request(request)
     if not re.fullmatch(r"[A-Za-z0-9._~-]{16,128}", idempotency_key):
         raise HTTPException(status_code=422, detail="Invalid Link task identifier")
-    record = get_supervisor_store().link_task_run_by_idempotency_key(idempotency_key)
+    store = get_supervisor_store()
+    store.pending_approvals(100)
+    record = store.link_task_run_by_idempotency_key(idempotency_key)
     if record is None:
         raise HTTPException(status_code=404, detail="Link task not found")
     task = get_supervisor_store().get_task(record["task_id"]) or {}
@@ -710,10 +712,13 @@ async def get_link_task_status(idempotency_key: str, request: Request) -> dict[s
     if owner and actor != owner and not actor.startswith("api:"):
         raise HTTPException(status_code=403, detail="This task belongs to another paired device")
     state = record.get("task_state") or record.get("status") or "UNKNOWN"
+    summary = record.get("result_summary") if state == "COMPLETED" else ""
+    if state == "FAILED" and record.get("last_error") == "approval_expired":
+        summary = "Approval expired before a decision. No operation ran; submit a new request if you still want it."
     return {
         "task_id": record["task_id"],
         "state": state,
-        "summary": record.get("result_summary") if state == "COMPLETED" else "",
+        "summary": summary,
         "result_text": (record.get("result_text") or record.get("result_summary") or "") if state == "COMPLETED" else None,
         "result_digest": record.get("result_digest") if state == "COMPLETED" else None,
     }
@@ -785,8 +790,10 @@ async def get_link_task_events(
 
 
 def _link_task_status_label(store: Any, task: dict[str, Any]) -> tuple[str, str]:
-    """Report approval expiry/decision state without mutating the underlying task history."""
+    """Report the durable task terminal state and any approval-expiry detail."""
     state = str(task.get("state") or "UNKNOWN")
+    if state == "FAILED" and task.get("last_error") == "approval_expired":
+        return "EXPIRED", "Approval expired; the operation did not run. Submit a new request if you still want it."
     if state != "WAITING_APPROVAL":
         return state, ""
     task_id = str(task.get("id") or "")
