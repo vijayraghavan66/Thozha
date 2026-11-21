@@ -81,7 +81,7 @@ fun main() {
         "created_at_unix_ms" to nowForReconciliation - 1_000L,
     )
     check(shouldReconcileApiTask(earlyNotFound, nowForReconciliation), "a recent status 404 is retried because task acceptance may still be in flight")
-    check(!shouldReconcileApiTask(earlyNotFound, nowForReconciliation + 16 * 60 * 1000L), "uncertain 404 reconciliation is bounded to fifteen minutes")
+    check(!shouldReconcileApiTask(earlyNotFound, nowForReconciliation + 31 * 60 * 1000L), "uncertain 404 reconciliation is bounded to thirty minutes")
     check(TimelinePresentation.sections(emptyList(), fmt).isEmpty(), "no tasks yields the empty state")
     check(TaskStates.toneFor("UNCONFIRMED") == TaskTone.UNKNOWN, "unconfirmed delivery is not presented as success or active execution")
     check(ConversationPresentation.replyFor(

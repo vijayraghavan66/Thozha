@@ -115,7 +115,7 @@ fun shouldReconcileApiTask(record: Map<String, Any?>, nowMs: Long = System.curre
         summary == "The Mac no longer has this task record." && nowMs - createdAt in 0..STATUS_RECONCILIATION_WINDOW_MS
 }
 
-private const val STATUS_RECONCILIATION_WINDOW_MS = 15 * 60 * 1000L
+private const val STATUS_RECONCILIATION_WINDOW_MS = 30 * 60 * 1000L
 
 enum class ApprovalPhase { PENDING, EXPIRED, APPROVED, REJECTED, CONSUMED, UNKNOWN }
 
