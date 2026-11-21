@@ -39,6 +39,11 @@ from openjarvis.tasks.dev_capability import (
     PLAN_APPROVAL_OPERATION,
     CapabilityError,
     CapabilityStore,
+    MAX_FILE_BYTES_HARD,
+    MAX_REPAIRS_HARD,
+    MAX_TEST_RUNS_HARD,
+    MAX_TOTAL_BYTES_HARD,
+    MAX_WRITES_HARD,
     capability_db_path,
     plan_approval_arguments,
     plan_approval_target,
@@ -61,14 +66,49 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"dir": {"type": "string"}}, "additionalProperties": False}},
     {"name": "read_project_file", "description": "Read one UTF-8 text file from the approved project workspace.",
      "inputSchema": {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}, "additionalProperties": False}},
-    {"name": "approve_plan", "description": "Request one exact, bounded user approval for a project development plan. No files are changed until approved.",
-     "inputSchema": {"type": "object", "required": ["plan", "reason"], "properties": {
-         "plan": {"type": "object", "required": ["plan_id", "allowed_ops", "allowed_paths", "max_file_bytes", "max_total_bytes", "max_writes", "max_test_runs", "max_repairs"],
-                  "properties": {"plan_id": {"type": "string"}, "allowed_ops": {"type": "array", "items": {"type": "string"}},
-                                 "allowed_paths": {"type": "array", "items": {"type": "string"}}, "max_file_bytes": {"type": "integer"},
-                                 "max_total_bytes": {"type": "integer"}, "max_writes": {"type": "integer"}, "max_test_runs": {"type": "integer"},
-                                 "max_repairs": {"type": "integer"}}, "additionalProperties": False},
-         "reason": {"type": "string"}}, "additionalProperties": False}},
+    {
+        "name": "approve_plan",
+        "description": (
+            "Request one exact owner approval for this project's bounded development plan. "
+            "Planning is allowed before approval; no files are changed and no tests run until approval. "
+            "allowed_ops must use only write_file, run_tests, artifact_manifest. allowed_paths are "
+            "workspace-relative prefixes such as src, tests, README.md; do not use absolute paths, '.', '..', "
+            "or backslashes. Use an empty path only if the owner must approve the entire disposable workspace. "
+            "The supervisor binds the device, workspace, canonical plan digest, quotas, and expiry."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["plan", "reason"],
+            "properties": {
+                "plan": {
+                    "type": "object",
+                    "required": [
+                        "plan_id", "allowed_ops", "allowed_paths", "max_file_bytes",
+                        "max_total_bytes", "max_writes", "max_test_runs", "max_repairs",
+                    ],
+                    "properties": {
+                        "plan_id": {"type": "string", "minLength": 8, "maxLength": 80},
+                        "allowed_ops": {
+                            "type": "array", "minItems": 1, "uniqueItems": True,
+                            "items": {"type": "string", "enum": ["write_file", "run_tests", "artifact_manifest"]},
+                        },
+                        "allowed_paths": {
+                            "type": "array", "maxItems": 24, "uniqueItems": True,
+                            "items": {"type": "string", "maxLength": 240},
+                        },
+                        "max_file_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_FILE_BYTES_HARD},
+                        "max_total_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_TOTAL_BYTES_HARD},
+                        "max_writes": {"type": "integer", "minimum": 0, "maximum": MAX_WRITES_HARD},
+                        "max_test_runs": {"type": "integer", "minimum": 0, "maximum": MAX_TEST_RUNS_HARD},
+                        "max_repairs": {"type": "integer", "minimum": 0, "maximum": MAX_REPAIRS_HARD},
+                    },
+                    "additionalProperties": False,
+                },
+                "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+            },
+            "additionalProperties": False,
+        },
+    },
     {"name": "write_project_file", "description": "Create or replace one file inside the active approved development plan. A valid plan capability authorizes bounded writes without another Jarvis approval. Without a capability, the legacy exact per-file approval fallback remains required.",
      "inputSchema": {"type": "object", "required": ["path", "content"],
                      "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "capability_id": {"type": "string"}}, "additionalProperties": False}},
@@ -476,7 +516,14 @@ def handle(message: dict[str, Any]):
             _bound_task()
             result = call_tool(tool_name, params.get("arguments") or {})
         except CapabilityError as exc:
-            result = _text(f"Refused: {exc.code}", True)
+            try:
+                _record_task_event("development.authorization_refused", {
+                    "tool": tool_name, "error_code": exc.code, "reason": exc.message,
+                })
+                _audit("authorization_refused", tool=tool_name, error_code=exc.code, reason=exc.message)
+            except Exception:
+                pass
+            result = _text(f"Refused: {exc.code}: {exc.message}", True)
         except (PermissionError, dw.WorkspaceError) as exc:
             result = _text(f"Refused: {exc}", True)
         except Exception as exc:  # never leak internals; the type is enough for the audit trail

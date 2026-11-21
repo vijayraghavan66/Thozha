@@ -9,7 +9,7 @@ def test_plan_capability_tool_descriptions_preserve_independent_boundaries():
     write = tools["write_project_file"]["description"].lower()
     tests = tools["run_project_tests"]["description"].lower()
 
-    assert "approval" in approve and "no files are changed until approved" in approve
+    assert "approval" in approve and "no files are changed" in approve and "until approval" in approve
     assert "valid plan capability" in write
     assert "without another jarvis approval" in write
     assert "legacy exact per-file approval fallback" in write
@@ -17,3 +17,7 @@ def test_plan_capability_tool_descriptions_preserve_independent_boundaries():
     assert "without another jarvis approval" in tests
     assert "legacy exact per-test approval fallback" in tests
     assert "shell_exec" not in tools
+    plan_schema = tools["approve_plan"]["inputSchema"]["properties"]["plan"]["properties"]
+    assert plan_schema["allowed_ops"]["items"]["enum"] == ["write_file", "run_tests", "artifact_manifest"]
+    assert plan_schema["allowed_paths"]["maxItems"] == 24
+    assert plan_schema["max_file_bytes"]["maximum"] == 256 * 1024
