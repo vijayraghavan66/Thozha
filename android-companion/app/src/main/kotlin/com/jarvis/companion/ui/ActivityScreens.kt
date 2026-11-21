@@ -252,12 +252,7 @@ private fun ApprovalList(store: JarvisStore, onSelect: (ApprovalReview) -> Unit)
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JarvisSpace.Page, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (store.approvalDecisions.isNotEmpty()) {
-                    item(key = "decision-history-heading") { SectionLabel("Decision status") }
-                    items(store.approvalDecisions.values.sortedByDescending { it.updatedAtUnixMs }, key = { "decision-${it.approvalId}" }) { status ->
-                        ApprovalDecisionCard(status, store)
-                    }
-                }
+                // Keep the current approval ahead of historical decisions so stale history cannot bury it.
                 if (store.approvals.isNotEmpty()) item(key = "pending-approvals-heading") { SectionLabel("Waiting for you") }
                 items(store.approvals, key = { it.approvalId }) { review ->
                     SurfaceCard(onClick = { onSelect(review) }) {
@@ -268,6 +263,12 @@ private fun ApprovalList(store: JarvisStore, onSelect: (ApprovalReview) -> Unit)
                             Spacer(Modifier.height(10.dp))
                             StatusPill(remainingLabel(review.expiresAtUnixMs, store.now), if (review.expiresAtUnixMs > store.now) TaskTone.WAITING else TaskTone.FAILED)
                         }
+                    }
+                }
+                if (store.approvalDecisions.isNotEmpty()) {
+                    item(key = "decision-history-heading") { SectionLabel("Decision status") }
+                    items(store.approvalDecisions.values.sortedByDescending { it.updatedAtUnixMs }, key = { "decision-${it.approvalId}" }) { status ->
+                        ApprovalDecisionCard(status, store)
                     }
                 }
             }
