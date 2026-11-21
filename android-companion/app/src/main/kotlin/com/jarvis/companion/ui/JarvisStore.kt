@@ -515,7 +515,7 @@ class JarvisStore(private val app: Context) {
             }
             val runtime = LinkService.runtime(app)
             val capabilityScope = DevelopmentIntentClassifier.capabilityScope(text)
-            if (runCatching { runtime.recordLocalTaskRequest(requestId, text, transport = transport) }.isFailure) {
+            if (runCatching { runtime.recordLocalTaskRequest(requestId, text, transport = transport, capabilityScope = capabilityScope) }.isFailure) {
                 ui {
                     submitting = false
                     draft = text

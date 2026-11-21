@@ -53,7 +53,7 @@ fun main() {
 
     // --- timeline ---------------------------------------------------------------------------------------------
     val sections = TimelinePresentation.sections(listOf(
-        mapOf("message_id" to "a", "text" to "Done one", "state" to "COMPLETED", "summary" to "ok", "updated_at_unix_ms" to 5L),
+        mapOf("message_id" to "a", "text" to "Done one", "state" to "COMPLETED", "summary" to "ok", "updated_at_unix_ms" to 5L, "capability_scope" to "development"),
         mapOf("message_id" to "b", "text" to "Running", "state" to "RUNNING", "updated_at_unix_ms" to 6L),
         mapOf("message_id" to "c", "text" to "Approve me", "state" to "WAITING_APPROVAL", "updated_at_unix_ms" to 7L),
         mapOf("message_id" to "d", "text" to "Cancelled", "state" to "CANCELLED", "updated_at_unix_ms" to 8L),
@@ -69,6 +69,7 @@ fun main() {
     check(rows.getValue("f").tone == TaskTone.RUNNING && !rows.getValue("f").canCancel, "sent-only requests are shown but not cancellable (matches the existing cancel rule)")
     check(sections.flatMap { it.rows }.size == 6, "duplicate and id-less records are dropped")
     check(rows.getValue("b").requestId == "b", "rows carry the request id the cancel path uses")
+    check(rows.getValue("a").capabilityScope == "development" && rows.getValue("b").capabilityScope.isBlank(), "artifact action scope comes only from the locally recorded task scope")
     check(TimelinePresentation.sections(emptyList(), fmt).isEmpty(), "no tasks yields the empty state")
     check(TaskStates.toneFor("UNCONFIRMED") == TaskTone.UNKNOWN, "unconfirmed delivery is not presented as success or active execution")
     check(ConversationPresentation.replyFor(

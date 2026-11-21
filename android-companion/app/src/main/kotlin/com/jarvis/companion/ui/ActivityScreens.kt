@@ -126,7 +126,7 @@ private fun TaskRow(row: TimelineRow, progress: List<TaskProgressEvent>, store: 
                 Spacer(Modifier.height(8.dp))
                 BasicText(footer, style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
             }
-            if (row.tone == TaskTone.COMPLETED && row.taskId.matches(Regex("[0-9a-f]{32}"))) {
+            if (row.tone == TaskTone.COMPLETED && row.capabilityScope == "development" && row.taskId.matches(Regex("[0-9a-f]{32}"))) {
                 Spacer(Modifier.height(10.dp))
                 val artifacts = store.taskArtifacts[row.taskId]
                 if (artifacts.isNullOrEmpty()) {
