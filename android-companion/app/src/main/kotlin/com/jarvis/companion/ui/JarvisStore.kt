@@ -70,6 +70,7 @@ class JarvisStore(private val app: Context) {
     var taskArtifacts by mutableStateOf<Map<String, List<TaskArtifact>>>(emptyMap())
     var artifactLoadingTasks by mutableStateOf<Set<String>>(emptySet())
     var savedArtifacts by mutableStateOf<Map<String, android.net.Uri>>(emptyMap())
+    var cancellingRequests by mutableStateOf<Set<String>>(emptySet())
     /** Pending OpenJarvis API approvals, keyed by the authenticated Mac approval ID. */
     private var supervisorApprovals: Map<String, Approval> = emptyMap()
     /** Persisted UI reconciliation only; supervisor remains authoritative for every decision and action. */
@@ -340,6 +341,32 @@ class JarvisStore(private val app: Context) {
                     onFailure = { "Project download failed: ${deliveryError(it)}" },
                 )
             }
+        }
+    }
+
+    /** Cancels one task created through the paired Mac API; no approval is created or replayed. */
+    fun cancelLinkTask(requestId: String) = ui {
+        if (!requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}")) || requestId in cancellingRequests) return@ui
+        val entry = entries.firstOrNull { it["message_id"] == requestId }
+        if (entry?.get("transport") != "api") {
+            notice = "This task is not on the paired Mac API route and cannot be cancelled from this control."
+            return@ui
+        }
+        cancellingRequests = cancellingRequests + requestId
+        notice = "Requesting cancellation from the Mac…"
+        background(lanes.sync) {
+            val result = runCatching { jarvisApi.cancelLinkTask(requestId) }
+            result.onSuccess { task ->
+                runCatching { LinkService.runtime(app).recordLocalTaskResult(requestId, task.taskId, task.state, task.summary) }
+            }
+            ui {
+                cancellingRequests = cancellingRequests - requestId
+                notice = result.fold(
+                    onSuccess = { it.summary.ifBlank { "The Mac confirmed cancellation." } },
+                    onFailure = { "Cancellation could not be confirmed: ${deliveryError(it)}" },
+                )
+            }
+            refreshLocal()
         }
     }
 

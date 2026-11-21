@@ -12,6 +12,7 @@ data class TimelineRow(
     val timeLabel: String,
     val canCancel: Boolean,
     val capabilityScope: String = "",
+    val transport: String = "",
 )
 
 data class TimelineSection(val title: String, val rows: List<TimelineRow>)
@@ -97,6 +98,7 @@ object TimelinePresentation {
             timeLabel = updated?.let(formatTime).orEmpty(),
             canCancel = canCancel,
             capabilityScope = (record["capability_scope"] as? String).orEmpty(),
+            transport = (record["transport"] as? String).orEmpty(),
         )
     }
 }
