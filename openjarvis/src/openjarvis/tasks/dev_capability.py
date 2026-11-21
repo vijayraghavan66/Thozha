@@ -25,7 +25,7 @@ import time
 import uuid
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 OP_WRITE = "write_file"
 OP_TEST = "run_tests"
@@ -813,6 +813,7 @@ class CapabilityStore:
         supervisor_store: Any,
         op_id: str,
         rel_paths: list[str],
+        file_reader: Callable[[str, int], bytes] | None = None,
     ) -> dict[str, Any]:
         """Return hashes/sizes only for explicitly listed, in-scope regular files."""
         if not isinstance(rel_paths, list) or len(rel_paths) > MAX_ARTIFACTS_HARD or any(not isinstance(path, str) for path in rel_paths):
@@ -836,7 +837,12 @@ class CapabilityStore:
                     _check_relative(rel_path)
                     if not _under_allowed(rel_path, tuple(spec["allowed_paths"])):
                         raise CapabilityError("PATH_NOT_PERMITTED", "artifact is outside the plan's allowed paths")
-                    data = _read_regular_file_nofollow(spec["workspace_root"], rel_path, spec["max_file_bytes"])
+                    if file_reader is None:
+                        data = _read_regular_file_nofollow(spec["workspace_root"], rel_path, spec["max_file_bytes"])
+                    else:
+                        data = file_reader(rel_path, spec["max_file_bytes"])
+                        if not isinstance(data, bytes) or len(data) > spec["max_file_bytes"]:
+                            raise CapabilityError("ARTIFACT_LIMIT", "artifact reader exceeded the approved file limit")
                     total_bytes += len(data)
                     if total_bytes > spec["max_total_bytes"]:
                         raise CapabilityError("QUOTA_TOTAL_BYTES", "artifact manifest exceeds the approved total bytes")

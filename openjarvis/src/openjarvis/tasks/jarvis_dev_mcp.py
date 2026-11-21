@@ -24,7 +24,12 @@ REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 from typing import Any
 
 HOST_SRC = REAL_HOME / "Documents" / "Jarvis-Lab" / "jarvis-link" / "host" / "src"
-OPENJARVIS_SRC = REAL_HOME / ".openjarvis" / "src" / "src"
+_SCRIPT_SOURCE_ROOT = Path(__file__).resolve().parents[2]
+OPENJARVIS_SRC = (
+    _SCRIPT_SOURCE_ROOT
+    if (_SCRIPT_SOURCE_ROOT / "openjarvis" / "tasks" / "remote_dev_worker.py").is_file()
+    else REAL_HOME / ".openjarvis" / "src" / "src"
+)
 for candidate in (HOST_SRC, OPENJARVIS_SRC):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
@@ -50,6 +55,8 @@ _STORE = None
 _CAPABILITIES = None
 
 TOOLS = [
+    {"name": "get_execution_context", "description": "Verify the active development worker is the bounded ARM64 Linux VM. This read-only check is required before proposing a development plan.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "list_project_files", "description": "List files in a directory of the approved project workspace.",
      "inputSchema": {"type": "object", "properties": {"dir": {"type": "string"}}, "additionalProperties": False}},
     {"name": "read_project_file", "description": "Read one UTF-8 text file from the approved project workspace.",
@@ -79,8 +86,26 @@ def _text(value: str, error: bool = False) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": value}], "isError": error}
 
 
-def _workspace() -> dw.Workspace:
-    return dw.Workspace.open(os.environ.get("JARVIS_DEV_WORKSPACE") or dw.DEFAULT_WORKSPACE)
+def _workspace() -> Any:
+    # Development tasks have no local-host fallback. The mode is injected by
+    # the supervisor-bound Codex engine, never supplied by model arguments.
+    if os.environ.get("JARVIS_DEV_EXECUTION_MODE") != "vm":
+        raise PermissionError("development execution must use the isolated VM worker")
+    config_path = os.environ.get("JARVIS_DEV_WORKER_CONFIG", "")
+    if not config_path:
+        raise PermissionError("isolated VM worker configuration is unavailable")
+    from openjarvis.tasks.remote_dev_worker import (
+        RemoteMcpWorkerClient,
+        RemoteWorkerConfig,
+        RemoteWorkspace,
+    )
+
+    config = RemoteWorkerConfig.load(config_path)
+    task_id = os.environ.get("JARVIS_SUPERVISOR_TASK_ID", "")
+    return RemoteWorkspace(
+        config.workspace_root,
+        RemoteMcpWorkerClient(config, task_id=task_id),
+    )
 
 
 def _audit(event: str, **fields: Any) -> None:
@@ -155,8 +180,11 @@ def _record_task_event(event: str, fields: dict[str, Any]) -> None:
     _store().record_event(task_id, event, fields)
 
 
-def manifest_sha256(workspace: dw.Workspace) -> str:
+def manifest_sha256(workspace: Any) -> str:
     """Hash of every regular workspace file (path and content). Symlinks are refused, not followed."""
+    remote_digest = getattr(workspace, "manifest_sha256", None)
+    if callable(remote_digest):
+        return remote_digest()
     digest = hashlib.sha256()
     count = 0
     for path in sorted(workspace.root.rglob("*")):
@@ -219,6 +247,21 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(args, dict):
         return _text("Tool arguments must be an object.", True)
     workspace = _workspace()
+    if name == "get_execution_context":
+        if args or not hasattr(workspace, "execution_context"):
+            return _text("The isolated VM execution context is unavailable.", True)
+        context = workspace.execution_context()
+        evidence = {
+            "os": context["os"], "architecture": context["architecture"],
+            "cwd": context["cwd"], "uid": context["uid"], "username": context["username"],
+            "pid": context["pid"], "task_id": os.environ["JARVIS_SUPERVISOR_TASK_ID"],
+            "host_only_marker_visible": context["host_only_marker_visible"],
+            "host_only_marker_access": context["host_only_marker_access"],
+            "vm_marker_sha256": hashlib.sha256(context["vm_marker"].encode("utf-8")).hexdigest(),
+        }
+        _record_task_event("development.execution_context_verified", evidence)
+        _audit("vm_execution_context_verified", **evidence)
+        return _text(json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     if name == "list_project_files":
         return _text(json.dumps(workspace.list_dir(str(args.get("dir", "."))), ensure_ascii=False))
     if name == "read_project_file":
@@ -350,8 +393,11 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             except CapabilityError as exc:
                 return _text(f"Development capability refused this test run ({exc.code}).", True)
             _record_task_event("development.operation_started", {"operation": "run_tests"})
-            result = dw.run_bounded(list(argv), cwd=workspace.root, timeout_s=min(600, dw.TEST_TIMEOUT_S))
-            result.update(dw.parse_unittest_summary(result["output"]))
+            if getattr(workspace, "is_remote", False):
+                result = workspace.run_tests()
+            else:
+                result = dw.run_bounded(list(argv), cwd=workspace.root, timeout_s=min(600, dw.TEST_TIMEOUT_S))
+                result.update(dw.parse_unittest_summary(result["output"]))
             _record_task_event("development.tests_completed", {
                 "passed": result["passed"], "tests_ran": result["tests_ran"],
                 "failures": result["failures"], "errors": result["errors"],
@@ -395,7 +441,13 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             return _text("A capability ID and explicit relative artifact paths are required.", True)
         _record_task_event("development.operation_started", {"operation": "artifact_manifest"})
         try:
-            manifest = adapter.artifact_manifest(capability_id, op_id=uuid.uuid4().hex, rel_paths=paths)
+            if getattr(workspace, "is_remote", False):
+                manifest = adapter.artifact_manifest(
+                    capability_id, op_id=uuid.uuid4().hex, rel_paths=paths,
+                    file_reader=lambda path, max_bytes: workspace.read_bytes(path, max_bytes=max_bytes),
+                )
+            else:
+                manifest = adapter.artifact_manifest(capability_id, op_id=uuid.uuid4().hex, rel_paths=paths)
         except CapabilityError as exc:
             return _text(f"Artifact collection refused ({exc.code}).", True)
         _record_task_event("development.artifacts_collected", {
@@ -419,14 +471,22 @@ def handle(message: dict[str, Any]):
         return {"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}}
     if method == "tools/call":
         params = message.get("params") or {}
+        tool_name = str(params.get("name", "")) if isinstance(params, dict) else ""
         try:
             _bound_task()
-            result = call_tool(str(params.get("name", "")), params.get("arguments") or {})
+            result = call_tool(tool_name, params.get("arguments") or {})
         except CapabilityError as exc:
             result = _text(f"Refused: {exc.code}", True)
         except (PermissionError, dw.WorkspaceError) as exc:
             result = _text(f"Refused: {exc}", True)
         except Exception as exc:  # never leak internals; the type is enough for the audit trail
+            try:
+                _record_task_event("development.tool_failed", {
+                    "tool": tool_name, "error_type": type(exc).__name__,
+                })
+                _audit("tool_failed", tool=tool_name, error_type=type(exc).__name__)
+            except Exception:
+                pass
             result = _text(f"Development tool failed: {type(exc).__name__}", True)
         return {"jsonrpc": "2.0", "id": rid, "result": result}
     if rid is not None:

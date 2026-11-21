@@ -16,7 +16,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from openjarvis.tasks.dev_capability import (
     PLAN_APPROVAL_OPERATION,
@@ -546,7 +546,8 @@ class DevelopmentCapabilityMCPAdapter:
         )
 
     def artifact_manifest(
-        self, capability_id: str, *, op_id: str, rel_paths: list[str]
+        self, capability_id: str, *, op_id: str, rel_paths: list[str],
+        file_reader: Callable[[str, int], bytes] | None = None,
     ) -> dict[str, Any]:
         """Return a bounded hash manifest for artifacts under the approved workspace."""
         self._validate_operation_id(op_id)
@@ -560,6 +561,7 @@ class DevelopmentCapabilityMCPAdapter:
             supervisor_store=self.supervisor_store,
             op_id=op_id,
             rel_paths=rel_paths,
+            file_reader=file_reader,
         )
 
     def consume_repair(self, capability_id: str, *, op_id: str) -> int:

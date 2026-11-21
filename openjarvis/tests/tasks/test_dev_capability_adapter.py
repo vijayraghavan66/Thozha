@@ -213,6 +213,23 @@ def test_bounded_write_fixed_test_and_artifact_manifest(world):
     assert "assert True" not in repr(world["capability"].audit_events(capability_id))
 
 
+def test_artifact_manifest_accepts_bounded_remote_workspace_reader(world):
+    _approval, capability_id = issue(world)
+    payload = b"remote guest artifact\n"
+    manifest = world["adapter"].artifact_manifest(
+        capability_id,
+        op_id="adapter-remote-artifact-001",
+        rel_paths=["src/main.py"],
+        file_reader=lambda path, max_bytes: payload if path == "src/main.py" and len(payload) <= max_bytes else b"x" * (max_bytes + 1),
+    )
+    assert manifest["files"] == [{
+        "path": "src/main.py",
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }]
+    assert manifest["total_bytes"] == len(payload)
+
+
 def test_adapter_enforces_write_test_quota_and_expiry(world):
     plan = {**PLAN, "max_writes": 1, "max_test_runs": 1}
     _approval, capability_id = issue(world, plan)

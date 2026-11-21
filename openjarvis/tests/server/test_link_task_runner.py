@@ -633,7 +633,15 @@ def test_development_codex_cwd_and_registered_mcp_are_workspace_scoped(tmp_path,
         assert any("mcp_servers.jarvis_dev.command" in entry for entry in overrides)
         assert not any("mcp_servers.jarvis_mac." in entry for entry in overrides)
         assert "features.shell_tool=false" in overrides
+        assert "features.unified_exec=false" in overrides
+        assert 'mcp_servers.jarvis_dev.env.JARVIS_DEV_EXECUTION_MODE="vm"' in overrides
         assert "features.unified_exec_tty=false" in overrides
+
+        monkeypatch.setenv("JARVIS_DEV_WORKER_CONFIG", "/tmp/jarvis-worker.json")
+        monkeypatch.setenv("JARVIS_SUPERVISOR_DB", "/tmp/jarvis-supervisor.db")
+        overrides = _config_overrides("control")
+        assert 'mcp_servers.jarvis_dev.env.JARVIS_DEV_WORKER_CONFIG="/tmp/jarvis-worker.json"' in overrides
+        assert 'mcp_servers.jarvis_dev.env.JARVIS_SUPERVISOR_DB="/tmp/jarvis-supervisor.db"' in overrides
 
     with bind_task(
         "b" * 32,
