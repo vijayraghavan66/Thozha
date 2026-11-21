@@ -23,6 +23,8 @@ import com.jarvis.companion.model.PairingStatus
 import com.jarvis.companion.model.PairedDevice
 import com.jarvis.companion.model.TaskDetail
 import com.jarvis.companion.model.TaskEvent
+import com.jarvis.link.ApprovalReview
+import com.jarvis.link.DevelopmentPlanReview
 
 class JarvisApi(private val context: Context, private val secureStore: SecureStore) {
     /** Fixed read-only status fields from the paired Mac; this is not a shell or general command endpoint. */
@@ -51,7 +53,11 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
     }
 
     /** Runs one read-only free-text turn through the Mac supervisor and configured Codex engine. */
-    fun submitLinkTask(objective: String, idempotencyKey: String): LinkTaskResult {
+    fun submitLinkTask(
+        objective: String,
+        idempotencyKey: String,
+        capabilityScope: String = "assistant",
+    ): LinkTaskResult {
         val cleaned = objective.trim()
         if (cleaned.isEmpty() || cleaned.toByteArray(Charsets.UTF_8).size > 4096) {
             throw ApiException("Write a request under 4096 bytes.")
@@ -59,13 +65,16 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         if (!idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) {
             throw ApiException("This request could not be identified safely. Try again.")
         }
+        if (capabilityScope !in setOf("assistant", "development")) {
+            throw ApiException("This request has an unsupported authorization scope.")
+        }
         val token = secureStore.token()?.takeIf { it.isNotBlank() }
             ?: throw ApiException("This phone is not paired with the Mac. Open Settings and check the connection.", 401)
         val requesterDeviceId = secureStore.deviceId().takeIf { it.matches(Regex("[0-9a-f]{32}")) }
             ?: throw ApiException("This phone's pairing identity is incomplete. Pair it with the Mac again.", 401)
         val body = JSONObject()
             .put("objective", cleaned)
-            .put("capability_scope", JSONArray().put("assistant"))
+            .put("capability_scope", JSONArray().put(capabilityScope))
             .put("idempotency_key", idempotencyKey)
             .put("requester_device_id", requesterDeviceId)
         val json = request(
@@ -391,6 +400,16 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         return json.requiredArrayOf("approvals").map(::parseApproval)
     }
 
+    /** Reads supervisor approvals and verifies full development-plan details before the UI can display them. */
+    fun getApprovalReviews(): List<Pair<Approval, ApprovalReview>> {
+        val base = requireBaseUrl()
+        val json = request(base, "/v1/jarvis/approvals/pending", "GET", null, secureStore.token(), allowLocalWifi = true)
+        return json.requiredArrayOf("approvals").map { item ->
+            val approval = parseApproval(item)
+            approval to parseSupervisorApprovalReview(item.toKotlinMap(), approval)
+        }
+    }
+
     fun getApproval(approvalId: String, connectTimeoutMs: Int = 10_000, readTimeoutMs: Int = 25_000): Approval {
         val base = requireBaseUrl()
         val json = request(
@@ -496,6 +515,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             .put("decision", decision)
             .put("task_id", approval.taskId)
             .put("expected_operation_digest", approval.operationDigest)
+            .put("requester_device_id", secureStore.deviceId())
             .put("idempotency_key", secureStore.decisionIdempotencyKey(approval.id, approval.operationDigest, decision))
         if (decision == "approve" && !continuationObjective.isNullOrBlank()) {
             body.put("continuation_objective", continuationObjective.trim())
@@ -623,6 +643,57 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             connection.disconnect()
         }
     }
+}
+
+private fun JSONObject.toKotlinMap(): Map<String, Any?> = buildMap {
+    val names = keys()
+    while (names.hasNext()) {
+        val name = names.next()
+        put(name, opt(name).toKotlinValue())
+    }
+}
+
+private fun Any?.toKotlinValue(): Any? = when (this) {
+    is JSONObject -> toKotlinMap()
+    is JSONArray -> (0 until length()).map { opt(it).toKotlinValue() }
+    JSONObject.NULL -> null
+    else -> this
+}
+
+internal fun parseSupervisorApprovalReview(item: Map<String, Any?>, approval: Approval): ApprovalReview {
+    val plan = if (approval.operation == "mcp:jarvis_dev:approve_plan") {
+        val canonical = (item["canonical_arguments"] as? Map<*, *>)
+            ?: (item["arguments"] as? Map<*, *>)
+            ?: throw ApiException("The pending development approval omitted its canonical plan.")
+        @Suppress("UNCHECKED_CAST")
+        val canonicalFields = canonical as Map<String, Any?>
+        val planFields = (canonicalFields["plan"] as? Map<*, *>)
+            ?: throw ApiException("The pending development approval omitted its complete plan.")
+        @Suppress("UNCHECKED_CAST")
+        val completePlanFields = (planFields as Map<String, Any?>).toMutableMap().apply {
+            put(
+                "plan_digest",
+                (canonicalFields["plan_digest"] as? String)?.takeIf { it.isNotBlank() }
+                    ?: throw ApiException("The pending development approval omitted its plan digest."),
+            )
+        }
+        runCatching { DevelopmentPlanReview.fromMap(completePlanFields) }
+            .getOrElse { throw ApiException("The pending development plan could not be verified.") }
+    } else null
+    val expiresAtMs = runCatching { OffsetDateTime.parse(approval.expiresAt).toInstant().toEpochMilli() }
+        .getOrElse { throw ApiException("The pending approval has an invalid expiry.") }
+    return runCatching {
+        ApprovalReview(
+            approvalId = approval.id,
+            taskId = approval.taskId,
+            operation = approval.operation,
+            target = approval.targetResource,
+            canonicalArgumentsDigest = approval.operationDigest,
+            expiresAtUnixMs = expiresAtMs,
+            redactedSummary = approval.reason.ifBlank { approval.parametersSummary },
+            developmentPlan = plan,
+        )
+    }.getOrElse { throw ApiException("The pending approval details could not be verified.") }
 }
 
 private fun JSONObject.requiredString(vararg keys: String): String {

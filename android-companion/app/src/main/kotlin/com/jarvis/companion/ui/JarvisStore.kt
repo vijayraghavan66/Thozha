@@ -14,12 +14,14 @@ import com.jarvis.companion.link.LinkService
 import com.jarvis.companion.link.LinkSettings
 import com.jarvis.companion.fastpath.FastCommand
 import com.jarvis.companion.fastpath.FastCommandClassifier
+import com.jarvis.companion.fastpath.DevelopmentIntentClassifier
 import com.jarvis.companion.localai.LocalAiManager
 import com.jarvis.companion.localai.LocalAiPhase
 import com.jarvis.companion.localai.LocalAiRequestMode
 import com.jarvis.companion.localai.RequestRoute
 import com.jarvis.companion.localai.RequestRoutingPolicy
 import com.jarvis.companion.model.ApiException
+import com.jarvis.companion.model.Approval
 import com.jarvis.companion.data.JarvisApi
 import com.jarvis.companion.data.SecureStore
 import com.jarvis.companion.telegram.TelegramSession
@@ -64,6 +66,8 @@ class JarvisStore(private val app: Context) {
     /** Authenticated task-update envelopes persisted by LinkRuntime; rendered as real activity only. */
     var taskUpdates by mutableStateOf<List<Map<String, Any>>>(emptyList())
     var approvals by mutableStateOf<List<ApprovalReview>>(emptyList())
+    /** Pending OpenJarvis API approvals, keyed by the authenticated Mac approval ID. */
+    private var supervisorApprovals: Map<String, Approval> = emptyMap()
     /** Persisted UI reconciliation only; supervisor remains authoritative for every decision and action. */
     var approvalDecisions by mutableStateOf(loadApprovalDecisions())
     var linkStatus by mutableStateOf<LinkStatus?>(null)
@@ -86,6 +90,8 @@ class JarvisStore(private val app: Context) {
     )
     private var currentDecisionApprovalId: String? = null
     @Volatile private var lastMacApiProbeAttemptMs = 0L
+    @Volatile private var lastSupervisorApprovalPollMs = 0L
+    @Volatile private var cachedSupervisorApprovalPairs = emptyList<Pair<Approval, ApprovalReview>>()
     var notice by mutableStateOf("")
     var now by mutableStateOf(System.currentTimeMillis())
     /** Set by the host activity; asks Android for one runtime permission, on the user's tap only. */
@@ -192,6 +198,7 @@ class JarvisStore(private val app: Context) {
         val pairedToMac = hasMacApiPairing()
         var reachableAt = macApiLastSyncMs
         var apiError = macApiSyncError
+        var apiApprovalPairs = cachedSupervisorApprovalPairs
         if (pairedToMac) {
             // Reconcile only requests previously submitted by this phone using their original idempotency keys.
             // A lost HTTP response therefore observes the same task rather than creating a duplicate.
@@ -209,6 +216,20 @@ class JarvisStore(private val app: Context) {
                             runtime.recordLocalTaskResult(id, "", "FAILED", "The Mac no longer has this task record.")
                         } else if (failure !is ApiException || failure.statusCode != null) {
                             apiError = "The Mac task status could not be confirmed yet."
+                        }
+                    }
+            }
+            val approvalPollTime = System.currentTimeMillis()
+            if (approvalPollTime - lastSupervisorApprovalPollMs >= SUPERVISOR_APPROVAL_POLL_INTERVAL_MS) {
+                lastSupervisorApprovalPollMs = approvalPollTime
+                runCatching { jarvisApi.getApprovalReviews() }
+                    .onSuccess {
+                        apiApprovalPairs = it
+                        cachedSupervisorApprovalPairs = it
+                    }
+                    .onFailure { failure ->
+                        if (failure !is ApiException || failure.statusCode != null) {
+                            apiError = failure.message ?: "Pending Mac approvals could not be checked."
                         }
                     }
             }
@@ -233,8 +254,12 @@ class JarvisStore(private val app: Context) {
         }
         conversation = runtime.conversation()
         val pending = runtime.pendingApprovals()
+        val combinedApprovals = linkedMapOf<String, ApprovalReview>()
+        pending.forEach { combinedApprovals[it.approvalId] = it }
+        apiApprovalPairs.forEach { (_, review) -> combinedApprovals[review.approvalId] = review }
+        val directApprovalMap = apiApprovalPairs.associate { (approval, _) -> approval.id to approval }
         val updatesSnapshot = runtime.recentUpdates()
-        val decisionIds = (approvalDecisions.keys + pending.map { it.approvalId }).distinct()
+        val decisionIds = (approvalDecisions.keys + combinedApprovals.keys).distinct()
         val runtimeDecisionStates = decisionIds.mapNotNull { id ->
             runtime.approvalDecisionState(id)?.let { id to it }
         }.toMap()
@@ -245,7 +270,8 @@ class JarvisStore(private val app: Context) {
             entries = mergeEntries(conversation, localHistory.all())
             taskUpdates = updatesSnapshot
             localAiSnapshot = localAi.status()
-            approvals = pending
+            approvals = combinedApprovals.values.toList()
+            supervisorApprovals = directApprovalMap
             reconcileRuntimeDecisionStates(pending, runtimeDecisionStates)
             reconcileApprovalDecisions(updatesSnapshot)
             linkStatus = status
@@ -434,6 +460,7 @@ class JarvisStore(private val app: Context) {
                 return@background
             }
             val runtime = LinkService.runtime(app)
+            val capabilityScope = DevelopmentIntentClassifier.capabilityScope(text)
             if (runCatching { runtime.recordLocalTaskRequest(requestId, text, transport = transport) }.isFailure) {
                 ui {
                     submitting = false
@@ -449,7 +476,7 @@ class JarvisStore(private val app: Context) {
                     if (directReadOnlyCommand) {
                         Triple(requestId, "COMPLETED", jarvisApi.getMacSystemInfo())
                     } else {
-                        val result = jarvisApi.submitLinkTask(text, requestId)
+                        val result = jarvisApi.submitLinkTask(text, requestId, capabilityScope)
                         Triple(result.taskId, result.state, result.summary)
                     }
                 }
@@ -459,6 +486,9 @@ class JarvisStore(private val app: Context) {
                         ui {
                             macApiLastSyncMs = System.currentTimeMillis()
                             macApiSyncError = ""
+                            if (capabilityScope == "development") {
+                                notice = "Development request submitted. No project files change until you approve its exact plan."
+                            }
                         }
                         android.util.Log.i(
                             "JarvisStore",
@@ -549,7 +579,71 @@ class JarvisStore(private val app: Context) {
         decisionInFlight = true
         currentDecisionApprovalId = review.approvalId
         decisionNote = ApprovalDecisionPresentation.label(submitting)
+        val supervisorApproval = supervisorApprovals[review.approvalId]
         background {
+            if (supervisorApproval != null) {
+                val runtime = LinkService.runtime(app)
+                val continuationObjective = if (decision == "approve" && supervisorApproval.operation.startsWith("mcp:jarvis_dev:")) {
+                    runtime.conversation()
+                        .firstOrNull { it["task_id"] == supervisorApproval.taskId }
+                        ?.get("text") as? String
+                } else null
+                val outcome = if (
+                    decision == "approve" && supervisorApproval.operation == "mcp:jarvis_dev:approve_plan" &&
+                    continuationObjective.isNullOrBlank()
+                ) {
+                    Result.failure(ApiException("The original development request could not be matched safely."))
+                } else {
+                    runCatching { jarvisApi.decide(supervisorApproval, decision, continuationObjective) }
+                }
+                ui {
+                    decisionInFlight = false
+                    currentDecisionApprovalId = null
+                    val previous = approvalDecisions[review.approvalId] ?: submitting
+                    val updated = outcome.fold(
+                        onSuccess = { response ->
+                            val decisionEvidence = mapOf(
+                                "approval_id" to response.optString("approval_id"),
+                                "task_id" to response.optString("task_id"),
+                                "decision" to response.optString("decision"),
+                                "status" to response.optString("status"),
+                                "execution_state" to response.optString("execution_state"),
+                                "executed" to response.optBoolean("executed", false),
+                                "success" to response.optBoolean("success", false),
+                            )
+                            ApprovalDecisionPresentation.authoritative(
+                                submitting,
+                                decisionEvidence,
+                                System.currentTimeMillis(),
+                            ) ?: previous.copy(phase = ApprovalDecisionPhase.UNKNOWN, updatedAtUnixMs = System.currentTimeMillis())
+                        },
+                        onFailure = { failure ->
+                            val isExplicitHttpFailure = failure is ApiException && failure.statusCode != null
+                            previous.copy(
+                                phase = if (isExplicitHttpFailure) ApprovalDecisionPhase.FAILED else ApprovalDecisionPhase.INDETERMINATE,
+                                updatedAtUnixMs = System.currentTimeMillis(),
+                            )
+                        },
+                    )
+                    saveApprovalDecision(updated)
+                    decisionNote = ApprovalDecisionPresentation.label(updated)
+                    outcome.onSuccess { response ->
+                        val taskId = response.optString("task_id", supervisorApproval.taskId)
+                        val taskState = response.optString("task_state").ifBlank {
+                            if (decision == "reject") "FAILED" else "RUNNING"
+                        }
+                        val resultText = response.optString("result_text")
+                            .ifBlank { response.optString("result_summary") }
+                        val row = runtime.conversation().firstOrNull { it["task_id"] == taskId }
+                        val requestId = row?.get("message_id") as? String
+                        if (!requestId.isNullOrBlank() && resultText.isNotBlank()) {
+                            runtime.recordLocalTaskResult(requestId, taskId, taskState, resultText)
+                        }
+                    }
+                }
+                refreshLocal()
+                return@background
+            }
             val outcome = runCatching { LinkService.runtime(app).decideApproval(LinkSettings(app).relayUrl, review.approvalId, decision) }
             ui {
                 decisionInFlight = false
@@ -751,6 +845,7 @@ class JarvisStore(private val app: Context) {
 
     private companion object {
         const val MAC_API_PROBE_INTERVAL_MS = 15_000L
+        const val SUPERVISOR_APPROVAL_POLL_INTERVAL_MS = 15_000L
     }
 
     private fun localModelError(failure: Throwable): String = when (failure) {

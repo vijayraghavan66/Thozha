@@ -223,3 +223,25 @@ tasks.register<JavaExec>("verifyFastCommand") {
     classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"), layout.buildDirectory.dir("tmp/kotlin-classes/debug"), configurations.getByName("debugRuntimeClasspath"))
     mainClass.set("com.jarvis.companion.fastpath.FastCommandCheckKt")
 }
+
+tasks.register<JavaExec>("verifyDevelopmentScope") {
+    group = "verification"
+    description = "Checks that only explicit software-building requests select the supervised development scope."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.fastpath.DevelopmentScopeCheckKt")
+}
+
+tasks.register<JavaExec>("verifyOpenJarvisApprovalReview") {
+    group = "verification"
+    description = "Checks complete, digest-bound OpenJarvis development-plan approvals are parsed fail-closed."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.data.ApprovalReviewParsingChecksKt")
+}
