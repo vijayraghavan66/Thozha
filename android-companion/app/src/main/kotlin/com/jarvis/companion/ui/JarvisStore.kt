@@ -722,7 +722,7 @@ class JarvisStore(private val app: Context) {
                 ApprovalDecisionPhase.APPROVED,
                 ApprovalDecisionPhase.EXECUTING,
                 ApprovalDecisionPhase.UNKNOWN,
-            )
+            ) || (status.phase == ApprovalDecisionPhase.COMPLETED && status.operation.isBlank())
         }
         val resolved = linkedMapOf<String, ApprovalDecisionStatus>()
         for (previous in candidates) {
