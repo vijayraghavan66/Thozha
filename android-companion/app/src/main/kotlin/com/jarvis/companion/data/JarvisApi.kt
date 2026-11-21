@@ -25,6 +25,31 @@ import com.jarvis.companion.model.TaskDetail
 import com.jarvis.companion.model.TaskEvent
 
 class JarvisApi(private val context: Context, private val secureStore: SecureStore) {
+    /** Fixed read-only status fields from the paired Mac; this is not a shell or general command endpoint. */
+    fun getMacSystemInfo(): String {
+        val token = secureStore.token()?.takeIf { it.isNotBlank() }
+            ?: throw ApiException("This phone is not paired with the Mac. Open Settings and check the connection.", 401)
+        val response = request(
+            requireLoopbackBaseUrl(),
+            "/v1/jarvis/system/info",
+            "GET",
+            null,
+            token,
+            allowLocalWifi = true,
+        )
+        if (!response.optBoolean("online", false)) throw ApiException("The Mac did not confirm its online status.")
+        val battery = if (response.has("battery_percent") && !response.isNull("battery_percent")) {
+            "Battery ${response.getInt("battery_percent")}%" + when {
+                response.optBoolean("charging", false) -> " and charging"
+                response.has("charging") && !response.isNull("charging") -> " and not charging"
+                else -> ""
+            }
+        } else "Battery status unavailable"
+        val uptime = response.optString("uptime").takeIf { it.isNotBlank() }
+            ?: throw ApiException("The Mac response did not include its uptime.")
+        return "Mac is online. $battery. System uptime: $uptime."
+    }
+
     /** Runs one read-only free-text turn through the Mac supervisor and configured Codex engine. */
     fun submitLinkTask(objective: String, idempotencyKey: String): LinkTaskResult {
         val cleaned = objective.trim()
@@ -36,10 +61,13 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         }
         val token = secureStore.token()?.takeIf { it.isNotBlank() }
             ?: throw ApiException("This phone is not paired with the Mac. Open Settings and check the connection.", 401)
+        val requesterDeviceId = secureStore.deviceId().takeIf { it.matches(Regex("[0-9a-f]{32}")) }
+            ?: throw ApiException("This phone's pairing identity is incomplete. Pair it with the Mac again.", 401)
         val body = JSONObject()
             .put("objective", cleaned)
             .put("capability_scope", JSONArray().put("assistant"))
             .put("idempotency_key", idempotencyKey)
+            .put("requester_device_id", requesterDeviceId)
         val json = request(
             requireLoopbackBaseUrl(),
             "/v1/jarvis/link/tasks",
@@ -136,7 +164,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
     private fun parseLinkTaskResult(json: JSONObject) = LinkTaskResult(
         taskId = json.requiredString("task_id"),
         state = json.requiredString("state").uppercase(),
-        summary = json.optString("summary", ""),
+        summary = json.optString("result_text").ifBlank { json.optString("summary", "") },
         resultDigest = json.optString("result_digest", ""),
     )
 

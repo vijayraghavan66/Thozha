@@ -61,11 +61,11 @@ fun LiveScreen(store: JarvisStore) {
     val settings = remember(context) { LinkSettings(context) }
     val phone = remember(context) { AndroidDeviceProfileReader.read(context) }
     val connection = MacLinkPresentation.state(
-        paired = status?.certificatesVerified == true,
+        paired = store.macApiPaired || status?.certificatesVerified == true,
         enrollmentPending = status?.enrollmentPending == true,
-        syncing = store.syncing,
-        lastSyncMs = store.lastSyncMs,
-        lastSyncFailed = store.lastSyncError.isNotBlank(),
+        syncing = store.syncing || store.macApiSyncing,
+        lastSyncMs = maxOf(store.lastSyncMs, store.macApiLastSyncMs),
+        lastSyncFailed = if (store.macApiPaired) store.macApiSyncError.isNotBlank() else store.lastSyncError.isNotBlank(),
         nowMs = store.now,
         formatAgo = { ageLabel(it) },
     )
@@ -103,7 +103,7 @@ fun LiveScreen(store: JarvisStore) {
                         TextAction(
                             label = connection.actionLabel,
                             filled = !connection.paired,
-                            enabled = !store.syncing,
+                        enabled = !store.syncing && !store.macApiSyncing,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             if (connection.paired || connection.pendingEnrollment) store.syncNow()
@@ -125,8 +125,9 @@ fun LiveScreen(store: JarvisStore) {
                     listOf(
                         "Route" to modeLabel(settings.mode),
                         "Telegram" to telegramConnectionLabel(telegram?.connection),
-                        "Last successful sync" to if (store.lastSyncMs > 0L && store.lastSyncError.isBlank()) {
-                            "${clockTime(store.lastSyncMs)} · ${ageLabel((store.now - store.lastSyncMs).coerceAtLeast(0L))}"
+                        "Last successful sync" to if (maxOf(store.lastSyncMs, store.macApiLastSyncMs) > 0L && (store.macApiSyncError.isBlank() || !store.macApiPaired)) {
+                            val latest = maxOf(store.lastSyncMs, store.macApiLastSyncMs)
+                            "${clockTime(latest)} · ${ageLabel((store.now - latest).coerceAtLeast(0L))}"
                         } else "Not confirmed yet",
                         "Queued on phone" to "${status?.outboxSize ?: 0} messages",
                     ),
@@ -134,9 +135,9 @@ fun LiveScreen(store: JarvisStore) {
             }
             item {
                 TextAction(
-                    label = if (store.syncing) "Syncing with the Mac…" else "Check connection",
+                    label = if (store.syncing || store.macApiSyncing) "Syncing with the Mac…" else "Check connection",
                     filled = false,
-                    enabled = !store.syncing,
+                    enabled = !store.syncing && !store.macApiSyncing,
                     modifier = Modifier.fillMaxWidth(),
                     onClick = { store.syncNow() },
                 )

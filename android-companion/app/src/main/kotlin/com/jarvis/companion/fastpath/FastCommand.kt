@@ -4,6 +4,7 @@ package com.jarvis.companion.fastpath
 sealed interface FastCommand {
     data object MacStatus : FastCommand
     data object MacBatteryStatus : FastCommand
+    data object MacSystemInfo : FastCommand
     data class TaskStatus(val taskId: String) : FastCommand
     data class OpenApplication(val appId: AllowedMacApplication) : FastCommand
 }
@@ -29,6 +30,11 @@ object FastCommandClassifier {
                 "what is my mac battery level",
                 "battery level on my mac",
             ) -> FastCommand.MacBatteryStatus
+            normalized in setOf(
+                "jarvis tell me the mac battery status and system uptime",
+                "tell me the mac battery status and system uptime",
+                "what is my mac battery status and system uptime",
+            ) -> FastCommand.MacSystemInfo
             normalized in setOf("open calculator", "open the calculator", "open calculator on my mac") ->
                 FastCommand.OpenApplication(AllowedMacApplication.CALCULATOR)
             normalized in setOf("open spotify", "open spotify on my mac", "launch spotify", "launch spotify on my mac") ->

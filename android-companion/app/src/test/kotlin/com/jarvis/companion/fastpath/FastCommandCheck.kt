@@ -15,6 +15,8 @@ fun main() {
     expect(FastCommandClassifier.classify("is my Mac online") == FastCommand.MacStatus)
     expect(FastCommandClassifier.classify("What's my Mac's battery level?") == FastCommand.MacBatteryStatus)
     expect(FastCommandClassifier.classify("what is my mac battery level") == FastCommand.MacBatteryStatus)
+    expect(FastCommandClassifier.classify("Jarvis tell me the Mac battery status and system uptime") == FastCommand.MacSystemInfo)
+    expect(FastCommandClassifier.classify("tell me the Mac battery status and system uptime, then open Calculator") == null)
     expect(FastCommandClassifier.classify("status for task 0123456789abcdef0123456789abcdef") == FastCommand.TaskStatus("0123456789abcdef0123456789abcdef"))
     expect(FastCommandClassifier.classify("open Terminal") == null)
     expect(FastCommandClassifier.classify("what is my laptop battery level") == null)

@@ -122,11 +122,11 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit, onOpenConnection:
     val entries = store.entriesInSession()
     val items = remember(entries, now) { ConversationPresentation.items(entries) { clockTime(it) } }
     val connection = MacLinkPresentation.state(
-        paired = store.linkStatus?.certificatesVerified == true,
+        paired = store.macApiPaired || store.linkStatus?.certificatesVerified == true,
         enrollmentPending = store.linkStatus?.enrollmentPending == true,
-        syncing = store.syncing,
-        lastSyncMs = store.lastSyncMs,
-        lastSyncFailed = store.lastSyncError.isNotBlank(),
+        syncing = store.syncing || store.macApiSyncing,
+        lastSyncMs = maxOf(store.lastSyncMs, store.macApiLastSyncMs),
+        lastSyncFailed = if (store.macApiPaired) store.macApiSyncError.isNotBlank() else store.lastSyncError.isNotBlank(),
         nowMs = store.now,
         formatAgo = { ageLabel(it) },
     )

@@ -20,6 +20,8 @@ import com.jarvis.companion.localai.LocalAiRequestMode
 import com.jarvis.companion.localai.RequestRoute
 import com.jarvis.companion.localai.RequestRoutingPolicy
 import com.jarvis.companion.model.ApiException
+import com.jarvis.companion.data.JarvisApi
+import com.jarvis.companion.data.SecureStore
 import com.jarvis.companion.telegram.TelegramSession
 import com.jarvis.companion.telegram.TelegramSnapshot
 import com.jarvis.link.ApprovalReview
@@ -51,6 +53,8 @@ class JarvisStore(private val app: Context) {
     private val sessions = ChatSessions(app)
     private val localHistory = LocalAiConversationHistory(app)
     private val localAi = LocalAiManager.get(app)
+    private val secureStore = SecureStore(app)
+    private val jarvisApi = JarvisApi(app, secureStore)
     private val approvalDecisionPrefs = app.getSharedPreferences("jarvis_approval_decisions", Context.MODE_PRIVATE)
     private var destroyed = false
 
@@ -65,6 +69,11 @@ class JarvisStore(private val app: Context) {
     var linkStatus by mutableStateOf<LinkStatus?>(null)
     var lastSyncMs by mutableStateOf(0L)
     var lastSyncError by mutableStateOf("")
+    /** Existing loopback OpenJarvis pairing is independent from the experimental Jarvis Link relay identity. */
+    var macApiPaired by mutableStateOf(hasMacApiPairing())
+    var macApiSyncing by mutableStateOf(false)
+    var macApiLastSyncMs by mutableStateOf(0L)
+    var macApiSyncError by mutableStateOf("")
     var telegram by mutableStateOf<TelegramSnapshot?>(null)
     var session by mutableStateOf(sessions.active())
     var sessionList by mutableStateOf(sessions.all())
@@ -76,6 +85,7 @@ class JarvisStore(private val app: Context) {
         approvalDecisions.values.maxByOrNull { it.updatedAtUnixMs }?.let(ApprovalDecisionPresentation::label).orEmpty(),
     )
     private var currentDecisionApprovalId: String? = null
+    @Volatile private var lastMacApiProbeAttemptMs = 0L
     var notice by mutableStateOf("")
     var now by mutableStateOf(System.currentTimeMillis())
     /** Set by the host activity; asks Android for one runtime permission, on the user's tap only. */
@@ -178,7 +188,50 @@ class JarvisStore(private val app: Context) {
 
     fun refreshLocal() = background {
         val runtime = LinkService.runtime(app)
-        val conversation = runtime.conversation()
+        var conversation = runtime.conversation()
+        val pairedToMac = hasMacApiPairing()
+        var reachableAt = macApiLastSyncMs
+        var apiError = macApiSyncError
+        if (pairedToMac) {
+            // Reconcile only requests previously submitted by this phone using their original idempotency keys.
+            // A lost HTTP response therefore observes the same task rather than creating a duplicate.
+            conversation.filter { row ->
+                row["transport"] == "api" && (row["state"] as? String) in setOf(
+                    "CREATED", "QUEUED", "RUNNING", "PLANNING", "WAITING_APPROVAL",
+                )
+            }.forEach { row ->
+                val id = row["message_id"] as? String ?: return@forEach
+                runCatching { jarvisApi.getLinkTaskStatus(id) }
+                    .onSuccess { result -> runtime.recordLocalTaskResult(id, result.taskId, result.state, result.summary) }
+                    .onFailure { failure ->
+                        // Preserve an ambiguous in-flight state on transport errors; never report false failure.
+                        if (failure is ApiException && failure.statusCode == 404) {
+                            runtime.recordLocalTaskResult(id, "", "FAILED", "The Mac no longer has this task record.")
+                        } else if (failure !is ApiException || failure.statusCode != null) {
+                            apiError = "The Mac task status could not be confirmed yet."
+                        }
+                    }
+            }
+            val probeTime = System.currentTimeMillis()
+            if (probeTime - lastMacApiProbeAttemptMs >= MAC_API_PROBE_INTERVAL_MS) {
+                lastMacApiProbeAttemptMs = probeTime
+                ui { macApiSyncing = true }
+                runCatching { jarvisApi.getTasks("active") }
+                    .onSuccess {
+                        reachableAt = System.currentTimeMillis()
+                        apiError = ""
+                        secureStore.recordMacConnection("usb")
+                    }
+                    .onFailure { failure ->
+                        apiError = when (failure) {
+                            is ApiException -> failure.message ?: "The paired Mac could not be reached."
+                            else -> "The paired Mac could not be reached over USB."
+                        }
+                    }
+                ui { macApiSyncing = false }
+            }
+        }
+        conversation = runtime.conversation()
         val pending = runtime.pendingApprovals()
         val updatesSnapshot = runtime.recentUpdates()
         val decisionIds = (approvalDecisions.keys + pending.map { it.approvalId }).distinct()
@@ -198,6 +251,9 @@ class JarvisStore(private val app: Context) {
             linkStatus = status
             lastSyncMs = syncAt
             lastSyncError = syncError
+            macApiPaired = pairedToMac
+            macApiLastSyncMs = reachableAt
+            macApiSyncError = apiError
             if (snapshot != null) telegram = snapshot
             sessionList = sessions.all()
         }
@@ -211,7 +267,10 @@ class JarvisStore(private val app: Context) {
         if (syncing) return@ui
         syncing = true
         background(lanes.sync) {
-            runCatching { LinkBackgroundSync.run(app) }
+            if (LinkSettings(app).mode == com.jarvis.companion.link.LinkMode.TEST_RELAY) {
+                runCatching { LinkBackgroundSync.run(app) }
+            }
+            if (hasMacApiPairing()) lastMacApiProbeAttemptMs = 0L
             ui { syncing = false }
             refreshLocal()
         }
@@ -240,10 +299,19 @@ class JarvisStore(private val app: Context) {
             notice = route.message
             return@ui
         }
+        val directReadOnlyCommand = fastCommand is FastCommand.MacStatus ||
+            fastCommand is FastCommand.MacBatteryStatus || fastCommand is FastCommand.MacSystemInfo
+        val usePairedMacApi = hasMacApiPairing() && (
+            directReadOnlyCommand || (fastCommand == null && route is RequestRoute.Mac)
+        )
         val requestTrace = java.security.MessageDigest.getInstance("SHA-256")
             .digest(requestId.toByteArray(Charsets.UTF_8)).take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
         val submitStartedNs = System.nanoTime()
-        val transport = if (TelegramSession.activeTunnel() != null) "telegram" else "link"
+        val transport = when {
+            usePairedMacApi -> "api"
+            TelegramSession.activeTunnel() != null -> "telegram"
+            else -> "link"
+        }
         val conversation = session
         sessions.assign(requestId, conversation.id)
         sessions.setTitleIfBlank(conversation.id, text)
@@ -376,6 +444,42 @@ class JarvisStore(private val app: Context) {
             }
             // Show the user's bubble as pending now, not after the network call returns.
             refreshLocal()
+            if (usePairedMacApi) {
+                runCatching {
+                    if (directReadOnlyCommand) {
+                        Triple(requestId, "COMPLETED", jarvisApi.getMacSystemInfo())
+                    } else {
+                        val result = jarvisApi.submitLinkTask(text, requestId)
+                        Triple(result.taskId, result.state, result.summary)
+                    }
+                }
+                    .onSuccess { (taskId, state, summary) ->
+                        secureStore.recordMacConnection("usb")
+                        runtime.recordLocalTaskResult(requestId, taskId, state, summary)
+                        ui {
+                            macApiLastSyncMs = System.currentTimeMillis()
+                            macApiSyncError = ""
+                        }
+                        android.util.Log.i(
+                            "JarvisStore",
+                            "mac_api_task_result trace=$requestTrace task_id=${taskId.take(8)} state=$state elapsed_ms=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs)}",
+                        )
+                    }
+                    .onFailure { failure ->
+                        val unresolved = failure is ApiException && failure.statusCode == null
+                        val site = failure.stackTrace.firstOrNull()?.let { "${it.className.substringAfterLast('.')}.${it.methodName}" } ?: "unknown"
+                        val status = (failure as? ApiException)?.statusCode
+                        android.util.Log.w(
+                            "JarvisStore",
+                            "mac_api_task_failed trace=$requestTrace type=${failure.javaClass.simpleName} site=$site status=$status elapsed_ms=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs)}",
+                        )
+                        runtime.recordLocalTaskResult(requestId, "", if (unresolved) "RUNNING" else "FAILED", deliveryError(failure))
+                        if (unresolved) lastMacApiProbeAttemptMs = 0L
+                    }
+                ui { submitting = false }
+                refreshLocal()
+                return@background
+            }
             val delivery = runCatching {
                 val relayUrl = LinkSettings(app).relayUrl
                 when (route) {
@@ -388,6 +492,7 @@ class JarvisStore(private val app: Context) {
                         FastCommandRequest.OpenApplication(fastCommand.appId.bundleId, requestId),
                         requestId,
                     )
+                    FastCommand.MacSystemInfo -> error("Read-only Mac system info is handled by the paired Mac API")
                     null -> error("Fast-command route lost its deterministic command")
                     }
                     is RequestRoute.Mac -> runtime.submit(relayUrl, TaskSubmission(text, setOf(SafeCapability.ASSISTANT), clientRequestId = requestId), null)
@@ -574,6 +679,10 @@ class JarvisStore(private val app: Context) {
         approvalDecisionPrefs.edit().putString("records", array.toString()).apply()
     }
 
+    private fun hasMacApiPairing(): Boolean =
+        secureStore.deviceId().matches(Regex("[0-9a-f]{32}")) &&
+            !secureStore.token().isNullOrBlank() && secureStore.baseUrl().isNotBlank()
+
     fun newChat() = ui {
         sessions.create()
         session = sessions.active()
@@ -638,6 +747,10 @@ class JarvisStore(private val app: Context) {
             else -> "Jarvis could not accept this request. Edit it and try again."
         }
         else -> "Jarvis could not deliver this request. Check the connection, then send it again."
+    }
+
+    private companion object {
+        const val MAC_API_PROBE_INTERVAL_MS = 15_000L
     }
 
     private fun localModelError(failure: Throwable): String = when (failure) {
