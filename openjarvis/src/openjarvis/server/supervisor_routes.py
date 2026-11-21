@@ -12,6 +12,7 @@ import re
 import secrets
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -954,6 +955,70 @@ def _parse_pmset_battery(output: str) -> tuple[int | None, bool | None]:
     else:
         charging = None
     return percentage, charging
+
+
+def _read_mac_system_info() -> dict[str, Any]:
+    """Read only fixed battery and boot-time fields; never accepts a caller-supplied command."""
+    if sys.platform != "darwin":
+        raise RuntimeError("system information is available only on macOS")
+    battery = subprocess.run(
+        ["/usr/bin/pmset", "-g", "batt"],
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=False,
+    )
+    if battery.returncode != 0:
+        raise RuntimeError("battery status provider failed")
+    battery_percent, charging = _parse_pmset_battery(battery.stdout)
+
+    boot = subprocess.run(
+        ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=False,
+    )
+    if boot.returncode != 0:
+        raise RuntimeError("boot-time provider failed")
+    match = re.search(r"\bsec\s*=\s*(\d+)\b", boot.stdout)
+    if match is None:
+        raise RuntimeError("boot-time response was malformed")
+    uptime_seconds = max(0, int(time.time()) - int(match.group(1)))
+    days, remainder = divmod(uptime_seconds, 86_400)
+    hours, remainder = divmod(remainder, 3_600)
+    minutes, seconds = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} day" + ("s" if days != 1 else ""))
+    if hours or days:
+        parts.append(f"{hours} hour" + ("s" if hours != 1 else ""))
+    if minutes or hours or days:
+        parts.append(f"{minutes} minute" + ("s" if minutes != 1 else ""))
+    if not parts:
+        parts.append(f"{seconds} second" + ("s" if seconds != 1 else ""))
+    return {
+        "online": True,
+        "battery_percent": battery_percent,
+        "charging": charging,
+        "uptime_seconds": uptime_seconds,
+        "uptime": ", ".join(parts),
+        "checked_at": utc_now(),
+    }
+
+
+@router.get("/system/info")
+async def companion_system_info(request: Request) -> dict[str, Any]:
+    """Device-token-only, fixed read-only Mac facts for the paired companion."""
+    _require_loopback(request)
+    actor = authorize_supervisor_request(request)
+    if not actor.startswith("device:"):
+        raise HTTPException(status_code=403, detail="A paired companion device token is required")
+    try:
+        return await asyncio.to_thread(_read_mac_system_info)
+    except Exception as exc:
+        logger.warning("companion system info read failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Mac battery or uptime information could not be read") from exc
 
 
 @router.post("/link/fast-command")
