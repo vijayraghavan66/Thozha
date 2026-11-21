@@ -135,6 +135,13 @@ private fun TaskRow(row: TimelineRow, progress: List<TaskProgressEvent>, store: 
                     modifier = Modifier.fillMaxWidth(),
                 ) { store.cancelLinkTask(row.requestId) }
             }
+            if (row.transport == "api" && row.tone == TaskTone.FAILED && row.taskId.isBlank() &&
+                row.detail.startsWith("The Mac no longer has this task record.")) {
+                Spacer(Modifier.height(10.dp))
+                TextAction("Check task status", filled = false, modifier = Modifier.fillMaxWidth()) {
+                    store.reconcileLinkTask(row.requestId)
+                }
+            }
             if (row.tone == TaskTone.COMPLETED && row.capabilityScope == "development" && row.taskId.matches(Regex("[0-9a-f]{32}"))) {
                 Spacer(Modifier.height(10.dp))
                 val artifacts = store.taskArtifacts[row.taskId]

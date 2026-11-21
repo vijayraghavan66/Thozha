@@ -367,6 +367,25 @@ class JarvisStore(private val app: Context) {
         }
     }
 
+    /** Explicitly reconciles one ambiguous local API request without creating a duplicate task. */
+    fun reconcileLinkTask(requestId: String) = ui {
+        if (!requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) return@ui
+        notice = "Checking the original task ID with the Mac…"
+        background(lanes.sync) {
+            val result = runCatching { jarvisApi.getLinkTaskStatus(requestId) }
+            result.onSuccess { task ->
+                runCatching { LinkService.runtime(app).recordLocalTaskResult(requestId, task.taskId, task.state, task.summary) }
+            }
+            ui {
+                notice = result.fold(
+                    onSuccess = { "Mac status confirmed: ${it.state}." },
+                    onFailure = { "Mac status is still unconfirmed: ${deliveryError(it)}" },
+                )
+            }
+            refreshLocal()
+        }
+    }
+
     fun syncNow() = ui {
         if (syncing) return@ui
         syncing = true
