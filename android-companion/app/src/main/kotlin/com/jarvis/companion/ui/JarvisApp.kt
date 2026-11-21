@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -110,7 +111,13 @@ fun JarvisApp(store: JarvisStore) {
     CompositionLocalProvider(LocalReducedMotion provides reduced) {
         Box(Modifier.fillMaxSize().background(JarvisColor.Background)) {
             Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                Box(Modifier.weight(1f).fillMaxWidth()) {
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .widthIn(max = 720.dp)
+                        .fillMaxWidth()
+                        .align(Alignment.CenterHorizontally),
+                ) {
                     AnimatedContent(
                         targetState = store.tab,
                         transitionSpec = {
@@ -128,7 +135,11 @@ fun JarvisApp(store: JarvisStore) {
                         modifier = Modifier.fillMaxSize(),
                     ) { tab ->
                         when (tab) {
-                            Tab.HOME -> HomeScreen(store, onOpenSettings = { store.openOverlay(Overlay.SETTINGS) })
+                            Tab.HOME -> HomeScreen(
+                                store,
+                                onOpenSettings = { store.openOverlay(Overlay.SETTINGS) },
+                                onOpenConnection = { store.selectTab(Tab.LIVE) },
+                            )
                             Tab.ACTIVITY -> ActivityScreen(store)
                             Tab.APPROVALS -> ApprovalsScreen(store)
                             Tab.LIVE -> LiveScreen(store)

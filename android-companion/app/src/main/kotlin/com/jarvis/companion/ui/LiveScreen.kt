@@ -1,6 +1,7 @@
 package com.jarvis.companion.ui
 
 import android.Manifest
+import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -12,14 +13,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.Alignment
@@ -36,118 +40,149 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.jarvis.companion.link.LinkMode
 import com.jarvis.companion.link.LinkSettings
+import com.jarvis.companion.AdvancedActivity
+import com.jarvis.companion.localai.AndroidDeviceProfileReader
+import com.jarvis.companion.presentation.MacLinkPresentation
 import com.jarvis.companion.presentation.TaskTone
-import com.jarvis.companion.presentation.TaskStates
 import com.jarvis.companion.voice.JarvisVoiceController
 import com.jarvis.companion.voice.VoiceControllerError
 import com.jarvis.companion.voice.VoiceControllerState
 import com.jarvis.companion.voice.VoiceRecognitionProvider
 
 /**
- * Live connection facts: the Mac pairing, the relay path, the Telegram transport, and work that is running now.
- * Every value is read from the runtime or the Telegram session. "Unknown" is shown as unknown.
+ * Connection facts from the authenticated Link state, the latest sync, and the optional Telegram transport.
+ * A configured route is never treated as proof that the Mac is reachable.
  */
 @Composable
 fun LiveScreen(store: JarvisStore) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val status = store.linkStatus
     val telegram = store.telegram
-    val running = store.entries.filter { (it["state"] as? String) in setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING") }
-    val waiting = store.entries.filter { (it["state"] as? String) == "WAITING_APPROVAL" }
+    val settings = remember(context) { LinkSettings(context) }
+    val phone = remember(context) { AndroidDeviceProfileReader.read(context) }
+    val connection = MacLinkPresentation.state(
+        paired = status?.certificatesVerified == true,
+        enrollmentPending = status?.enrollmentPending == true,
+        syncing = store.syncing,
+        lastSyncMs = store.lastSyncMs,
+        lastSyncFailed = store.lastSyncError.isNotBlank(),
+        nowMs = store.now,
+        formatAgo = { ageLabel(it) },
+    )
+    var diagnosticsExpanded by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = JarvisSpace.Page, end = JarvisSpace.Page, top = 16.dp, bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                BasicText("Live", style = JarvisType.Title.copy(color = JarvisColor.Text))
-                Spacer(Modifier.height(4.dp))
-                BasicText("Connection and running work, as reported.", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
-            }
-            PresenceSignal(animating = running.isNotEmpty())
-        }
+        ScreenHeader("Connection", "Mac and phone status, from the latest real sync.")
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JarvisSpace.Page, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item { SectionLabel("Mac link") }
             item {
-                FactCard(
-                    listOf(
-                        "Pairing" to when {
-                            status == null -> "Reading…"
-                            status.enrollmentPending -> "Enrollment pending"
-                            status.certificatesVerified -> "Paired and verified"
-                            else -> "Not paired"
-                        },
-                        "Device" to (status?.deviceId?.takeIf { it.isNotBlank() }?.take(8)?.plus("…") ?: "Unknown"),
-                        "Route" to "${modeLabel(LinkSettings(context).mode)} · ${LinkSettings(context).relayUrl}",
-                        "Last sync" to if (store.lastSyncMs > 0L) {
-                            "${clockTime(store.lastSyncMs)} (${ageLabel(store.now - store.lastSyncMs)})"
-                        } else "Not yet",
-                        "Sync result" to when {
-                            store.lastSyncMs <= 0L -> "No sync has run yet"
-                            store.lastSyncError.isBlank() -> "No error reported"
-                            else -> store.lastSyncError
-                        },
-                        "Queued on phone" to "${status?.outboxSize ?: 0} message(s)",
-                    ),
-                )
-            }
-
-            item { SectionLabel("Voice") }
-            item { LiveVoiceControls(store) }
-
-            item { SectionLabel("Telegram") }
-            item {
-                FactCard(
-                    listOf(
-                        "Connection" to telegramConnectionLabel(telegram?.connection),
-                        "Sign-in" to authLabel(telegram?.auth),
-                        "Online" to (telegram?.online?.let { if (it) "Yes" else "No" } ?: "Unknown"),
-                        "Pings awaiting reply" to (telegram?.pendingPings?.toString() ?: "Unknown"),
-                        "Last round trip" to (telegram?.lastRttMs?.let { "$it ms" } ?: "None measured"),
-                    ),
-                )
-            }
-
-            item { SectionLabel("Running now") }
-            if (running.isEmpty()) {
-                item {
-                    SurfaceCard {
-                        BasicText(
-                            if (waiting.isEmpty()) "Nothing is running on your Mac." else "Nothing is running. ${waiting.size} request(s) wait for your approval.",
-                            style = JarvisType.Body.copy(color = JarvisColor.TextMuted),
-                        )
-                    }
-                }
-            } else {
-                items(running, key = { it["message_id"] as? String ?: it.hashCode().toString() }) { record ->
-                    SurfaceCard {
-                        Column {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                BasicText(
-                                    (record["text"] as? String).orEmpty().ifBlank { "Request" },
-                                    style = JarvisType.Section.copy(color = JarvisColor.Text),
-                                    maxLines = 2,
-                                    modifier = Modifier.weight(1f),
+                HeroSurfaceCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier.size(46.dp).clip(CircleShape).background(JarvisColor.SageTint),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                PresenceSignal(
+                                    animating = store.hasRunningWork(),
+                                    tint = toneColor(connection.tone),
+                                    modifier = Modifier.size(26.dp),
                                 )
-                                Spacer(Modifier.width(10.dp))
-                                StatusPill(TaskStates.label(TaskStates.toneFor(record["state"] as? String)), TaskTone.RUNNING)
                             }
-                            (record["summary"] as? String)?.takeIf { it.isNotBlank() }?.let { summary ->
-                                Spacer(Modifier.height(8.dp))
-                                SelectionContainer {
-                                    BasicText(summary, style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
-                                }
+                            Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(1f)) {
+                                SectionLabel("Mac link")
+                                BasicText(connection.label, style = JarvisType.Section.copy(color = toneColor(connection.tone)))
                             }
+                        }
+                        BasicText(connection.detail, style = JarvisType.Body.copy(color = JarvisColor.TextMuted))
+                        TextAction(
+                            label = connection.actionLabel,
+                            filled = !connection.paired,
+                            enabled = !store.syncing,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            if (connection.paired || connection.pendingEnrollment) store.syncNow()
+                            else context.startActivity(Intent(context, AdvancedActivity::class.java))
+                        }
+                        if (!connection.paired || connection.pendingEnrollment) {
+                            BasicText(
+                                "A new phone is not paired until the Mac confirms its signed invitation.",
+                                style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
+                            )
                         }
                     }
                 }
             }
+
+            item { SectionLabel("Transport") }
+            item {
+                FactCard(
+                    listOf(
+                        "Route" to modeLabel(settings.mode),
+                        "Telegram" to telegramConnectionLabel(telegram?.connection),
+                        "Last successful sync" to if (store.lastSyncMs > 0L && store.lastSyncError.isBlank()) {
+                            "${clockTime(store.lastSyncMs)} · ${ageLabel((store.now - store.lastSyncMs).coerceAtLeast(0L))}"
+                        } else "Not confirmed yet",
+                        "Queued on phone" to "${status?.outboxSize ?: 0} messages",
+                    ),
+                )
+            }
+            item {
+                TextAction(
+                    label = if (store.syncing) "Syncing with the Mac…" else "Check connection",
+                    filled = false,
+                    enabled = !store.syncing,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { store.syncNow() },
+                )
+            }
+
+            item { SectionLabel("This phone") }
+            item {
+                FactCard(
+                    listOf(
+                        "Device" to listOf(phone.manufacturer, phone.model).filter(String::isNotBlank).joinToString(" "),
+                        "Android" to "${phone.androidApi} · ${phone.supportedAbis.firstOrNull() ?: "Unknown processor"}",
+                        "Memory" to "${memoryLabel(phone.totalRamBytes)} total · ${memoryLabel(phone.availableRamBytes)} available",
+                    ),
+                )
+            }
+
+            item {
+                SurfaceCard(onClick = { diagnosticsExpanded = !diagnosticsExpanded }) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            SectionLabel("Advanced diagnostics")
+                            BasicText("Route and sync details", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+                        }
+                        BasicText(if (diagnosticsExpanded) "Hide" else "Show", style = JarvisType.Caption.copy(color = JarvisColor.Sage))
+                    }
+                }
+            }
+            if (diagnosticsExpanded) {
+                item {
+                    FactCard(
+                        listOf(
+                            "Relay endpoint" to settings.relayUrl,
+                            "Last sync result" to when {
+                                store.lastSyncMs <= 0L -> "No sync has run yet"
+                                store.lastSyncError.isBlank() -> "No error reported"
+                                else -> store.lastSyncError
+                            },
+                            "Telegram sign-in" to authLabel(telegram?.auth),
+                            "Pending Telegram pings" to (telegram?.pendingPings?.toString() ?: "Unknown"),
+                        ),
+                    )
+                }
+            }
+
+            item { SectionLabel("Voice") }
+            item { LiveVoiceControls(store) }
             item { Spacer(Modifier.height(16.dp)) }
         }
     }

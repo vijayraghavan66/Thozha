@@ -46,3 +46,8 @@ fun telegramConnectionLabel(connection: TelegramConnection?): String = when (con
 
 /** Expiry label for an approval's raw timestamp in Unix milliseconds. */
 fun expiryClock(expiresAtMs: Long): String = clockTime(expiresAtMs)
+
+/** Compact, locale-stable memory size used by device and local-model summaries. */
+fun memoryLabel(bytes: Long?): String = bytes?.let {
+    String.format(java.util.Locale.US, "%.1f GiB", it / (1024.0 * 1024.0 * 1024.0))
+} ?: "unavailable"

@@ -15,6 +15,47 @@ data class TimelineRow(
 
 data class TimelineSection(val title: String, val rows: List<TimelineRow>)
 
+data class TaskProgressEvent(
+    val id: String,
+    val label: String,
+    val detail: String,
+    val timeLabel: String,
+    val tone: TaskTone,
+)
+
+/** Only authenticated Mac task-update events become progress; no progress is inferred from elapsed time. */
+object TaskProgressPresentation {
+    fun eventsFor(
+        taskId: String,
+        updates: List<Map<String, Any?>>,
+        formatTime: (Long) -> String,
+    ): List<TaskProgressEvent> {
+        val matching = updates.filter { event ->
+            taskId.isNotBlank() && event["task_id"] == taskId
+        }.distinctBy { event ->
+            (event["event_seq"] as? Number)?.toLong()?.let { "seq:$it" }
+                ?: "${event["task_id"]}:${event["state"]}:${event["received_at_unix_ms"]}"
+        }.sortedWith(compareBy(
+            { (it["event_seq"] as? Number)?.toLong() ?: Long.MAX_VALUE },
+            { (it["received_at_unix_ms"] as? Number)?.toLong() ?: 0L },
+        )).takeLast(5)
+
+        return matching.mapIndexed { index, event ->
+            val state = (event["state"] as? String)?.trim()?.uppercase()
+            val tone = TaskStates.toneFor(state)
+            val timestamp = (event["received_at_unix_ms"] as? Number)?.toLong()
+            TaskProgressEvent(
+                id = (event["event_seq"] as? Number)?.toLong()?.let { "seq:$it" }
+                    ?: "event:$index:${event["received_at_unix_ms"]}",
+                label = if (state.isNullOrBlank()) "Mac updated the task" else TaskStates.label(tone),
+                detail = (event["summary"] as? String).orEmpty().trim().ifBlank { "The Mac reported a status update." }.take(240),
+                timeLabel = timestamp?.let(formatTime).orEmpty(),
+                tone = tone,
+            )
+        }
+    }
+}
+
 object TimelinePresentation {
     // Must match the states for which the existing task detail offers cancellation; do not widen it.
     private val cancellableStates = setOf("CREATED", "RUNNING", "VERIFYING", "PLANNING", "WAITING_APPROVAL", "PAUSED")

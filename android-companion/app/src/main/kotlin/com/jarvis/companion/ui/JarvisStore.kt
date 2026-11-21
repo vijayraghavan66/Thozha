@@ -32,7 +32,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
-enum class Tab(val label: String) { HOME("Home"), ACTIVITY("Activity"), APPROVALS("Approvals"), LIVE("Live") }
+enum class Tab(val label: String) { HOME("Home"), ACTIVITY("Activity"), APPROVALS("Approvals"), LIVE("Connection") }
 
 enum class Overlay { SETTINGS, HISTORY }
 
@@ -57,6 +57,8 @@ class JarvisStore(private val app: Context) {
     var tab by mutableStateOf(Tab.HOME)
     var overlay by mutableStateOf<Overlay?>(null)
     var entries by mutableStateOf<List<Map<String, Any>>>(emptyList())
+    /** Authenticated task-update envelopes persisted by LinkRuntime; rendered as real activity only. */
+    var taskUpdates by mutableStateOf<List<Map<String, Any>>>(emptyList())
     var approvals by mutableStateOf<List<ApprovalReview>>(emptyList())
     /** Persisted UI reconciliation only; supervisor remains authoritative for every decision and action. */
     var approvalDecisions by mutableStateOf(loadApprovalDecisions())
@@ -178,7 +180,7 @@ class JarvisStore(private val app: Context) {
         val runtime = LinkService.runtime(app)
         val conversation = runtime.conversation()
         val pending = runtime.pendingApprovals()
-        val recentUpdates = runtime.recentUpdates()
+        val updatesSnapshot = runtime.recentUpdates()
         val decisionIds = (approvalDecisions.keys + pending.map { it.approvalId }).distinct()
         val runtimeDecisionStates = decisionIds.mapNotNull { id ->
             runtime.approvalDecisionState(id)?.let { id to it }
@@ -188,10 +190,11 @@ class JarvisStore(private val app: Context) {
         val snapshot = TelegramSession.controller?.snapshot()
         ui {
             entries = mergeEntries(conversation, localHistory.all())
+            taskUpdates = updatesSnapshot
             localAiSnapshot = localAi.status()
             approvals = pending
             reconcileRuntimeDecisionStates(pending, runtimeDecisionStates)
-            reconcileApprovalDecisions(recentUpdates)
+            reconcileApprovalDecisions(updatesSnapshot)
             linkStatus = status
             lastSyncMs = syncAt
             lastSyncError = syncError

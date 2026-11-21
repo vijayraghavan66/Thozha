@@ -2,10 +2,10 @@ package com.jarvis.companion.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,9 +29,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.size
 import com.jarvis.companion.presentation.TaskTone
+import com.jarvis.companion.presentation.TaskProgressEvent
+import com.jarvis.companion.presentation.TaskProgressPresentation
 import com.jarvis.companion.presentation.TimelinePresentation
 import com.jarvis.companion.presentation.TimelineRow
 import com.jarvis.companion.presentation.ApprovalDecisionPresentation
@@ -66,7 +69,12 @@ fun ActivityScreen(store: JarvisStore) {
                     item(key = "header-${section.title}") {
                         Column(Modifier.padding(top = 8.dp, bottom = 2.dp)) { SectionLabel(section.title) }
                     }
-                    items(section.rows, key = { it.requestId }) { row -> TaskRow(row) }
+                    items(section.rows, key = { it.requestId }) { row ->
+                        val progress = remember(row.taskId, row.requestId, store.taskUpdates) {
+                            TaskProgressPresentation.eventsFor(row.taskId, store.taskUpdates) { clockTime(it) }
+                        }
+                        TaskRow(row, progress)
+                    }
                 }
                 item { Spacer(Modifier.height(16.dp)) }
             }
@@ -75,7 +83,9 @@ fun ActivityScreen(store: JarvisStore) {
 }
 
 @Composable
-private fun TaskRow(row: TimelineRow) {
+private fun TaskRow(row: TimelineRow, progress: List<TaskProgressEvent>) {
+    var showAllProgress by remember(row.requestId) { mutableStateOf(false) }
+    val visibleProgress = if (showAllProgress) progress else progress.takeLast(1)
     SurfaceCard {
         Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -101,6 +111,53 @@ private fun TaskRow(row: TimelineRow) {
             if (footer.isNotBlank()) {
                 Spacer(Modifier.height(8.dp))
                 BasicText(footer, style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+            }
+            if (progress.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                SectionLabel("Mac updates")
+                Spacer(Modifier.height(8.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    visibleProgress.forEachIndexed { index, event ->
+                        Row(verticalAlignment = Alignment.Top) {
+                            Column(
+                                Modifier.width(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                androidx.compose.foundation.layout.Box(
+                                    Modifier.size(8.dp).clip(androidx.compose.foundation.shape.CircleShape)
+                                        .background(toneColor(event.tone)),
+                                )
+                                if (index < visibleProgress.lastIndex) {
+                                    Spacer(Modifier.height(3.dp))
+                                    androidx.compose.foundation.layout.Box(
+                                        Modifier.width(1.dp).height(24.dp).background(JarvisColor.Border),
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    BasicText(event.label, style = JarvisType.Caption.copy(color = toneColor(event.tone), fontWeight = androidx.compose.ui.text.font.FontWeight.Medium), modifier = Modifier.weight(1f))
+                                    if (event.timeLabel.isNotBlank()) {
+                                        BasicText(event.timeLabel, style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+                                    }
+                                }
+                                Spacer(Modifier.height(3.dp))
+                                SelectionContainer {
+                                    BasicText(event.detail, style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+                                }
+                            }
+                        }
+                    }
+                }
+                if (progress.size > 1) {
+                    Spacer(Modifier.height(6.dp))
+                    TextAction(
+                        if (showAllProgress) "Show latest update" else "Show ${progress.size} Mac updates",
+                        filled = false,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { showAllProgress = !showAllProgress }
+                }
             }
         }
     }

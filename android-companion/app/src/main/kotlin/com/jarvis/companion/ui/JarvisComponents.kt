@@ -1,5 +1,6 @@
 package com.jarvis.companion.ui
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -32,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Path
@@ -102,13 +104,33 @@ fun SurfaceCard(
     Box(base) { content() }
 }
 
-/** Section heading in small capitals. */
+/** A single, restrained hero surface for the current task or Mac connection state. */
+@Composable
+fun HeroSurfaceCard(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    val shape = RoundedCornerShape(24.dp)
+    Box(
+        modifier
+            .fillMaxWidth()
+            .animateContentSize(jarvisSpring())
+            .clip(shape)
+            .background(Brush.linearGradient(listOf(JarvisColor.SurfaceRaised, JarvisColor.SageTint)))
+            .border(1.dp, JarvisColor.Border.copy(alpha = 0.72f), shape)
+            .padding(20.dp),
+    ) {
+        content()
+    }
+}
+
+/** Quiet section heading; sentence case is easier to scan than repeated dashboard-style capitals. */
 @Composable
 fun SectionLabel(text: String, modifier: Modifier = Modifier) {
     BasicText(
-        text = text.uppercase(),
+        text = text,
         modifier = modifier.semantics { contentDescription = text },
-        style = JarvisType.Label.copy(color = JarvisColor.TextMuted),
+        style = JarvisType.Label.copy(color = JarvisColor.TextMuted, letterSpacing = 0.15.sp),
     )
 }
 
@@ -213,7 +235,7 @@ fun TextAction(label: String, filled: Boolean, enabled: Boolean = true, modifier
             .background(if (filled) JarvisColor.Sage else Color.Transparent)
             .then(if (filled) Modifier else Modifier.border(1.dp, JarvisColor.Border, shape))
             .clickable(enabled = enabled, role = Role.Button) {
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                haptics.performHapticFeedback(if (filled) HapticFeedbackType.Confirm else HapticFeedbackType.TextHandleMove)
                 onClick()
             },
         contentAlignment = Alignment.Center,

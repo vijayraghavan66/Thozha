@@ -282,10 +282,6 @@ private fun modelNetworkLabel(context: Context): String {
     }
 }
 
-private fun memoryLabel(bytes: Long?): String = bytes?.let {
-    String.format(java.util.Locale.US, "%.1f GiB", it / (1024.0 * 1024.0 * 1024.0))
-} ?: "unavailable"
-
 private fun modeLabel(mode: com.jarvis.companion.link.LinkMode): String = when (mode) {
     com.jarvis.companion.link.LinkMode.LOCAL_USB -> "Local USB"
     com.jarvis.companion.link.LinkMode.TEST_RELAY -> "Test relay"

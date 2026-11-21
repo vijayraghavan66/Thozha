@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Redesigned Jarvis screens: follow the system light or dark setting. -->
-    <style name="JarvisTheme" parent="android:Theme.DeviceDefault.Light.NoActionBar">
-        <item name="android:windowBackground">@color/bg</item>
-        <item name="android:statusBarColor">@color/bg</item>
-        <item name="android:navigationBarColor">@color/bg</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
-        <item name="android:colorAccent">@color/accent</item>
+    <!-- Compose owns a single ink-and-sage surface; keep platform bars in that same dark system. -->
+    <style name="JarvisTheme" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/ink_0</item>
+        <item name="android:statusBarColor">@color/ink_0</item>
+        <item name="android:navigationBarColor">@color/ink_1</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:colorAccent">@color/signal</item>
     </style>
 </resources>

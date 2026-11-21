@@ -11,12 +11,13 @@
 
 | Capability | Canonical owner | Source of truth | Verification |
 |---|---|---|---|
-| Main navigation | `MainActivity` three-item bottom navigation | `DESIGN.md` | Build and phone review |
+| Main navigation | `JarvisApp` four-item bottom navigation plus Settings overlay | `DESIGN.md` | Build and phone review |
 | Free-text request and reply | Home conversation in `MainActivity`; `LinkRuntime` local record | This contract and the authenticated Mac task API | Android build, Mac tests, real-device task |
 | Task status/result | Activity task list and task detail | OpenJarvis supervisor result | API result plus phone display |
 | Link approval review | Activity/detail in `MainActivity` | Encrypted Link approval event and Mac supervisor | Exact digest and device decision test |
 | Pairing invitation scan | Google Play services Code Scanner | Signed QR contract | Phone scan and Mac confirmation |
 | Device credential | Android Keystore and encrypted `SecureStore` | Pairing API | Restart and authenticated request |
+| Connection status | Connection tab in `JarvisApp` | Link pairing state, last sync, and Telegram session | Fresh unpaired, paired, reachable, stale, and error states |
 
 ## Home task flow
 
@@ -50,10 +51,17 @@ Do not queue a privileged approval decision offline. After interruption, refresh
 
 ## Navigation, keyboard, and motion
 
-- Home, Activity, and Settings are peer destinations represented by icon-only controls with accessibility labels.
+- Home, Activity, Approvals, and Connection are peer destinations represented by icon-only controls with accessibility labels. Settings remains an overlay.
 - The input uses `IME_ACTION_SEND`; tapping the send control and keyboard action perform the same operation.
 - The window uses `adjustResize`, and the composer remains above the virtual keyboard and bottom navigation.
 - Animations are short and eased. Respect the system reduced-motion setting. Animation never replaces text state or action feedback.
+
+## Fresh device and connection status
+
+- A fresh, unpaired installation says that pairing is required and offers the existing signed-invitation setup flow. It does not imply that a Mac is connected because a relay URL exists, the phone is online, or Telegram is installed.
+- Connection status separates device pairing, last successful Mac sync, Telegram sign-in/transport, and AI evidence. Unknown and stale values remain unknown/stale; no green status is inferred from a local network indicator.
+- The primary Connection screen shows user-facing status and a clear setup action. Raw loopback relay URLs and detailed hardware/runtime facts stay in Advanced details.
+- Pairing remains Mac-confirmed through the existing signed QR and local pending-device confirmation path. UI polish must not create credentials, approve a device, or alter the development allowlist by itself.
 
 ## Connection and trust boundaries
 

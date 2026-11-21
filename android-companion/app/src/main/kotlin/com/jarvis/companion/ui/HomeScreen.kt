@@ -46,7 +46,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.ImeAction
@@ -63,16 +62,14 @@ import com.jarvis.companion.voice.JarvisVoiceController
 import com.jarvis.companion.voice.VoiceControllerError
 import com.jarvis.companion.voice.VoiceControllerState
 import com.jarvis.companion.voice.VoiceRecognitionProvider
-import com.jarvis.companion.presentation.AiEvidence
-import com.jarvis.companion.presentation.ConnectionPresentation
 import com.jarvis.companion.presentation.ConversationPresentation
+import com.jarvis.companion.presentation.MacLinkPresentation
 import com.jarvis.companion.presentation.Speaker
 import com.jarvis.companion.presentation.TaskTone
-import com.jarvis.companion.presentation.TransportState
 import com.jarvis.companion.presentation.ConversationItem
 
 @Composable
-fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit) {
+fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit, onOpenConnection: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val voiceState = remember { mutableStateOf(VoiceControllerState.IDLE) }
     val voicePreview = remember { mutableStateOf("") }
@@ -124,25 +121,47 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit) {
     val now = store.now
     val entries = store.entriesInSession()
     val items = remember(entries, now) { ConversationPresentation.items(entries) { clockTime(it) } }
-    val transport = transportState(store.telegram?.connection)
-    val header = connectionHeader(store.entries, transport, now)
+    val connection = MacLinkPresentation.state(
+        paired = store.linkStatus?.certificatesVerified == true,
+        enrollmentPending = store.linkStatus?.enrollmentPending == true,
+        syncing = store.syncing,
+        lastSyncMs = store.lastSyncMs,
+        lastSyncFailed = store.lastSyncError.isNotBlank(),
+        nowMs = store.now,
+        formatAgo = { ageLabel(it) },
+    )
 
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier.fillMaxWidth().padding(start = JarvisSpace.Page, end = 8.dp, top = 12.dp),
+            Modifier.fillMaxWidth().padding(start = JarvisSpace.Page, end = 8.dp, top = 10.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                BasicText(store.session.title.ifBlank { "New chat" }, style = JarvisType.Title.copy(color = JarvisColor.Text), maxLines = 1)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    PresenceSignal(animating = store.hasRunningWork())
-                    Spacer(Modifier.width(8.dp))
-                    BasicText(header.headline, style = JarvisType.Caption.copy(color = JarvisColor.TextMuted), maxLines = 1)
-                }
+                BasicText("JARVIS", style = JarvisType.Label.copy(color = JarvisColor.Sage, letterSpacing = 1.2.sp))
+                Spacer(Modifier.height(2.dp))
+                BasicText(
+                    store.session.title.ifBlank { "Your assistant" },
+                    style = JarvisType.Title.copy(color = JarvisColor.Text),
+                    maxLines = 1,
+                )
             }
             IconAction(JarvisIcons.History, "Chat history") { store.openOverlay(Overlay.HISTORY) }
             IconAction(JarvisIcons.NewChat, "New chat") { store.newChat() }
             IconAction(JarvisIcons.Settings, "Settings", onClick = onOpenSettings)
+        }
+        Row(
+            Modifier
+                .padding(start = JarvisSpace.Page, bottom = 8.dp)
+                .semantics { contentDescription = "Mac connection: ${connection.label}" }
+                .clip(RoundedCornerShape(50))
+                .background(toneColor(connection.tone).copy(alpha = 0.12f))
+                .clickable(role = Role.Button, onClick = onOpenConnection)
+                .padding(horizontal = 11.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PresenceSignal(animating = store.hasRunningWork(), tint = toneColor(connection.tone), modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(7.dp))
+            BasicText(connection.label, style = JarvisType.Caption.copy(color = toneColor(connection.tone)), maxLines = 1)
         }
 
         if (store.notice.isNotEmpty()) {
@@ -150,11 +169,49 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit) {
         }
 
         if (items.isEmpty()) {
-            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                EmptyNote(
-                    "Ask Jarvis",
-                    "Requests travel to your Mac over the encrypted link. Replies appear here as the Mac reports them, and nothing is shown until it does.",
-                )
+            Box(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (!connection.paired || connection.tone == TaskTone.FAILED || connection.tone == TaskTone.WAITING) {
+                    HeroSurfaceCard(Modifier.padding(horizontal = JarvisSpace.Page)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    Modifier
+                                        .size(42.dp)
+                                        .clip(CircleShape)
+                                        .background(JarvisColor.SageTint),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    PresenceSignal(animating = false, modifier = Modifier.size(24.dp))
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column {
+                                    SectionLabel(if (connection.pendingEnrollment) "Pairing" else "Mac connection")
+                                    BasicText(connection.label, style = JarvisType.Section.copy(color = JarvisColor.Text))
+                                }
+                            }
+                            BasicText(
+                                connection.detail,
+                                style = JarvisType.Body.copy(color = JarvisColor.TextMuted),
+                            )
+                            TextAction(
+                                "View connection options",
+                                filled = true,
+                                enabled = !store.syncing,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                if (connection.paired) store.syncNow() else onOpenConnection()
+                            }
+                        }
+                    }
+                } else {
+                    EmptyNote(
+                        "Ready when you are",
+                        "Ask Jarvis a question. The Mac's real response and task state will appear here.",
+                    )
+                }
             }
         } else {
             val listState = rememberLazyListState()
@@ -176,23 +233,6 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit) {
         Composer(store, voice, voiceState.value, voicePreview.value, haptics)
     }
 }
-
-/** Telegram transport, the Mac's last observed reply, and the AI answer evidence, kept as separate facts. */
-private fun connectionHeader(entries: List<Map<String, Any>>, transport: TransportState, now: Long): ConnectionHeader {
-    val answered = entries.lastOrNull { (it["state"] as? String) == "COMPLETED" && !(it["summary"] as? String).isNullOrBlank() }
-    val ai = when {
-        answered == null -> AiEvidence.NOT_VERIFIED
-        now - ((answered["updated_at_unix_ms"] as? Number)?.toLong() ?: 0L) < 30 * 60_000L -> AiEvidence.ANSWERED
-        else -> AiEvidence.NO_RECENT_ANSWER
-    }
-    val lastMacUpdate = entries.filter { (it["state"] as? String) !in setOf("QUEUED", "SENT", "UNCONFIRMED") }
-        .mapNotNull { (it["updated_at_unix_ms"] as? Number)?.toLong() }
-        .maxOrNull()
-    val summary = ConnectionPresentation.summary(transport, lastMacUpdate, ai, now) { ageLabel(it) }
-    return ConnectionHeader(summary.headline, summary.subline)
-}
-
-private data class ConnectionHeader(val headline: String, val subline: String)
 
 @Composable
 private fun MessageRow(item: ConversationItem, onSpeak: (() -> Unit)?) {

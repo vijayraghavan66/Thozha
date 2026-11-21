@@ -1,17 +1,17 @@
 <resources>
-    <color name="ink_0">#091117</color>
-    <color name="ink_1">#0D1921</color>
-    <color name="ink_2">#13232D</color>
-    <color name="ink_3">#1A303C</color>
-    <color name="line">#29404A</color>
-    <color name="line_bright">#3C6470</color>
-    <color name="paper">#EAF3F4</color>
-    <color name="muted">#A0B2B9</color>
-    <color name="signal">#51DCE0</color>
-    <color name="signal_pressed">#8051DCE0</color>
-    <color name="success">#8DE3B7</color>
-    <color name="warning">#FFC06F</color>
-    <color name="danger">#FF8082</color>
-    <color name="error_surface">#332125</color>
-    <color name="notice_surface">#142B32</color>
+    <color name="ink_0">#0A0C0B</color>
+    <color name="ink_1">#121614</color>
+    <color name="ink_2">#1A201D</color>
+    <color name="ink_3">#263029</color>
+    <color name="line">#263029</color>
+    <color name="line_bright">#425246</color>
+    <color name="paper">#EBEFEA</color>
+    <color name="muted">#98A49E</color>
+    <color name="signal">#9CB99A</color>
+    <color name="signal_pressed">#809CB99A</color>
+    <color name="success">#9CB99A</color>
+    <color name="warning">#D6B77C</color>
+    <color name="danger">#D28A80</color>
+    <color name="error_surface">#30201F</color>
+    <color name="notice_surface">#1E2A21</color>
 </resources>

@@ -17,6 +17,87 @@ data class ConnectionSummary(
     val rows: List<StatusRow>,
 )
 
+data class MacLinkViewState(
+    val label: String,
+    val detail: String,
+    val actionLabel: String,
+    val tone: TaskTone,
+    val paired: Boolean,
+    val pendingEnrollment: Boolean,
+)
+
+/** Mac reachability is derived only from the authenticated Link state and last real sync. */
+object MacLinkPresentation {
+    private const val RECENT_SYNC_MS = 2 * 60_000L
+
+    fun state(
+        paired: Boolean,
+        enrollmentPending: Boolean,
+        syncing: Boolean,
+        lastSyncMs: Long,
+        lastSyncFailed: Boolean,
+        nowMs: Long,
+        formatAgo: (Long) -> String,
+    ): MacLinkViewState = when {
+        enrollmentPending -> MacLinkViewState(
+            label = "Waiting for Mac confirmation",
+            detail = "Your signed device invitation is waiting for confirmation on the Mac.",
+            actionLabel = "Check status",
+            tone = TaskTone.WAITING,
+            paired = false,
+            pendingEnrollment = true,
+        )
+        !paired -> MacLinkViewState(
+            label = "Mac not paired",
+            detail = "Pair this phone with your Mac before sending requests.",
+            actionLabel = "Set up this phone",
+            tone = TaskTone.UNKNOWN,
+            paired = false,
+            pendingEnrollment = false,
+        )
+        syncing -> MacLinkViewState(
+            label = "Checking the Mac",
+            detail = "Waiting for a real sync response.",
+            actionLabel = "Checking…",
+            tone = TaskTone.RUNNING,
+            paired = true,
+            pendingEnrollment = false,
+        )
+        lastSyncFailed -> MacLinkViewState(
+            label = "Connection needs attention",
+            detail = "The last sync did not complete. Check the route and try again.",
+            actionLabel = "Sync now",
+            tone = TaskTone.FAILED,
+            paired = true,
+            pendingEnrollment = false,
+        )
+        lastSyncMs <= 0L -> MacLinkViewState(
+            label = "Paired · not checked yet",
+            detail = "This phone is paired, but no successful sync has been observed yet.",
+            actionLabel = "Sync now",
+            tone = TaskTone.UNKNOWN,
+            paired = true,
+            pendingEnrollment = false,
+        )
+        nowMs - lastSyncMs.coerceAtMost(nowMs) <= RECENT_SYNC_MS -> MacLinkViewState(
+            label = "Mac reachable",
+            detail = "Last confirmed ${formatAgo((nowMs - lastSyncMs).coerceAtLeast(0L))}.",
+            actionLabel = "Sync now",
+            tone = TaskTone.COMPLETED,
+            paired = true,
+            pendingEnrollment = false,
+        )
+        else -> MacLinkViewState(
+            label = "Last seen ${formatAgo(nowMs - lastSyncMs)} ago",
+            detail = "The Mac has not been confirmed recently. Sync to check again.",
+            actionLabel = "Sync now",
+            tone = TaskTone.UNKNOWN,
+            paired = true,
+            pendingEnrollment = false,
+        )
+    }
+}
+
 object ConnectionPresentation {
     private const val RECENT_WINDOW_MS = 10 * 60_000L
 

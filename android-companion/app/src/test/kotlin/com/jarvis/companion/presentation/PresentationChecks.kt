@@ -75,6 +75,20 @@ fun main() {
         "UNCONFIRMED", TaskTone.UNKNOWN, "No Mac delivery receipt was confirmed. Check task status before retrying.",
     )?.first?.contains("No Mac delivery receipt") == true, "unconfirmed delivery explains the uncertainty instead of hanging")
 
+    val progress = TaskProgressPresentation.eventsFor(
+        taskId = "task-1",
+        updates = listOf(
+            mapOf("task_id" to "task-1", "state" to "PLANNING", "summary" to "Plan accepted", "event_seq" to 1L, "received_at_unix_ms" to 11L),
+            mapOf("task_id" to "other", "state" to "COMPLETED", "summary" to "Unrelated", "event_seq" to 2L, "received_at_unix_ms" to 12L),
+            mapOf("task_id" to "task-1", "state" to "RUNNING", "summary" to "Worker started", "event_seq" to 3L, "received_at_unix_ms" to 13L),
+            mapOf("task_id" to "task-1", "state" to "RUNNING", "summary" to "Duplicate", "event_seq" to 3L, "received_at_unix_ms" to 14L),
+        ),
+        formatTime = fmt,
+    )
+    check(progress.map { it.label } == listOf("In progress", "In progress"), "only the task's authenticated progress events are shown in sequence")
+    check(progress.last().detail == "Worker started" && progress.last().timeLabel == "t13", "duplicate progress events are discarded in favor of the original event")
+    check(TaskProgressPresentation.eventsFor("missing", emptyList(), fmt).isEmpty(), "no progress is fabricated when the Mac has sent no event")
+
     // --- approvals -----------------------------------------------------------------------------------------------
     val now = 10_000_000L
     fun approval(status: String?, expiresIn: Long?) = mapOf<String, Any?>(
@@ -192,6 +206,39 @@ fun main() {
     check(offline.rows[1].value.startsWith("Last reply"), "a stale Mac reply is labelled as last seen")
     check((connected.rows + noReply.rows + offline.rows).none { it.value.contains("Mac unavailable") }, "never reports Mac unavailable as a transport fact")
     check(ConnectionPresentation.summary(null, null, AiEvidence.NOT_VERIFIED, now) { "x" }.headline == "Telegram is not set up", "no transport state means not set up")
+
+    // --- paired Mac status is distinct from Telegram and phone internet ---------------------------------------
+    val unpairedMac = MacLinkPresentation.state(
+        paired = false, enrollmentPending = false, syncing = false,
+        lastSyncMs = 0L, lastSyncFailed = false, nowMs = now, formatAgo = fmt,
+    )
+    check(unpairedMac.label == "Mac not paired" && !unpairedMac.paired, "a fresh phone never claims Mac connectivity")
+    check(unpairedMac.actionLabel == "Set up this phone", "fresh device points to the signed pairing flow")
+    val pendingMac = MacLinkPresentation.state(
+        paired = false, enrollmentPending = true, syncing = false,
+        lastSyncMs = 0L, lastSyncFailed = false, nowMs = now, formatAgo = fmt,
+    )
+    check(pendingMac.tone == TaskTone.WAITING && pendingMac.pendingEnrollment, "pending enrollment waits for Mac confirmation")
+    val pairedUnseen = MacLinkPresentation.state(
+        paired = true, enrollmentPending = false, syncing = false,
+        lastSyncMs = 0L, lastSyncFailed = false, nowMs = now, formatAgo = fmt,
+    )
+    check(pairedUnseen.label == "Paired · not checked yet" && pairedUnseen.tone == TaskTone.UNKNOWN, "pairing alone is not reachability")
+    val reachableMac = MacLinkPresentation.state(
+        paired = true, enrollmentPending = false, syncing = false,
+        lastSyncMs = now - 30_000L, lastSyncFailed = false, nowMs = now, formatAgo = fmt,
+    )
+    check(reachableMac.label == "Mac reachable" && reachableMac.tone == TaskTone.COMPLETED, "recent successful sync confirms reachability")
+    val staleMac = MacLinkPresentation.state(
+        paired = true, enrollmentPending = false, syncing = false,
+        lastSyncMs = now - 300_000L, lastSyncFailed = false, nowMs = now, formatAgo = fmt,
+    )
+    check(staleMac.tone == TaskTone.UNKNOWN && staleMac.label.startsWith("Last seen"), "stale sync is not shown as connected")
+    val failedMac = MacLinkPresentation.state(
+        paired = true, enrollmentPending = false, syncing = false,
+        lastSyncMs = now, lastSyncFailed = true, nowMs = now, formatAgo = fmt,
+    )
+    check(failedMac.tone == TaskTone.FAILED && failedMac.actionLabel == "Sync now", "failed sync offers explicit recovery")
 
     // --- voice ---------------------------------------------------------------------------------------------------
     check(!VoicePresentation.view(VoicePhase.PERMISSION_DENIED).pushToTalkEnabled, "denied microphone disables push-to-talk")
