@@ -329,9 +329,15 @@ class LinkRuntime(
         (load()["conversation"] as? List<Map<String, Any>>) ?: emptyList()
 
     /** Stores a local USB task under its API idempotency key before the request can time out. */
-    fun recordLocalTaskRequest(idempotencyKey: String, text: String, transport: String = "api") = synchronized(stateLock) {
+    fun recordLocalTaskRequest(
+        idempotencyKey: String,
+        text: String,
+        transport: String = "api",
+        capabilityScope: String = "assistant",
+    ) = synchronized(stateLock) {
         require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid task idempotency key" }
         require(transport in setOf("api", "link", "telegram")) { "invalid conversation transport" }
+        require(capabilityScope in setOf("assistant", "development")) { "invalid task capability scope" }
         val cleaned = text.trim()
         require(cleaned.isNotEmpty() && cleaned.toByteArray(Charsets.UTF_8).size <= 4096) { "message must be 1–4096 bytes" }
         val entries = conversation().filterNot { it["message_id"] == idempotencyKey }.toMutableList()
@@ -343,6 +349,7 @@ class LinkRuntime(
             "summary" to "",
             "task_id" to "",
             "transport" to transport,
+            "capability_scope" to capabilityScope,
             "updated_at_unix_ms" to now(),
         ))
         save(mapOf("conversation" to entries.takeLast(100)))

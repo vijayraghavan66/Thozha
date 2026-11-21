@@ -565,8 +565,8 @@ object CompanionProtocolTest {
             storeDir = directory,
             now = { 1_800_000_000_000L },
         )
-        first.recordLocalTaskRequest(requestId, "What is Java?", transport = "link")
-        first.recordLocalTaskRequest(requestId, "What is Java?", transport = "link")
+        first.recordLocalTaskRequest(requestId, "What is Java?", transport = "link", capabilityScope = "development")
+        first.recordLocalTaskRequest(requestId, "What is Java?", transport = "link", capabilityScope = "development")
         check(first.conversation().size == 1) { "re-recording one request created a duplicate conversation entry" }
         val taskId = "a".repeat(32)
         first.recordEvents(listOf(CompanionEvent.TaskUpdate(
@@ -586,8 +586,12 @@ object CompanionProtocolTest {
         check(entry["message_id"] == requestId)
         check(entry["task_id"] == "a".repeat(32))
         check(entry["transport"] == "link")
+        check(entry["capability_scope"] == "development")
         check(entry["state"] == "COMPLETED")
         check(entry["summary"] == "Java is a programming language.")
+        check(runCatching {
+            recovered.recordLocalTaskRequest("local-usb-task-20261116-000000000002", "bad scope", capabilityScope = "mac_root")
+        }.isFailure)
         directory.deleteRecursively()
     }
 
