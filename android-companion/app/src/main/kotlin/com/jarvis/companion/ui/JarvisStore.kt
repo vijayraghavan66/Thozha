@@ -209,7 +209,7 @@ class JarvisStore(private val app: Context) {
         if (pairedToMac) {
             // Reconcile only requests previously submitted by this phone using their original idempotency keys.
             // A lost HTTP response therefore observes the same task rather than creating a duplicate.
-            conversation.filter(::shouldReconcileApiTask).forEach { row ->
+            conversation.filter { row -> shouldReconcileApiTask(row, System.currentTimeMillis()) }.forEach { row ->
                 val id = row["message_id"] as? String ?: return@forEach
                 runCatching { jarvisApi.getLinkTaskStatus(id) }
                     .onSuccess { result -> runtime.recordLocalTaskResult(id, result.taskId, result.state, result.summary) }

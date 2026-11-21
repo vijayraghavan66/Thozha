@@ -75,6 +75,13 @@ fun main() {
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "The exact approved plan is active. Use capability_id=secret")), "plan issuance text is reconciled against the authoritative final result")
     check(!shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "Finished normally")), "ordinary completed API tasks are not polled again")
     check(!shouldReconcileApiTask(mapOf("transport" to "local", "state" to "RUNNING")), "local tasks never call the Mac status endpoint")
+    val nowForReconciliation = 10_000_000L
+    val earlyNotFound = mapOf<String, Any?>(
+        "transport" to "api", "state" to "FAILED", "task_id" to "", "summary" to "The Mac no longer has this task record.",
+        "created_at_unix_ms" to nowForReconciliation - 1_000L,
+    )
+    check(shouldReconcileApiTask(earlyNotFound, nowForReconciliation), "a recent status 404 is retried because task acceptance may still be in flight")
+    check(!shouldReconcileApiTask(earlyNotFound, nowForReconciliation + 16 * 60 * 1000L), "uncertain 404 reconciliation is bounded to fifteen minutes")
     check(TimelinePresentation.sections(emptyList(), fmt).isEmpty(), "no tasks yields the empty state")
     check(TaskStates.toneFor("UNCONFIRMED") == TaskTone.UNKNOWN, "unconfirmed delivery is not presented as success or active execution")
     check(ConversationPresentation.replyFor(
