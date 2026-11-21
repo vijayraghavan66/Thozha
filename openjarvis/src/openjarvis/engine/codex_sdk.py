@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,65 @@ def _serialize_messages(messages: list[Message]) -> str:
         if content.strip():
             lines.append(f"{role}: {content.strip()}")
     return "\n\n".join(lines) or "USER: Hello."
+
+
+def _sanitize_codex_diagnostic_text(value: Any, sensitive_values: tuple[str, ...] = ()) -> str:
+    """Redact secrets and prompt text before placing SDK failure diagnostics in logs."""
+    text = str(value).replace("\r", " ").replace("\n", " ")
+    for sensitive in sensitive_values:
+        if sensitive:
+            text = text.replace(sensitive, "[redacted]")
+    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*", "Bearer [redacted]", text)
+    text = re.sub(
+        r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|authorization)\b\s*[:=]\s*[^\s,;]+",
+        r"\1=[redacted]",
+        text,
+    )
+    text = re.sub(r"\b(?:sk|ojd|ghp|xox[baprs])-[-A-Za-z0-9_]{8,}\b", "[redacted-token]", text)
+    text = re.sub(r"(?i)(https?://[^\s?#]+)\?[^\s#]+", r"\1?[redacted-query]", text)
+    text = re.sub(r"[A-Za-z0-9_+/=-]{72,}", "[redacted-long-token]", text)
+    if re.search(r"(?i)\b(?:USER|ASSISTANT|SYSTEM|DEVELOPER):", text):
+        return "[redacted message content in diagnostic]"
+    return text[:512]
+
+
+def _codex_error_diagnostics(
+    error: BaseException,
+    *,
+    sensitive_values: tuple[str, ...] = (),
+    max_chain: int = 8,
+    max_frames: int = 16,
+) -> dict[str, Any]:
+    """Capture the causal exception chain and function/line frames, without locals or source text."""
+    chain: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen and len(chain) < max_chain:
+        seen.add(id(current))
+        item: dict[str, Any] = {
+            "type": type(current).__name__,
+            "module": type(current).__module__,
+            "message": _sanitize_codex_diagnostic_text(current, sensitive_values),
+        }
+        status_code = getattr(current, "status_code", None)
+        if isinstance(status_code, int):
+            item["status_code"] = status_code
+        code = getattr(current, "code", None)
+        if isinstance(code, (str, int)):
+            item["code"] = _sanitize_codex_diagnostic_text(code, sensitive_values)[:80]
+        chain.append(item)
+        current = current.__cause__ or current.__context__
+
+    frames = traceback.extract_tb(error.__traceback__)[-max_frames:]
+    return {
+        "chain": chain,
+        "traceback": [
+            {"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
+            for frame in frames
+        ],
+        "locals_captured": False,
+        "source_lines_captured": False,
+    }
 
 
 def _audit_open_app_event(
@@ -624,6 +684,21 @@ class CodexSDKEngine(InferenceEngine):
                     (time.perf_counter_ns() - turn_started_ns) / 1_000_000, task_id[:8] or "none",
                 )
         except Exception as exc:  # noqa: BLE001
+            diagnostics = _codex_error_diagnostics(
+                exc,
+                sensitive_values=(
+                    prompt,
+                    *(message.content for message in message_list if isinstance(message.content, str)),
+                    str(CODEX_HOME),
+                    str(Path.home()),
+                ),
+            )
+            PERF_LOGGER.error(
+                "codex_failure_diagnostic trace=%s task_id=%s details=%s",
+                trace_id,
+                task_id[:8] or "none",
+                json.dumps(diagnostics, separators=(",", ":"), ensure_ascii=True),
+            )
             PERF_LOGGER.warning(
                 "perf trace=%s event=model_turn_failed wall_ms=%d mono_ns=%d elapsed_ms=%.3f task_id=%s error_type=%s",
                 trace_id, int(time.time() * 1000), time.perf_counter_ns(),
