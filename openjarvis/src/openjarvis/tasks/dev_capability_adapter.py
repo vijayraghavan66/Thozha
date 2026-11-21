@@ -564,6 +564,19 @@ class DevelopmentCapabilityMCPAdapter:
             file_reader=file_reader,
         )
 
+    def artifact_export(
+        self, capability_id: str, *, op_id: str, rel_paths: list[str],
+        file_reader: Callable[[str, int], bytes],
+    ) -> dict[str, Any]:
+        """Authorize bounded archive inputs and retrieve only those guest files."""
+        self._validate_operation_id(op_id)
+        device_id, user_id, owner = self._operation_context(capability_id)
+        return self.capability_store.artifact_export(
+            capability_id, device_id=device_id, user_id=user_id, task_id=self.task_id,
+            requester_actor=owner, supervisor_store=self.supervisor_store, op_id=op_id,
+            rel_paths=rel_paths, file_reader=file_reader,
+        )
+
     def consume_repair(self, capability_id: str, *, op_id: str) -> int:
         """Spend one repair allowance without increasing any other plan limit."""
         self._validate_operation_id(op_id)

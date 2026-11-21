@@ -219,6 +219,38 @@ def test_forged_approval_labels_are_not_accepted(world):
     assert caught.value.code == "CALLER_CLAIMS_REJECTED"
 
 
+def test_artifact_export_requires_explicit_plan_scope_and_is_single_use(world):
+    export_plan = {**PLAN, "allowed_ops": [*PLAN["allowed_ops"], "artifact_export"], "allowed_paths": ["src", "tests", "README.md"]}
+    capability_id = issue(world, plan=export_plan)
+    source = {"src/app.py": b"print('ok')\n", "README.md": b"Demo\n"}
+    result = world["store"].artifact_export(
+        capability_id, device_id=DEVICE, user_id=USER, task_id=world["bindings"][capability_id]["task_id"],
+        requester_actor=DECIDER, supervisor_store=world["supervisor"], op_id="artifact-export-1",
+        rel_paths=list(source), file_reader=lambda path, maximum: source[path],
+    )
+    assert result["bytes"] == sum(map(len, source.values()))
+    assert result["payloads"] == source
+    with pytest.raises(CapabilityError) as caught:
+        world["store"].artifact_export(
+            capability_id, device_id=DEVICE, user_id=USER, task_id=world["bindings"][capability_id]["task_id"],
+            requester_actor=DECIDER, supervisor_store=world["supervisor"], op_id="artifact-export-1",
+            rel_paths=list(source), file_reader=lambda path, maximum: source[path],
+        )
+    assert caught.value.code == "REPLAY"
+
+
+def test_artifact_export_is_denied_without_capability_operation(world):
+    capability_id = issue(world)
+    source = {"src/app.py": b"pass"}
+    with pytest.raises(CapabilityError) as caught:
+        world["store"].artifact_export(
+            capability_id, device_id=DEVICE, user_id=USER, task_id=world["bindings"][capability_id]["task_id"],
+            requester_actor=DECIDER, supervisor_store=world["supervisor"], op_id="artifact-export-2",
+            rel_paths=list(source), file_reader=lambda path, maximum: source[path],
+        )
+    assert caught.value.code == "OP_NOT_PERMITTED"
+
+
 def test_model_actor_cannot_issue_from_a_forged_supervisor_decision(world):
     spec, task_id, approval_id, actor = approved_plan(world, decider="model:codex")
     with pytest.raises(CapabilityError) as caught:

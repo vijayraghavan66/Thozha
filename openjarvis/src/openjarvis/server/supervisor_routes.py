@@ -19,13 +19,47 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from openjarvis.server.fcm_notifications import FCMRegistrationStore
-from openjarvis.tasks.supervisor import bounded_result_text, get_supervisor_store, utc_now
+from openjarvis.tasks.supervisor import LINK_SCOPE_CAPABILITIES, bounded_result_text, get_supervisor_store, utc_now
 
 router = APIRouter(prefix="/v1/jarvis", tags=["jarvis-supervisor"])
 logger = logging.getLogger(__name__)
+_ARTIFACT_STORE = None
+
+
+def _artifact_store():
+    global _ARTIFACT_STORE
+    if _ARTIFACT_STORE is None:
+        from openjarvis.tasks.artifact_store import ArtifactStore
+
+        _ARTIFACT_STORE = ArtifactStore()
+    return _ARTIFACT_STORE
+
+
+def _require_owned_completed_development_task(task_id: str, device_id: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
+        raise HTTPException(status_code=404, detail="Task not found")
+    task = get_supervisor_store().get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    try:
+        metadata = json.loads(task.get("recovery_json") or "{}")
+        requested_scope = json.loads(task.get("capabilities_json") or "[]")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=404, detail="Task not found") from exc
+    if (
+        metadata.get("source") != "jarvis_link"
+        or metadata.get("scope") != "development"
+        or metadata.get("capability_scope") != ["development"]
+        or requested_scope != sorted(LINK_SCOPE_CAPABILITIES["development"])
+        or metadata.get("owner_actor") != f"device:{device_id}"
+    ):
+        # Hide whether another device owns the task or whether it is not an artifact task.
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.get("state") != "COMPLETED":
+        raise HTTPException(status_code=409, detail="Artifacts are available only after task completion")
 
 
 def _configured_master_key() -> str:
@@ -1329,6 +1363,44 @@ async def get_task(task_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Task not found")
     task["events"] = store.events(task_id)
     return task
+
+
+@router.get("/tasks/{task_id}/artifacts")
+async def list_task_artifacts(task_id: str, request: Request) -> dict[str, Any]:
+    """List downloadable archives only to the paired device that owns a completed development task."""
+    device_id = _device_actor(request)
+    _require_owned_completed_development_task(task_id, device_id)
+    artifacts = _artifact_store().list_for_task(task_id, device_id)
+    return {"task_id": task_id, "artifacts": [item.to_wire(download_path=f"/v1/jarvis/tasks/{task_id}/artifacts/{item.artifact_id}/download") for item in artifacts]}
+
+
+@router.get("/tasks/{task_id}/artifacts/{artifact_id}/download")
+async def download_task_artifact(task_id: str, artifact_id: str, request: Request) -> Response:
+    """Stream a size- and SHA-verified archive to its exact paired task owner."""
+    device_id = _device_actor(request)
+    _require_owned_completed_development_task(task_id, device_id)
+    if not re.fullmatch(r"[0-9a-f]{64}", artifact_id):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    from openjarvis.tasks.artifact_store import ArtifactIntegrityError, ArtifactNotFoundError
+
+    try:
+        artifact, data = _artifact_store().download(task_id, device_id, artifact_id)
+    except ArtifactNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Artifact not found") from exc
+    except ArtifactIntegrityError as exc:
+        logger.error("Stored Jarvis artifact failed integrity check (task=%s artifact=%s)", task_id, artifact_id[:12])
+        raise HTTPException(status_code=500, detail="Stored artifact integrity check failed") from exc
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{artifact.file_name}"',
+            "Content-Length": str(len(data)),
+            "Cache-Control": "no-store",
+            "X-Content-SHA256": artifact.archive_sha256,
+            "ETag": f'"{artifact.archive_sha256}"',
+        },
+    )
 
 
 @router.get("/approvals/pending")

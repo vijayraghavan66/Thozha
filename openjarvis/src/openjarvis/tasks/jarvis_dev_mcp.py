@@ -71,7 +71,8 @@ TOOLS = [
         "description": (
             "Request one exact owner approval for this project's bounded development plan. "
             "Planning is allowed before approval; no files are changed and no tests run until approval. "
-            "allowed_ops must use only write_file, run_tests, artifact_manifest. allowed_paths are "
+            "allowed_ops may include write_file, run_tests, artifact_manifest, artifact_export. "
+            "artifact_export permits delivery of only explicitly listed files inside the same approved paths. allowed_paths are "
             "workspace-relative prefixes such as src, tests, README.md; do not use absolute paths, '.', '..', "
             "or backslashes. Use an empty path only if the owner must approve the entire disposable workspace. "
             "The supervisor binds the device, workspace, canonical plan digest, quotas, and expiry."
@@ -90,7 +91,7 @@ TOOLS = [
                         "plan_id": {"type": "string", "minLength": 8, "maxLength": 80},
                         "allowed_ops": {
                             "type": "array", "minItems": 1, "uniqueItems": True,
-                            "items": {"type": "string", "enum": ["write_file", "run_tests", "artifact_manifest"]},
+                            "items": {"type": "string", "enum": ["write_file", "run_tests", "artifact_manifest", "artifact_export"]},
                         },
                         "allowed_paths": {
                             "type": "array", "maxItems": 24, "uniqueItems": True,
@@ -118,6 +119,8 @@ TOOLS = [
      "inputSchema": {"type": "object", "required": ["capability_id", "reason"], "properties": {"capability_id": {"type": "string"}, "reason": {"type": "string"}}, "additionalProperties": False}},
     {"name": "artifact_manifest", "description": "Create a hash and size manifest for explicitly listed files within the approved plan.",
      "inputSchema": {"type": "object", "required": ["capability_id", "paths"], "properties": {"capability_id": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": False}},
+    {"name": "export_project_artifacts", "description": "Package explicitly listed files from the active approved development plan for the same paired device. This requires artifact_export in the digest-approved plan; only the final artifact metadata is returned to the model.",
+     "inputSchema": {"type": "object", "required": ["capability_id", "paths"], "properties": {"capability_id": {"type": "string"}, "paths": {"type": "array", "minItems": 1, "maxItems": 2000, "items": {"type": "string", "maxLength": 240}}}, "additionalProperties": False}},
 ]
 WRITE_TOOLS = {"write_project_file", "run_project_tests"}
 
@@ -495,6 +498,36 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             "manifest_sha256": manifest["manifest_sha256"],
         })
         return _text(json.dumps(manifest, ensure_ascii=False, separators=(",", ":")))
+    if name == "export_project_artifacts":
+        adapter = _capability_adapter()
+        capability_id = args.get("capability_id")
+        paths = args.get("paths")
+        if not isinstance(capability_id, str) or not isinstance(paths, list) or not paths or any(not isinstance(path, str) for path in paths):
+            return _text("A capability ID and explicit relative artifact paths are required.", True)
+        if not getattr(workspace, "is_remote", False):
+            return _text("Artifact delivery is available only from the isolated VM workspace.", True)
+        _record_task_event("development.artifact_export_started", {"files_requested": len(paths)})
+        try:
+            export = adapter.artifact_export(
+                capability_id, op_id=uuid.uuid4().hex, rel_paths=paths,
+                file_reader=lambda path, max_bytes: workspace.read_bytes(path, max_bytes=max_bytes),
+            )
+            from openjarvis.tasks.artifact_store import ArtifactStore
+            _task_id, _source, _scope = _bound_task()
+            _task, _link, owner_device = adapter._task_binding()
+            with ArtifactStore() as artifacts:
+                artifact = artifacts.create_bundle(task_id=_task_id, device_id=owner_device, export=export)
+        except CapabilityError as exc:
+            _record_task_event("development.artifact_export_refused", {"error_code": exc.code})
+            return _text(f"Artifact export refused ({exc.code}).", True)
+        except Exception as exc:
+            _record_task_event("development.artifact_export_failed", {"error_type": type(exc).__name__})
+            return _text("Artifact packaging failed; no download was published.", True)
+        _record_task_event("development.artifact_export_completed", {
+            "artifact_id": artifact.artifact_id, "archive_sha256": artifact.archive_sha256,
+            "size_bytes": artifact.size_bytes, "manifest_sha256": artifact.manifest_sha256,
+        })
+        return _text(json.dumps(artifact.to_wire(), ensure_ascii=False, separators=(",", ":")))
     return _text(f"Unknown tool: {name}", True)
 
 

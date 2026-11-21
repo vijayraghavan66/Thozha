@@ -30,8 +30,9 @@ from typing import Any, Callable
 OP_WRITE = "write_file"
 OP_TEST = "run_tests"
 OP_ARTIFACT = "artifact_manifest"
+OP_ARTIFACT_EXPORT = "artifact_export"
 OP_REPAIR = "repair_attempt"
-ALLOWED_OPS = frozenset({OP_WRITE, OP_TEST, OP_ARTIFACT})
+ALLOWED_OPS = frozenset({OP_WRITE, OP_TEST, OP_ARTIFACT, OP_ARTIFACT_EXPORT})
 PLAN_APPROVAL_OPERATION = "mcp:jarvis_dev:approve_plan"
 PLAN_APPROVAL_TARGET_PREFIX = "taskflow:plan:"
 # Test commands are fixed identifiers. Arbitrary command strings are never accepted.
@@ -42,6 +43,7 @@ MAX_WRITES_HARD = 200
 MAX_TEST_RUNS_HARD = 50
 MAX_REPAIRS_HARD = 5
 MAX_ARTIFACTS_HARD = 2000
+MAX_ARTIFACT_EXPORTS_PER_CAPABILITY = 5
 MAX_DURATION_HARD_S = 4 * 60 * 60
 MAX_ALLOWED_PATHS_HARD = 24
 MAX_CANONICAL_PLAN_BYTES = 16 * 1024
@@ -860,6 +862,76 @@ class CapabilityStore:
                 self._db.execute("ROLLBACK")
                 if isinstance(failure, CapabilityError):
                     self._record_denial(capability_id, "artifact_manifest_denied", op_id, failure.code, "manifest")
+                raise
+
+    def artifact_export(
+        self,
+        capability_id: str,
+        *,
+        device_id: str,
+        user_id: str,
+        task_id: str,
+        requester_actor: str,
+        supervisor_store: Any,
+        op_id: str,
+        rel_paths: list[str],
+        file_reader: Callable[[str, int], bytes],
+    ) -> dict[str, Any]:
+        """Authorize and fetch only explicitly listed, in-scope guest artifacts for delivery."""
+        if not callable(file_reader):
+            raise CapabilityError("ARTIFACT_READER_INVALID", "artifact reader is unavailable")
+        if not isinstance(rel_paths, list) or not rel_paths or len(rel_paths) > MAX_ARTIFACTS_HARD or any(not isinstance(path, str) for path in rel_paths):
+            raise CapabilityError("ARTIFACT_LIMIT", "artifact file list exceeds the bounded export limit")
+        if len(set(rel_paths)) != len(rel_paths):
+            raise CapabilityError("REPLAY", "artifact export contains duplicate paths")
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                spec, _writes, _tests, _repairs, _total = self._check_live(
+                    capability_id, device_id, user_id, supervisor_store=supervisor_store,
+                    task_id=task_id, requester_actor=requester_actor,
+                )
+                if OP_ARTIFACT_EXPORT not in spec["allowed_ops"]:
+                    raise CapabilityError("OP_NOT_PERMITTED", "artifact delivery is not part of this plan")
+                if self._db.execute("SELECT 1 FROM dev_operations WHERE op_id=?", (op_id,)).fetchone():
+                    raise CapabilityError("REPLAY", "artifact export operation ID was already used")
+                prior_exports = self._db.execute(
+                    "SELECT detail_json FROM dev_operations WHERE capability_id=? AND kind=?",
+                    (capability_id, OP_ARTIFACT_EXPORT),
+                ).fetchall()
+                if len(prior_exports) >= MAX_ARTIFACT_EXPORTS_PER_CAPABILITY:
+                    raise CapabilityError("ARTIFACT_LIMIT", "artifact export operation quota is exhausted")
+                prior_export_bytes = sum(int(json.loads(row["detail_json"]).get("bytes", 0)) for row in prior_exports)
+                files: list[dict[str, Any]] = []
+                payloads: dict[str, bytes] = {}
+                total_bytes = 0
+                for rel_path in sorted(rel_paths):
+                    _check_relative(rel_path)
+                    if not _under_allowed(rel_path, tuple(spec["allowed_paths"])):
+                        raise CapabilityError("PATH_NOT_PERMITTED", "artifact is outside the approved export paths")
+                    data = file_reader(rel_path, spec["max_file_bytes"])
+                    if not isinstance(data, bytes) or len(data) > spec["max_file_bytes"]:
+                        raise CapabilityError("ARTIFACT_LIMIT", "artifact reader exceeded the approved file limit")
+                    total_bytes += len(data)
+                    if total_bytes + prior_export_bytes > spec["max_total_bytes"]:
+                        raise CapabilityError("QUOTA_TOTAL_BYTES", "artifact export exceeds the approved total bytes")
+                    digest = hashlib.sha256(data).hexdigest()
+                    files.append({"path": rel_path, "bytes": len(data), "sha256": digest})
+                    payloads[rel_path] = data
+                manifest_json = json.dumps(files, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                manifest_digest = hashlib.sha256(manifest_json.encode("utf-8")).hexdigest()
+                detail = {"files": len(files), "bytes": total_bytes, "manifest_sha256": manifest_digest}
+                self._db.execute(
+                    "INSERT INTO dev_operations(op_id,capability_id,kind,detail_json,created_at) VALUES (?,?,?,?,?)",
+                    (op_id, capability_id, OP_ARTIFACT_EXPORT, json.dumps(detail, sort_keys=True), self._clock()),
+                )
+                self._audit(capability_id, "artifact_export_authorized", op_id=op_id, **detail)
+                self._db.execute("COMMIT")
+                return {**detail, "file_manifest": files, "payloads": payloads}
+            except Exception as failure:
+                self._db.execute("ROLLBACK")
+                if isinstance(failure, CapabilityError):
+                    self._record_denial(capability_id, "artifact_export_denied", op_id, failure.code, "manifest")
                 raise
 
     def consume_repair(self, capability_id: str, *, device_id: str, user_id: str, op_id: str,
