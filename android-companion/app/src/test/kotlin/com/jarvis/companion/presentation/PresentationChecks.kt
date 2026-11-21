@@ -192,6 +192,11 @@ fun main() {
     ), now + 10)?.phase == ApprovalDecisionPhase.EXPIRED, "expiration is explicit")
     check(!ApprovalDecisionPresentation.blocksAnotherTap(null), "fresh pending approval remains decidable")
     check(ApprovalDecisionPresentation.blocksAnotherTap(completed), "terminal approval cannot be decided again")
+    val completedPlanApproval = completed.copy(operation = "mcp:jarvis_dev:approve_plan")
+    check(
+        ApprovalDecisionPresentation.label(completedPlanApproval).contains("Review its test and artifact result"),
+        "plan approval completion directs the owner to the actual project result",
+    )
 
     // --- connection: three separate facts, no false "Mac unavailable" ---------------------------------------------
     val connected = ConnectionPresentation.summary(TransportState.CONNECTED, now - 60_000, AiEvidence.ANSWERED, now) { "$it ms ago" }

@@ -181,7 +181,11 @@ object ApprovalDecisionPresentation {
         ApprovalDecisionPhase.DELIVERED -> "Relay received the decision. Waiting for the Mac supervisor to confirm it."
         ApprovalDecisionPhase.APPROVED -> "Approved by the Mac. Execution is pending."
         ApprovalDecisionPhase.EXECUTING -> "Approved operation is running on the Mac."
-        ApprovalDecisionPhase.COMPLETED -> "Operation completed successfully on the Mac."
+        ApprovalDecisionPhase.COMPLETED -> if (status.operation == "mcp:jarvis_dev:approve_plan") {
+            "The approved development task finished. Review its test and artifact result in Home."
+        } else {
+            "Operation completed successfully on the Mac."
+        }
         ApprovalDecisionPhase.REJECTED -> "Rejected by the Mac. The operation was not run."
         ApprovalDecisionPhase.EXPIRED -> "Approval expired. The operation was not authorized."
         ApprovalDecisionPhase.CANCELLED -> "Operation was cancelled."

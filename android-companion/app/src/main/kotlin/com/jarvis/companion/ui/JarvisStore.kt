@@ -91,6 +91,7 @@ class JarvisStore(private val app: Context) {
     private var currentDecisionApprovalId: String? = null
     @Volatile private var lastMacApiProbeAttemptMs = 0L
     @Volatile private var lastSupervisorApprovalPollMs = 0L
+    @Volatile private var lastSupervisorDecisionPollMs = 0L
     @Volatile private var cachedSupervisorApprovalPairs = emptyList<Pair<Approval, ApprovalReview>>()
     var notice by mutableStateOf("")
     var now by mutableStateOf(System.currentTimeMillis())
@@ -263,6 +264,7 @@ class JarvisStore(private val app: Context) {
         val runtimeDecisionStates = decisionIds.mapNotNull { id ->
             runtime.approvalDecisionState(id)?.let { id to it }
         }.toMap()
+        val supervisorDecisionStates = reconcileSupervisorDecisionStates(conversation)
         val status = runtime.status()
         val (syncAt, syncError) = runtime.lastSync()
         val snapshot = TelegramSession.controller?.snapshot()
@@ -273,6 +275,7 @@ class JarvisStore(private val app: Context) {
             approvals = combinedApprovals.values.toList()
             supervisorApprovals = directApprovalMap
             reconcileRuntimeDecisionStates(pending, runtimeDecisionStates)
+            reconcileSupervisorDecisionResults(supervisorDecisionStates)
             reconcileApprovalDecisions(updatesSnapshot)
             linkStatus = status
             lastSyncMs = syncAt
@@ -580,7 +583,7 @@ class JarvisStore(private val app: Context) {
         currentDecisionApprovalId = review.approvalId
         decisionNote = ApprovalDecisionPresentation.label(submitting)
         val supervisorApproval = supervisorApprovals[review.approvalId]
-        background {
+        background(lanes.approval) {
             if (supervisorApproval != null) {
                 val runtime = LinkService.runtime(app)
                 val continuationObjective = if (decision == "approve" && supervisorApproval.operation.startsWith("mcp:jarvis_dev:")) {
@@ -704,6 +707,84 @@ class JarvisStore(private val app: Context) {
         }
     }
 
+    /** Reconcile ambiguous paired-API decisions using authenticated Mac approval/task records. */
+    private fun reconcileSupervisorDecisionStates(
+        conversation: List<Map<String, Any>>,
+    ): Map<String, ApprovalDecisionStatus> {
+        val pollTime = System.currentTimeMillis()
+        if (pollTime - lastSupervisorDecisionPollMs < SUPERVISOR_DECISION_POLL_INTERVAL_MS) return emptyMap()
+        lastSupervisorDecisionPollMs = pollTime
+        val candidates = approvalDecisions.values.filter { status ->
+            status.phase in setOf(
+                ApprovalDecisionPhase.SUBMITTING,
+                ApprovalDecisionPhase.INDETERMINATE,
+                ApprovalDecisionPhase.DELIVERED,
+                ApprovalDecisionPhase.APPROVED,
+                ApprovalDecisionPhase.EXECUTING,
+                ApprovalDecisionPhase.UNKNOWN,
+            )
+        }
+        val resolved = linkedMapOf<String, ApprovalDecisionStatus>()
+        for (previous in candidates) {
+            val row = conversation.firstOrNull {
+                it["task_id"] == previous.taskId && it["transport"] == "api"
+            } ?: continue
+            val requestId = row["message_id"] as? String ?: continue
+            val approval = runCatching { jarvisApi.getApproval(previous.approvalId) }.getOrNull() ?: continue
+            val status = approval.status.uppercase()
+            if (status == "PENDING") continue
+            val taskResult = runCatching { jarvisApi.getLinkTaskStatus(requestId) }.getOrNull()
+            val executionState = when {
+                status == "REJECTED" -> "REJECTED"
+                status == "EXPIRED" -> "EXPIRED"
+                taskResult != null -> taskResult.state
+                else -> status
+            }
+            val evidence = mapOf(
+                "approval_id" to previous.approvalId,
+                "task_id" to previous.taskId,
+                "decision" to previous.decision,
+                "status" to status,
+                "execution_state" to executionState,
+                "executed" to (status == "CONSUMED"),
+                "success" to (status == "CONSUMED" && taskResult?.state == "COMPLETED"),
+            )
+            val boundPrevious = previous.copy(
+                operation = previous.operation.ifBlank { approval.operation },
+                target = previous.target.ifBlank { approval.targetResource },
+            )
+            val updated = ApprovalDecisionPresentation.authoritative(boundPrevious, evidence, pollTime) ?: continue
+            resolved[previous.approvalId] = updated
+            if (taskResult != null && taskResult.summary.isNotBlank()) {
+                LinkService.runtime(app).recordLocalTaskResult(
+                    requestId, taskResult.taskId, taskResult.state, taskResult.summary,
+                )
+            }
+        }
+        return resolved
+    }
+
+    private fun reconcileSupervisorDecisionResults(results: Map<String, ApprovalDecisionStatus>) {
+        if (results.isEmpty()) return
+        approvalDecisions = approvalDecisions + results
+        persistApprovalDecisions(approvalDecisions)
+        decisionNote = approvalDecisions.values.maxByOrNull { it.updatedAtUnixMs }
+            ?.let(ApprovalDecisionPresentation::label).orEmpty()
+        if (currentDecisionApprovalId in results.keys) {
+            val phase = results[currentDecisionApprovalId]?.phase
+            if (phase in setOf(
+                    ApprovalDecisionPhase.COMPLETED,
+                    ApprovalDecisionPhase.REJECTED,
+                    ApprovalDecisionPhase.EXPIRED,
+                    ApprovalDecisionPhase.CANCELLED,
+                    ApprovalDecisionPhase.FAILED,
+                )) {
+                decisionInFlight = false
+                currentDecisionApprovalId = null
+            }
+        }
+    }
+
     private fun loadApprovalDecisions(): Map<String, ApprovalDecisionStatus> = runCatching {
         val array = JSONArray(approvalDecisionPrefs.getString("records", "[]"))
         buildMap {
@@ -718,6 +799,8 @@ class JarvisStore(private val app: Context) {
                     phase = storedPhase,
                     updatedAtUnixMs = value.optLong("updated_at_unix_ms"),
                     messageId = value.optString("message_id"),
+                    operation = value.optString("operation"),
+                    target = value.optString("target"),
                 )
                 put(id, ApprovalDecisionPresentation.afterRestart(status))
             }
@@ -768,7 +851,9 @@ class JarvisStore(private val app: Context) {
                 .put("task_id", item.taskId)
                 .put("decision", item.decision)
                 .put("phase", item.phase.name)
-                .put("updated_at_unix_ms", item.updatedAtUnixMs))
+                .put("updated_at_unix_ms", item.updatedAtUnixMs)
+                .put("operation", item.operation)
+                .put("target", item.target))
         }
         approvalDecisionPrefs.edit().putString("records", array.toString()).apply()
     }
@@ -846,6 +931,7 @@ class JarvisStore(private val app: Context) {
     private companion object {
         const val MAC_API_PROBE_INTERVAL_MS = 15_000L
         const val SUPERVISOR_APPROVAL_POLL_INTERVAL_MS = 15_000L
+        const val SUPERVISOR_DECISION_POLL_INTERVAL_MS = 15_000L
     }
 
     private fun localModelError(failure: Throwable): String = when (failure) {

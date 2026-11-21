@@ -531,7 +531,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             "POST",
             body,
             secureStore.token(),
-            readTimeoutMs = if (decision == "approve" && !continuationObjective.isNullOrBlank()) 180_000 else 25_000,
+            readTimeoutMs = if (decision == "approve" && !continuationObjective.isNullOrBlank()) 960_000 else 25_000,
             allowLocalWifi = true,
         )
         secureStore.clearDecisionIdempotencyKey(approval.id, approval.operationDigest, decision)
