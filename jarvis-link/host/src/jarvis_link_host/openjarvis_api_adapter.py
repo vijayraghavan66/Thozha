@@ -66,7 +66,7 @@ def _verified_development_plan(row: Mapping[str, Any]) -> dict[str, Any]:
         or len(plan["allowed_paths"]) > 24
         or not plan["allowed_ops"]
         or plan["allowed_ops"] != sorted(set(plan["allowed_ops"]))
-        or not set(plan["allowed_ops"]).issubset({"write_file", "run_tests", "artifact_manifest"})
+        or not set(plan["allowed_ops"]).issubset({"write_file", "run_tests", "artifact_manifest", "artifact_export"})
     ):
         raise SupervisorRefused("development approval scope fields are invalid")
     if plan["user_id"] != "device:" + plan["device_id"]:

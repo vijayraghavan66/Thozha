@@ -324,7 +324,7 @@ data class DevelopmentPlanReview(
         private const val MAX_REPAIRS = 5L
         private const val MAX_DURATION_SECONDS = 4L * 60L * 60L
         private const val MAX_TTL_SECONDS = 4L * 60L * 60L
-        private val SUPPORTED_OPS = setOf("write_file", "run_tests", "artifact_manifest")
+        private val SUPPORTED_OPS = setOf("write_file", "run_tests", "artifact_manifest", "artifact_export")
         private val PLAN_KEYS = setOf(
             "plan_id", "device_id", "user_id", "workspace_root", "allowed_ops", "allowed_paths",
             "max_file_bytes", "max_total_bytes", "max_writes", "max_test_runs", "max_repairs",

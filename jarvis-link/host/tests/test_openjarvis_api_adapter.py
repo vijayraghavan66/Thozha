@@ -240,7 +240,7 @@ def test_pending_approval_response_is_reduced_to_encrypted_protocol_fields(tmp_p
 
 def _development_plan_approval_row():
     plan = {
-        "allowed_ops": ["artifact_manifest", "run_tests", "write_file"],
+        "allowed_ops": ["artifact_export", "artifact_manifest", "run_tests", "write_file"],
         "allowed_paths": ["src", "tests"],
         "device_id": "d" * 32,
         "max_duration_s": 900,

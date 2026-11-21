@@ -455,7 +455,7 @@ object CompanionProtocolTest {
 
     private fun developmentPlanApprovalRequiresCompleteDigestBoundDetails() {
         val planFields = linkedMapOf<String, Any>(
-            "allowed_ops" to listOf("artifact_manifest", "run_tests", "write_file"),
+            "allowed_ops" to listOf("artifact_export", "artifact_manifest", "run_tests", "write_file"),
             "allowed_paths" to listOf("src", "tests"),
             "device_id" to "d".repeat(32),
             "max_duration_s" to 900L,
@@ -475,7 +475,7 @@ object CompanionProtocolTest {
             deviceId = "d".repeat(32),
             userId = "device:" + "d".repeat(32),
             workspaceRoot = "/tmp/jarvis-project",
-            allowedOps = listOf("artifact_manifest", "run_tests", "write_file"),
+            allowedOps = listOf("artifact_export", "artifact_manifest", "run_tests", "write_file"),
             allowedPaths = listOf("src", "tests"),
             maxFileBytes = 4096L,
             maxTotalBytes = 8192L,
