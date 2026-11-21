@@ -1601,6 +1601,7 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
     # the approval was created. The subprocess receives a one-call flag only
     # after consume_approval atomically succeeds.
     operation = item["operation"]
+    continuation_result_text = ""
     if operation.startswith(("mcp:jarvis_mac:", "mcp:jarvis_dev:")):
         server = "jarvis_dev" if operation.startswith("mcp:jarvis_dev:") else "jarvis_mac"
         mcp_tool = operation.removeprefix(f"mcp:{server}:")
@@ -1719,7 +1720,7 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
         if is_link_task:
             if continuation_objective:
                 from openjarvis.server.models import ChatCompletionRequest, ChatMessage
-                from openjarvis.server.routes import _run_supervised_agent
+                from openjarvis.server.routes import _response_content, _run_supervised_agent
 
                 follow_up = ChatCompletionRequest(
                     model=getattr(request.app.state, "model", "gpt-6-luna"),
@@ -1741,7 +1742,7 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
                 model = getattr(request.app.state, "model", "") or getattr(agent, "_model", "")
                 if agent is not None and model:
                     try:
-                        await asyncio.to_thread(
+                        continued_result = await asyncio.to_thread(
                             _run_supervised_agent,
                             task_id,
                             None,
@@ -1752,6 +1753,7 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
                             trace_store=getattr(request.app.state, "trace_store", None),
                             bus=getattr(request.app.state, "bus", None),
                         )
+                        continuation_result_text = _response_content(continued_result)
                     except Exception as exc:
                         logger.error("Approved Link task continuation failed (%s)", type(exc).__name__)
                 else:
@@ -1772,18 +1774,39 @@ async def decide(approval_id: str, request: Request) -> dict[str, Any]:
                 store.transition(task_id, "VERIFYING", step="approved_mac_operation")
                 store.transition(task_id, "COMPLETED", evidence={"approved_mac_operation": True})
         current = store.get_task(task_id) or {}
+        response_task_state = current.get("state", "UNKNOWN")
+        response_execution_state = "COMPLETED"
+        response_success = True
+        response_result_text = result_text
+        if is_link_task and continuation_objective:
+            link_run = store.link_task_run(task_id) or {}
+            run_state = link_run.get("status") or response_task_state
+            if run_state == "COMPLETED":
+                response_execution_state = "COMPLETED"
+                response_success = True
+                response_result_text = (
+                    link_run.get("result_text") or link_run.get("result_summary") or continuation_result_text or result_text
+                )
+            elif run_state in {"FAILED", "CANCELLED", "REJECTED"}:
+                response_execution_state = run_state
+                response_success = False
+                response_result_text = link_run.get("last_error") or "The approved task did not complete successfully."
+            else:
+                response_execution_state = "RUNNING" if run_state in {"RUNNING", "CREATED"} else run_state
+                response_success = False
+                response_result_text = continuation_result_text or "The approved operation completed; the task is still running."
         return {
             "status": "CONSUMED",
             "decision": "approve",
             "executed": True,
-            "success": True,
-            "execution_state": "COMPLETED",
+            "success": response_success,
+            "execution_state": response_execution_state,
             "continued": bool(is_link_task and continuation_objective),
-            "task_state": current.get("state", "UNKNOWN"),
+            "task_state": response_task_state,
             "approval_id": approval_id,
             "task_id": task_id,
-            "result_summary": result_text[:1000],
-            "result_text": bounded_result_text(result_text),
+            "result_summary": response_result_text[:1000],
+            "result_text": bounded_result_text(response_result_text),
         }
 
     # Approval authorizes one exact tool call. For standard Jarvis chat tasks,

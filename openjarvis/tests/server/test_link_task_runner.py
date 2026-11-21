@@ -796,7 +796,8 @@ def test_phone_assistant_scope_waits_for_exact_approval_then_continues(link_clie
     assert result.json()["executed"] is True
     assert result.json()["success"] is True
     assert result.json()["execution_state"] == "COMPLETED"
-    assert result.json()["result_summary"] == "Opened TextEdit."
+    assert result.json()["result_summary"] == "TextEdit opened after approval; the task is complete."
+    assert result.json()["result_text"] == "TextEdit opened after approval; the task is complete."
     assert result.json()["task_state"] == "COMPLETED"
     assert len(dispatched) == 1
     assert dispatched[0][:3] == ("open_app", {"name": "TextEdit"}, "control")

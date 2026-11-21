@@ -128,5 +128,7 @@ def test_api_persists_plan_intent_before_consuming_and_continues_task(client, tm
     assert result["success"] is True
     assert result["continued"] is True
     assert result["task_state"] == "COMPLETED"
+    assert result["result_summary"] == "Project completed."
+    assert result["result_text"] == "Project completed."
     assert dispatches and dispatches[0][0] == "approve_plan"
 
