@@ -212,7 +212,11 @@ class JarvisStore(private val app: Context) {
             conversation.filter { row -> shouldReconcileApiTask(row, System.currentTimeMillis()) }.forEach { row ->
                 val id = row["message_id"] as? String ?: return@forEach
                 runCatching { jarvisApi.getLinkTaskStatus(id) }
-                    .onSuccess { result -> runtime.recordLocalTaskResult(id, result.taskId, result.state, result.summary) }
+                    .onSuccess { result ->
+                        if (!runtime.reconcileMissingApiTaskResult(id, result.taskId, result.state, result.summary)) {
+                            runtime.recordLocalTaskResult(id, result.taskId, result.state, result.summary)
+                        }
+                    }
                     .onFailure { failure ->
                         // Preserve an ambiguous in-flight state on transport errors; never report false failure.
                         if (failure is ApiException && failure.statusCode == 404) {
@@ -374,7 +378,12 @@ class JarvisStore(private val app: Context) {
         background(lanes.sync) {
             val result = runCatching { jarvisApi.getLinkTaskStatus(requestId) }
             result.onSuccess { task ->
-                runCatching { LinkService.runtime(app).recordLocalTaskResult(requestId, task.taskId, task.state, task.summary) }
+                runCatching {
+                    val runtime = LinkService.runtime(app)
+                    if (!runtime.reconcileMissingApiTaskResult(requestId, task.taskId, task.state, task.summary)) {
+                        runtime.recordLocalTaskResult(requestId, task.taskId, task.state, task.summary)
+                    }
+                }
             }
             ui {
                 notice = result.fold(
