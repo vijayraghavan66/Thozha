@@ -9,6 +9,7 @@ import androidx.compose.runtime.setValue
 import com.jarvis.companion.presentation.ApprovalDecisionPhase
 import com.jarvis.companion.presentation.ApprovalDecisionPresentation
 import com.jarvis.companion.presentation.ApprovalDecisionStatus
+import com.jarvis.companion.presentation.shouldReconcileApiTask
 import com.jarvis.companion.link.LinkBackgroundSync
 import com.jarvis.companion.link.LinkService
 import com.jarvis.companion.link.LinkSettings
@@ -208,11 +209,7 @@ class JarvisStore(private val app: Context) {
         if (pairedToMac) {
             // Reconcile only requests previously submitted by this phone using their original idempotency keys.
             // A lost HTTP response therefore observes the same task rather than creating a duplicate.
-            conversation.filter { row ->
-                row["transport"] == "api" && (row["state"] as? String) in setOf(
-                    "CREATED", "QUEUED", "RUNNING", "PLANNING", "WAITING_APPROVAL",
-                )
-            }.forEach { row ->
+            conversation.filter(::shouldReconcileApiTask).forEach { row ->
                 val id = row["message_id"] as? String ?: return@forEach
                 runCatching { jarvisApi.getLinkTaskStatus(id) }
                     .onSuccess { result -> runtime.recordLocalTaskResult(id, result.taskId, result.state, result.summary) }

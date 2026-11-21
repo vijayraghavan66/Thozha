@@ -71,6 +71,10 @@ fun main() {
     check(rows.getValue("b").requestId == "b", "rows carry the request id the cancel path uses")
     check(rows.getValue("a").capabilityScope == "development" && rows.getValue("b").capabilityScope.isBlank(), "artifact action scope comes only from the locally recorded task scope")
     check(rows.getValue("b").transport == "api" && rows.getValue("c").transport.isBlank(), "Mac cancellation action is limited to API-owned requests")
+    check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "RUNNING")), "active API tasks continue status reconciliation")
+    check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "The exact approved plan is active. Use capability_id=secret")), "plan issuance text is reconciled against the authoritative final result")
+    check(!shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "Finished normally")), "ordinary completed API tasks are not polled again")
+    check(!shouldReconcileApiTask(mapOf("transport" to "local", "state" to "RUNNING")), "local tasks never call the Mac status endpoint")
     check(TimelinePresentation.sections(emptyList(), fmt).isEmpty(), "no tasks yields the empty state")
     check(TaskStates.toneFor("UNCONFIRMED") == TaskTone.UNKNOWN, "unconfirmed delivery is not presented as success or active execution")
     check(ConversationPresentation.replyFor(

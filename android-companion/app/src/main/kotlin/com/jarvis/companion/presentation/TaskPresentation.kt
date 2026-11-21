@@ -103,6 +103,15 @@ object TimelinePresentation {
     }
 }
 
+/** Refresh unfinished API requests and the one nonterminal approval response that contains only capability issuance. */
+fun shouldReconcileApiTask(record: Map<String, Any?>): Boolean {
+    if (record["transport"] != "api") return false
+    val state = (record["state"] as? String)?.trim()?.uppercase().orEmpty()
+    if (state in setOf("CREATED", "QUEUED", "RUNNING", "PLANNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "SENT", "UNCONFIRMED")) return true
+    val summary = (record["summary"] as? String).orEmpty().trim()
+    return state == "COMPLETED" && summary.startsWith("The exact approved plan is active. Use capability_id=")
+}
+
 enum class ApprovalPhase { PENDING, EXPIRED, APPROVED, REJECTED, CONSUMED, UNKNOWN }
 
 /**
