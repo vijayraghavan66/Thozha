@@ -41,6 +41,7 @@ object CompanionProtocolTest {
         developmentPlanApprovalRequiresCompleteDigestBoundDetails()
         localTaskHistoryIsRestartSafe()
         authenticatedTaskStatusCorrectsOnlyTheLocalMissingRecordMarker()
+        fastReadOnlyApiRequestPersistsItsNoLinkReconciliationPolicy()
         progressSequenceDeduplicatesOutOfOrderEvents()
         staleProgressCannotReopenTerminalTask()
         concurrentLocalStateAndOutbox(hostCertificate, hostRoot, companion, now)
@@ -614,6 +615,30 @@ object CompanionProtocolTest {
         runtime.recordLocalTaskResult(id, "", "FAILED", "An unrelated terminal error.")
         check(!runtime.reconcileMissingApiTaskResult(id, taskId, "COMPLETED", "Stale response"))
         check(runtime.conversation().single()["summary"] == "An unrelated terminal error.")
+        directory.deleteRecursively()
+    }
+
+    private fun fastReadOnlyApiRequestPersistsItsNoLinkReconciliationPolicy() {
+        val directory = java.nio.file.Files.createTempDirectory("jarvis-fast-api-status").toFile()
+        val stateFile = File(directory, "state.json")
+        val runtime = LinkRuntime(
+            keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+            state = FileLinkStateStore(stateFile),
+            storeDir = directory,
+        )
+        val id = "fast-status-request-20261121"
+        runtime.recordLocalTaskRequest(
+            id,
+            "Is my Mac online",
+            transport = "api",
+            lookupLinkStatus = false,
+        )
+        val restored = LinkRuntime(
+            keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+            state = FileLinkStateStore(stateFile),
+            storeDir = directory,
+        )
+        check(restored.conversation().single()["lookup_link_status"] == false)
         directory.deleteRecursively()
     }
 

@@ -334,6 +334,7 @@ class LinkRuntime(
         text: String,
         transport: String = "api",
         capabilityScope: String = "assistant",
+        lookupLinkStatus: Boolean = true,
     ) = synchronized(stateLock) {
         require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid task idempotency key" }
         require(transport in setOf("api", "link", "telegram")) { "invalid conversation transport" }
@@ -350,6 +351,7 @@ class LinkRuntime(
             "task_id" to "",
             "transport" to transport,
             "capability_scope" to capabilityScope,
+            "lookup_link_status" to lookupLinkStatus,
             "updated_at_unix_ms" to now(),
         ))
         save(mapOf("conversation" to entries.takeLast(100)))
