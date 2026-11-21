@@ -121,6 +121,16 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit, onOpenConnection:
     val now = store.now
     val entries = store.entriesInSession()
     val items = remember(entries, now) { ConversationPresentation.items(entries) { clockTime(it) } }
+    val lastApiTerminal = entries.lastOrNull { row ->
+        row["transport"] == "api" && (row["state"] as? String)?.uppercase() in setOf("COMPLETED", "FAILED", "CANCELLED")
+    }
+    LaunchedEffect(lastApiTerminal?.get("message_id"), lastApiTerminal?.get("state")) {
+        val requestId = lastApiTerminal?.get("message_id") as? String
+        val state = lastApiTerminal?.get("state") as? String
+        if (!requestId.isNullOrBlank() && !state.isNullOrBlank()) {
+            PerformanceTrace.mark(PerformanceTrace.requestId(requestId), "compose_terminal_render", detail = "state=${state.uppercase()}")
+        }
+    }
     val connection = MacLinkPresentation.state(
         paired = store.macApiPaired || store.linkStatus?.certificatesVerified == true,
         enrollmentPending = store.linkStatus?.enrollmentPending == true,

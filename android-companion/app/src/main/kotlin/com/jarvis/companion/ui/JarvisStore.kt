@@ -300,13 +300,24 @@ class JarvisStore(private val app: Context) {
     /** Retries queued sends and polls the Mac for updates. Safe to call repeatedly; only one sync runs at a time. */
     fun loadTaskArtifacts(taskId: String) = ui {
         if (!taskId.matches(Regex("[0-9a-f]{32}")) || taskId in artifactLoadingTasks) return@ui
+        val traceId = entries.firstOrNull { it["task_id"] == taskId }
+            ?.get("message_id") as? String
+        val trace = traceId?.let(PerformanceTrace::requestId).orEmpty()
         artifactLoadingTasks = artifactLoadingTasks + taskId
         background(lanes.sync) {
-            val result = runCatching { jarvisApi.getTaskArtifacts(taskId) }
+            val startedNs = System.nanoTime()
+            if (trace.isNotBlank()) PerformanceTrace.mark(trace, "artifact_list_start")
+            val result = runCatching { jarvisApi.getTaskArtifacts(taskId, trace.takeIf { it.isNotBlank() }) }
             ui {
                 artifactLoadingTasks = artifactLoadingTasks - taskId
                 result.onSuccess { artifacts ->
                     taskArtifacts = taskArtifacts + (taskId to artifacts)
+                    if (trace.isNotBlank()) PerformanceTrace.mark(
+                        trace,
+                        "artifact_list_ready",
+                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNs),
+                        "count=${artifacts.size}",
+                    )
                     notice = if (artifacts.isEmpty()) "No downloadable archive is recorded for this completed task."
                     else "${artifacts.size} verified project archive${if (artifacts.size == 1) "" else "s"} available."
                 }.onFailure { failure -> notice = deliveryError(failure) }
@@ -316,9 +327,14 @@ class JarvisStore(private val app: Context) {
 
     fun saveTaskArtifact(artifact: TaskArtifact, destination: android.net.Uri) = ui {
         notice = "Downloading and verifying ${artifact.fileName}…"
+        val requestId = entries.firstOrNull { it["task_id"] == artifact.taskId }
+            ?.get("message_id") as? String
+        val trace = requestId?.let(PerformanceTrace::requestId).orEmpty()
         background(lanes.sync) {
+            val saveStartedNs = System.nanoTime()
+            if (trace.isNotBlank()) PerformanceTrace.mark(trace, "artifact_save_start")
             val result = runCatching {
-                val bytes = jarvisApi.downloadTaskArtifact(artifact)
+                val bytes = jarvisApi.downloadTaskArtifact(artifact, trace.takeIf { it.isNotBlank() })
                 val output = app.contentResolver.openOutputStream(destination, "wt")
                     ?: error("Android could not open the selected save location.")
                 output.use { it.write(bytes) }
@@ -333,6 +349,12 @@ class JarvisStore(private val app: Context) {
                     digest.digest().joinToString("") { "%02x".format(it) }
                 } ?: error("Android could not verify the saved archive.")
                 check(savedDigest == artifact.archiveSha256) { "The saved archive failed its SHA-256 check." }
+                if (trace.isNotBlank()) PerformanceTrace.mark(
+                    trace,
+                    "artifact_document_verified",
+                    java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - saveStartedNs),
+                    "bytes=${bytes.size}",
+                )
                 bytes.size
             }
             ui {
@@ -436,9 +458,9 @@ class JarvisStore(private val app: Context) {
         val usePairedMacApi = hasMacApiPairing() && (
             directReadOnlyCommand || (fastCommand == null && route is RequestRoute.Mac)
         )
-        val requestTrace = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(requestId.toByteArray(Charsets.UTF_8)).take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val requestTrace = PerformanceTrace.requestId(requestId)
         val submitStartedNs = System.nanoTime()
+        PerformanceTrace.mark(requestTrace, "send_pressed", detail = "route=${route.javaClass.simpleName}")
         val transport = when {
             usePairedMacApi -> "api"
             TelegramSession.activeTunnel() != null -> "telegram"
@@ -567,7 +589,18 @@ class JarvisStore(private val app: Context) {
             }
             val runtime = LinkService.runtime(app)
             val capabilityScope = DevelopmentIntentClassifier.capabilityScope(text)
-            if (runCatching { runtime.recordLocalTaskRequest(requestId, text, transport = transport, capabilityScope = capabilityScope) }.isFailure) {
+            val outboxStartedNs = System.nanoTime()
+            PerformanceTrace.mark(requestTrace, "outbox_insert_start")
+            if (runCatching {
+                    runtime.recordLocalTaskRequest(
+                        requestId,
+                        text,
+                        transport = transport,
+                        capabilityScope = capabilityScope,
+                        lookupLinkStatus = !directReadOnlyCommand,
+                    )
+                }.isFailure
+            ) {
                 ui {
                     submitting = false
                     draft = text
@@ -575,20 +608,40 @@ class JarvisStore(private val app: Context) {
                 }
                 return@background
             }
+            PerformanceTrace.mark(
+                requestTrace,
+                "outbox_inserted",
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - outboxStartedNs),
+            )
             // Show the user's bubble as pending now, not after the network call returns.
             refreshLocal()
             if (usePairedMacApi) {
+                val apiStartedNs = System.nanoTime()
+                PerformanceTrace.mark(requestTrace, "mac_api_request_start", detail = "transport=$transport")
                 runCatching {
                     if (directReadOnlyCommand) {
-                        Triple(requestId, "COMPLETED", jarvisApi.getMacSystemInfo())
+                        Triple(requestId, "COMPLETED", jarvisApi.getMacSystemInfo(requestTrace))
                     } else {
-                        val result = jarvisApi.submitLinkTask(text, requestId, capabilityScope)
+                        val result = jarvisApi.submitLinkTask(text, requestId, capabilityScope, requestTrace)
                         Triple(result.taskId, result.state, result.summary)
                     }
                 }
                     .onSuccess { (taskId, state, summary) ->
+                        PerformanceTrace.mark(
+                            requestTrace,
+                            "mac_api_response",
+                            java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - apiStartedNs),
+                            "state=$state",
+                        )
                         secureStore.recordMacConnection("usb")
+                        val resultPersistStartedNs = System.nanoTime()
                         runtime.recordLocalTaskResult(requestId, taskId, state, summary)
+                        PerformanceTrace.mark(
+                            requestTrace,
+                            "result_persisted",
+                            java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - resultPersistStartedNs),
+                            "state=$state",
+                        )
                         ui {
                             macApiLastSyncMs = System.currentTimeMillis()
                             macApiSyncError = ""
@@ -600,11 +653,23 @@ class JarvisStore(private val app: Context) {
                             "JarvisStore",
                             "mac_api_task_result trace=$requestTrace task_id=${taskId.take(8)} state=$state elapsed_ms=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs)}",
                         )
+                        PerformanceTrace.mark(
+                            requestTrace,
+                            "android_result_state_updated",
+                            java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs),
+                            "state=$state",
+                        )
                     }
                     .onFailure { failure ->
                         val unresolved = failure is ApiException && failure.statusCode == null
                         val site = failure.stackTrace.firstOrNull()?.let { "${it.className.substringAfterLast('.')}.${it.methodName}" } ?: "unknown"
                         val status = (failure as? ApiException)?.statusCode
+                        PerformanceTrace.mark(
+                            requestTrace,
+                            "mac_api_failed",
+                            java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - apiStartedNs),
+                            "status=${status ?: 0}",
+                        )
                         android.util.Log.w(
                             "JarvisStore",
                             "mac_api_task_failed trace=$requestTrace type=${failure.javaClass.simpleName} site=$site status=$status elapsed_ms=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs)}",

@@ -5,6 +5,8 @@ import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.URI
 import java.net.URLEncoder
 import java.net.URL
@@ -24,12 +26,13 @@ import com.jarvis.companion.model.PairedDevice
 import com.jarvis.companion.model.TaskDetail
 import com.jarvis.companion.model.TaskEvent
 import com.jarvis.companion.model.TaskArtifact
+import com.jarvis.companion.ui.PerformanceTrace
 import com.jarvis.link.ApprovalReview
 import com.jarvis.link.DevelopmentPlanReview
 
 class JarvisApi(private val context: Context, private val secureStore: SecureStore) {
     /** Fixed read-only status fields from the paired Mac; this is not a shell or general command endpoint. */
-    fun getMacSystemInfo(): String {
+    fun getMacSystemInfo(traceId: String? = null): String {
         val token = secureStore.token()?.takeIf { it.isNotBlank() }
             ?: throw ApiException("This phone is not paired with the Mac. Open Settings and check the connection.", 401)
         val response = request(
@@ -39,6 +42,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             null,
             token,
             allowLocalWifi = true,
+            traceId = traceId,
         )
         if (!response.optBoolean("online", false)) throw ApiException("The Mac did not confirm its online status.")
         val battery = if (response.has("battery_percent") && !response.isNull("battery_percent")) {
@@ -58,6 +62,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         objective: String,
         idempotencyKey: String,
         capabilityScope: String = "assistant",
+        traceId: String? = null,
     ): LinkTaskResult {
         val cleaned = objective.trim()
         if (cleaned.isEmpty() || cleaned.toByteArray(Charsets.UTF_8).size > 4096) {
@@ -80,12 +85,13 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             .put("requester_device_id", requesterDeviceId)
         val json = request(
             requireLoopbackBaseUrl(),
-            "/v1/jarvis/link/tasks",
+            "/v1/jarvis/link/tasks?mode=async",
             "POST",
             body,
             token,
             readTimeoutMs = 180_000,
             allowLocalWifi = true,
+            traceId = traceId,
         )
         return parseLinkTaskResult(json)
     }
@@ -516,13 +522,14 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
     }
 
     /** Lists only archives already associated with this authenticated device's completed task. */
-    fun getTaskArtifacts(taskId: String): List<TaskArtifact> {
+    fun getTaskArtifacts(taskId: String, traceId: String? = null): List<TaskArtifact> {
         require(taskId.matches(Regex("[0-9a-f]{32}")))
         val token = secureStore.token()?.takeIf { it.isNotBlank() }
             ?: throw ApiException("This phone is not paired with the Mac.", 401)
         val json = request(
             requireBaseUrl(), "/v1/jarvis/tasks/${pathSegment(taskId)}/artifacts", "GET", null,
             token, connectTimeoutMs = 10_000, readTimeoutMs = 25_000, allowLocalWifi = true,
+            traceId = traceId,
         )
         return json.requiredArrayOf("artifacts").map { item ->
             val artifactId = item.requiredString("artifact_id")
@@ -545,7 +552,9 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
     }
 
     /** Downloads an archive with the paired TLS identity, then verifies size and SHA-256 before returning bytes. */
-    fun downloadTaskArtifact(artifact: TaskArtifact): ByteArray {
+    fun downloadTaskArtifact(artifact: TaskArtifact, traceId: String? = null): ByteArray {
+        val startedNs = System.nanoTime()
+        traceId?.let { PerformanceTrace.mark(it, "artifact_download_start") }
         require(artifact.taskId.matches(Regex("[0-9a-f]{32}")))
         require(artifact.artifactId.matches(Regex("[0-9a-f]{64}")))
         require(artifact.sizeBytes in 1..5_242_880)
@@ -553,7 +562,10 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             ?: throw ApiException("This phone is not paired with the Mac.", 401)
         val base = requireBaseUrl()
         val wifiPin = runCatching { secureStore.localGatewayPin() }.getOrNull()
-        val wifiEndpoint = wifiPin?.let { LocalGatewayDiscovery.discover(context, it) }
+        val wifiEndpoint = wifiPin?.let { pin ->
+            if (loopbackEndpointReachable(base)) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
+            else LocalGatewayDiscovery.discoverOrWait(context, pin)
+        }
         val effectiveBase = if (wifiEndpoint != null) "https://${wifiEndpoint.hostname}:${wifiEndpoint.port}" else base
         val connection = (URL(effectiveBase + artifact.downloadPath).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -562,6 +574,9 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             readTimeout = 60_000
             setRequestProperty("Accept", "application/zip")
             setRequestProperty("X-Jarvis-Client", "android-companion/0.1")
+            if (traceId != null && traceId.matches(Regex("[0-9a-f]{12}"))) {
+                setRequestProperty("X-Jarvis-Trace-ID", traceId)
+            }
             setRequestProperty("Authorization", "Bearer $token")
         }
         if (wifiPin != null && wifiEndpoint != null) {
@@ -581,6 +596,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             }
             val declaredLength = connection.contentLengthLong
             if (declaredLength != artifact.sizeBytes) throw ApiException("The project archive size did not match its listing.")
+            val transferStartedNs = System.nanoTime()
             val data = connection.inputStream.use { input ->
                 val output = java.io.ByteArrayOutputStream(artifact.sizeBytes.toInt())
                 val buffer = ByteArray(32 * 1024)
@@ -598,12 +614,18 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             if (data.size.toLong() != artifact.sizeBytes || digest != artifact.archiveSha256) {
                 throw ApiException("The downloaded project archive failed its SHA-256 check.")
             }
+            traceId?.let {
+                PerformanceTrace.mark(it, "artifact_download_verified", java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - transferStartedNs), "bytes=${data.size}")
+            }
             return data
         } catch (error: ApiException) {
             throw error
         } catch (error: Exception) {
             throw ApiException(error.message ?: "The project archive could not be downloaded safely.")
         } finally {
+            traceId?.let {
+                PerformanceTrace.mark(it, "artifact_download_finished", java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNs))
+            }
             connection.disconnect()
         }
     }
@@ -676,6 +698,17 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         return normalized == "localhost" || normalized == "127.0.0.1"
     }
 
+    /** Detect the already-forwarded USB endpoint quickly so optional Wi-Fi discovery stays off the hot path. */
+    private fun loopbackEndpointReachable(base: String): Boolean = runCatching {
+        val uri = URI(base)
+        if (!isLoopbackHost(uri.host.orEmpty())) return false
+        val port = uri.port.takeIf { it in 1..65535 } ?: if (uri.scheme.equals("https", ignoreCase = true)) 443 else 80
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(uri.host, port), 120)
+            true
+        }
+    }.getOrDefault(false)
+
     private fun pathSegment(value: String): String = URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 
     private fun request(
@@ -687,11 +720,26 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         connectTimeoutMs: Int = 10_000,
         readTimeoutMs: Int = 25_000,
         allowLocalWifi: Boolean = false,
+        traceId: String? = null,
     ): JSONObject {
+        val requestStartedNs = System.nanoTime()
         val wifiPin = if (allowLocalWifi && !token.isNullOrBlank()) {
             runCatching { secureStore.localGatewayPin() }.getOrNull()
         } else null
-        val wifiEndpoint = wifiPin?.let { LocalGatewayDiscovery.discover(context, it) }
+        val discoveryStartedNs = System.nanoTime()
+        val loopbackReady = wifiPin != null && loopbackEndpointReachable(base)
+        val wifiEndpoint = wifiPin?.let { pin ->
+            if (loopbackReady) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
+            else LocalGatewayDiscovery.discoverOrWait(context, pin)
+        }
+        if (traceId != null) {
+            PerformanceTrace.mark(
+                traceId,
+                "gateway_discovery_checked",
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - discoveryStartedNs),
+                "wifi_cached=${wifiEndpoint != null}",
+            )
+        }
         val effectiveBase = if (wifiEndpoint != null) "https://${wifiEndpoint.hostname}:${wifiEndpoint.port}" else base
         val connection = (URL(effectiveBase + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
@@ -700,6 +748,9 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             readTimeout = readTimeoutMs
             setRequestProperty("Accept", "application/json")
             setRequestProperty("X-Jarvis-Client", "android-companion/0.1")
+            if (traceId != null && traceId.matches(Regex("[0-9a-f]{12}"))) {
+                setRequestProperty("X-Jarvis-Trace-ID", traceId)
+            }
             if (body != null) {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
@@ -716,6 +767,24 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             val status = connection.responseCode
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (traceId != null && traceId.matches(Regex("[0-9a-f]{12}"))) {
+                val serverTrace = connection.getHeaderField("X-Jarvis-Trace-ID")
+                if (serverTrace == traceId) {
+                    val backendMs = connection.getHeaderField("X-Jarvis-Backend-Duration-Ms")?.toDoubleOrNull()
+                    val serverWallMs = connection.getHeaderField("X-Jarvis-Server-Wall-Ms")?.toLongOrNull()
+                    val detail = listOfNotNull(
+                        "status=$status",
+                        backendMs?.let { "backend_ms=${"%.3f".format(java.util.Locale.US, it)}" },
+                        serverWallMs?.let { "server_wall_ms=$it" },
+                    ).joinToString(",")
+                    PerformanceTrace.mark(
+                        traceId,
+                        "http_response_received",
+                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - requestStartedNs),
+                        detail,
+                    )
+                }
+            }
             if (status in 300..399) throw ApiException("The server redirected this request. Check the private HTTPS URL.", status)
             if (status !in 200..299) {
                 val message = runCatching {

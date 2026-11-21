@@ -106,6 +106,7 @@ object TimelinePresentation {
 /** Refresh unfinished API requests and the one nonterminal approval response that contains only capability issuance. */
 fun shouldReconcileApiTask(record: Map<String, Any?>, nowMs: Long = System.currentTimeMillis()): Boolean {
     if (record["transport"] != "api") return false
+    if (record["lookup_link_status"] == false) return false
     val state = (record["state"] as? String)?.trim()?.uppercase().orEmpty()
     if (state in setOf("CREATED", "QUEUED", "RUNNING", "PLANNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "SENT", "UNCONFIRMED")) return true
     val summary = (record["summary"] as? String).orEmpty().trim()

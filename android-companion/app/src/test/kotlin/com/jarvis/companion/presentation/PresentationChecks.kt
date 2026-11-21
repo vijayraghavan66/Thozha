@@ -72,6 +72,7 @@ fun main() {
     check(rows.getValue("a").capabilityScope == "development" && rows.getValue("b").capabilityScope.isBlank(), "artifact action scope comes only from the locally recorded task scope")
     check(rows.getValue("b").transport == "api" && rows.getValue("c").transport.isBlank(), "Mac cancellation action is limited to API-owned requests")
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "RUNNING")), "active API tasks continue status reconciliation")
+    check(!shouldReconcileApiTask(mapOf("transport" to "api", "lookup_link_status" to false, "state" to "RUNNING")), "typed fast commands do not query the Link task-status endpoint")
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "The exact approved plan is active. Use capability_id=secret")), "plan issuance text is reconciled against the authoritative final result")
     check(!shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "Finished normally")), "ordinary completed API tasks are not polled again")
     check(!shouldReconcileApiTask(mapOf("transport" to "local", "state" to "RUNNING")), "local tasks never call the Mac status endpoint")
