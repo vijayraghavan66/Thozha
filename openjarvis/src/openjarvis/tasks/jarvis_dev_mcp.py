@@ -16,6 +16,7 @@ import os
 import pwd
 import re
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -147,7 +148,11 @@ def _workspace() -> Any:
     task_id = os.environ.get("JARVIS_SUPERVISOR_TASK_ID", "")
     return RemoteWorkspace(
         config.workspace_root,
-        RemoteMcpWorkerClient(config, task_id=task_id),
+        RemoteMcpWorkerClient(
+            config,
+            task_id=task_id,
+            trace_id=os.environ.get("JARVIS_PERF_TRACE_ID"),
+        ),
     )
 
 
@@ -383,12 +388,14 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
                     capability_id, op_id=uuid.uuid4().hex, rel_path=path, content=content,
                 )
                 _record_task_event("development.operation_started", {"operation": "write_file"})
+                write_started_ns = time.perf_counter_ns()
                 receipt = workspace.write_text(path, content)
             except CapabilityError as exc:
                 return _text(f"Development capability refused this write ({exc.code}).", True)
             _record_task_event("development.file_written", {
                 "path": path, "bytes": receipt["bytes"], "sha256": receipt["sha256"],
                 "plan_target": authorization["target"],
+                "duration_ms": round((time.perf_counter_ns() - write_started_ns) / 1_000_000, 3),
             })
             _audit("capability_write", path=path, bytes=receipt["bytes"], sha256=receipt["sha256"])
             return _text(f"Wrote {receipt['path']} ({receipt['bytes']} bytes, sha256 {receipt['sha256'][:12]}).")
@@ -506,6 +513,7 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             return _text("A capability ID and explicit relative artifact paths are required.", True)
         if not getattr(workspace, "is_remote", False):
             return _text("Artifact delivery is available only from the isolated VM workspace.", True)
+        export_started_ns = time.perf_counter_ns()
         _record_task_event("development.artifact_export_started", {"files_requested": len(paths)})
         try:
             export = adapter.artifact_export(
@@ -526,6 +534,7 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         _record_task_event("development.artifact_export_completed", {
             "artifact_id": artifact.artifact_id, "archive_sha256": artifact.archive_sha256,
             "size_bytes": artifact.size_bytes, "manifest_sha256": artifact.manifest_sha256,
+            "duration_ms": round((time.perf_counter_ns() - export_started_ns) / 1_000_000, 3),
         })
         return _text(json.dumps(artifact.to_wire(), ensure_ascii=False, separators=(",", ":")))
     return _text(f"Unknown tool: {name}", True)
@@ -545,6 +554,8 @@ def handle(message: dict[str, Any]):
     if method == "tools/call":
         params = message.get("params") or {}
         tool_name = str(params.get("name", "")) if isinstance(params, dict) else ""
+        operation_started_ns = time.perf_counter_ns()
+        safe_tool_name = tool_name if tool_name in {tool.get("name") for tool in TOOLS} else "unknown"
         try:
             _bound_task()
             result = call_tool(tool_name, params.get("arguments") or {})
@@ -568,6 +579,15 @@ def handle(message: dict[str, Any]):
             except Exception:
                 pass
             result = _text(f"Development tool failed: {type(exc).__name__}", True)
+        try:
+            _record_task_event("development.tool_performance", {
+                "tool": safe_tool_name,
+                "duration_ms": round((time.perf_counter_ns() - operation_started_ns) / 1_000_000, 3),
+                "success": not bool(result.get("isError")),
+                "remote_worker": os.environ.get("JARVIS_DEV_EXECUTION_MODE") == "vm",
+            })
+        except Exception:
+            pass
         return {"jsonrpc": "2.0", "id": rid, "result": result}
     if rid is not None:
         return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Method not found: {method}"}}

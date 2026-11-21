@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from threading import Event
+from openjarvis.server.performance import PERF_LOGGER
 
 PROTOCOL = "2025-03-26"
 DEFAULT_WORKSPACE = "/Users/REDACTED/Documents/Jarvis-Lab/agent-evaluation/taskflow"
@@ -142,6 +143,7 @@ class RemoteMcpWorkerClient:
         runner: Callable[..., Any] | None = None,
         process_factory: Callable[..., Any] = subprocess.Popen,
         task_id: str,
+        trace_id: str | None = None,
     ):
         if not re.fullmatch(r"[0-9a-f]{32}", task_id):
             raise RemoteWorkerError("VM worker requires a supervisor-bound task ID")
@@ -149,6 +151,7 @@ class RemoteMcpWorkerClient:
         self.runner = runner
         self.process_factory = process_factory
         self.task_id = task_id
+        self.trace_id = trace_id if isinstance(trace_id, str) and re.fullmatch(r"[0-9a-f]{12}", trace_id) else hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:12]
 
     def call_tool(
         self,
@@ -158,6 +161,12 @@ class RemoteMcpWorkerClient:
         timeout_s: int = 60,
         cancel_event: Event | None = None,
     ) -> dict[str, Any]:
+        call_started_ns = time.perf_counter_ns()
+        safe_name = name if isinstance(name, str) and re.fullmatch(r"[a-z_]{1,40}", name) else "invalid"
+        PERF_LOGGER.info(
+            "perf trace=%s event=vm_rpc_started wall_ms=%d mono_ns=%d task_id=%s operation=%s",
+            self.trace_id, int(time.time() * 1000), call_started_ns, self.task_id[:8], safe_name,
+        )
         if name not in {
             "list_project_files",
             "read_project_file",
@@ -398,6 +407,15 @@ class RemoteMcpWorkerClient:
         structured = result.get("structuredContent")
         if not isinstance(structured, dict):
             raise RemoteWorkerError("isolated worker response was malformed")
+        PERF_LOGGER.info(
+            "perf trace=%s event=vm_rpc_completed wall_ms=%d mono_ns=%d elapsed_ms=%.3f task_id=%s operation=%s",
+            self.trace_id,
+            int(time.time() * 1000),
+            time.perf_counter_ns(),
+            (time.perf_counter_ns() - call_started_ns) / 1_000_000,
+            self.task_id[:8],
+            safe_name,
+        )
         return structured
 
     def _stop_guest_unit(self, unit: str) -> None:

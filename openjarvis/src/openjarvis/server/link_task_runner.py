@@ -11,9 +11,27 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
+import traceback
 from typing import Any
 
+from openjarvis.server.performance import PERF_LOGGER
+
 logger = logging.getLogger(__name__)
+
+
+def _perf(trace: str, event: str, started_ns: int | None = None, **fields: Any) -> None:
+    elapsed = "" if started_ns is None else f" elapsed_ms={(time.perf_counter_ns() - started_ns) / 1_000_000:.3f}"
+    safe = " ".join(
+        f"{key}={str(value)[:80]}"
+        for key, value in fields.items()
+        if key in {"task_id", "state", "scope"} and isinstance(value, (str, int, bool))
+    )
+    PERF_LOGGER.info(
+        "perf trace=%s event=%s wall_ms=%d mono_ns=%d%s%s",
+        trace, event, int(time.time() * 1000), time.perf_counter_ns(), elapsed,
+        (" " + safe) if safe else "",
+    )
 
 
 class LinkTaskExecutionRunner:
@@ -88,6 +106,9 @@ class LinkTaskExecutionRunner:
         task_id = str(row["task_id"])
         objective = row.get("objective_text")
         idempotency_key = row.get("idempotency_key")
+        trace = hashlib.sha256(str(idempotency_key or task_id).encode("utf-8")).hexdigest()[:12]
+        started_ns = time.perf_counter_ns()
+        _perf(trace, "runner_claim_started", started_ns, task_id=task_id[:8])
         objective_digest = row.get("objective_digest")
         claimed = False
         try:
@@ -109,8 +130,10 @@ class LinkTaskExecutionRunner:
                 idempotency_key=idempotency_key,
             )
             if claim_result.get("replay"):
+                _perf(trace, "runner_duplicate_claim_ignored", started_ns, task_id=task_id[:8])
                 return
             claimed = True
+            _perf(trace, "runner_claimed", started_ns, task_id=task_id[:8], scope=scope[0] if scope else "")
             agent = getattr(self.app.state, "agent", None)
             model = getattr(self.app.state, "model", "") or getattr(agent, "_model", "")
             if agent is None or not model:
@@ -120,6 +143,8 @@ class LinkTaskExecutionRunner:
                 messages=[ChatMessage(role="user", content=objective.strip())],
                 stream=False,
             )
+            model_started_ns = time.perf_counter_ns()
+            _perf(trace, "agent_execution_started", model_started_ns, task_id=task_id[:8])
             await asyncio.to_thread(
                 _run_supervised_agent,
                 task_id,
@@ -131,14 +156,23 @@ class LinkTaskExecutionRunner:
                 trace_store=getattr(self.app.state, "trace_store", None),
                 bus=getattr(self.app.state, "bus", None),
             )
+            _perf(trace, "agent_execution_returned", model_started_ns, task_id=task_id[:8])
             current = self.store.get_task(task_id) or {}
             if current.get("state") == "WAITING_APPROVAL":
                 pending = [item for item in self.store.pending_approvals(100) if item.get("task_id") == task_id]
                 run = self.store.link_task_run(task_id) or {}
                 if pending and run.get("status") != "WAITING_APPROVAL":
                     self.store.mark_link_task_waiting_approval(task_id, pending[-1]["id"])
+            _perf(trace, "runner_task_state", started_ns, task_id=task_id[:8], state=str(current.get("state") or "UNKNOWN"))
         except Exception as exc:
-            logger.error("Link task execution failed task=%s error=%s", task_id, type(exc).__name__)
+            frames = ",".join(
+                f"{frame.name}:{frame.lineno}"
+                for frame in traceback.extract_tb(exc.__traceback__)[-6:]
+            )
+            logger.error(
+                "Link task execution failed task=%s error=%s frames=%s",
+                task_id[:8], type(exc).__name__, frames[:360],
+            )
             run = self.store.link_task_run(task_id) or {}
             if not claimed and run.get("status") == "CREATED":
                 try:

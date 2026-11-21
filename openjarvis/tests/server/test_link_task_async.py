@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+import hashlib
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -79,9 +80,19 @@ def test_async_acceptance_is_fast_concurrent_and_duplicate_safe(tmp_path, monkey
             first = client.post("/v1/jarvis/link/tasks?mode=async", headers=headers,
                                 json=_body("async-concurrent-request-0001"))
             assert first.status_code == 202
+            expected_trace = hashlib.sha256(b"async-concurrent-request-0001").hexdigest()[:12]
+            assert first.headers["X-Jarvis-Trace-ID"] == expected_trace
+            assert float(first.headers["X-Jarvis-Backend-Duration-Ms"]) >= 0
+            assert first.headers["X-Jarvis-Server-Wall-Ms"].isdigit()
             first_task = first.json()["task_id"]
             assert time.monotonic() - started < 0.5
             assert agent.started.wait(timeout=2)
+            progress = client.get(
+                "/v1/jarvis/link/tasks/async-concurrent-request-0001",
+                headers=headers,
+            ).json()
+            assert progress["state"] == "RUNNING"
+            assert progress["summary"] == "The assistant is working on the task."
 
             second = client.post("/v1/jarvis/link/tasks?mode=async", headers=headers,
                                  json=_body("async-concurrent-request-0002"))

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,8 @@ from openjarvis.security.mac_mcp_policy import (
     open_app_mcp_enabled,
     record_open_app_event,
 )
+from openjarvis.server.performance import PERF_LOGGER
+
 
 MODEL = "gpt-6-luna"
 CODEX_HOME = Path.home() / ".openjarvis" / "codex-home"
@@ -542,6 +546,23 @@ class CodexSDKEngine(InferenceEngine):
         max_tokens: int = 1024,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        started_ns = time.perf_counter_ns()
+        task_id = ""
+        trace_id = "unlinked"
+        try:
+            from openjarvis.tasks.supervisor import current_task_context, get_supervisor_store
+
+            task_context = current_task_context()
+            if task_context is not None:
+                task_id = task_context.task_id
+                link_run = get_supervisor_store().link_task_run(task_id) or {}
+                idempotency_key = link_run.get("idempotency_key")
+                if isinstance(idempotency_key, str) and idempotency_key:
+                    trace_id = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:12]
+                else:
+                    trace_id = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:12]
+        except Exception:
+            pass
         if model != MODEL:
             raise EngineConnectionError(f"Codex SDK engine only serves {MODEL}.")
         try:
@@ -555,16 +576,27 @@ class CodexSDKEngine(InferenceEngine):
         mode = _desktop_mode_for_current_task()
         CODEX_HOME.mkdir(parents=True, exist_ok=True)
         config = CodexConfig(
-            env={"CODEX_HOME": str(CODEX_HOME)},
+            env={"CODEX_HOME": str(CODEX_HOME), "JARVIS_PERF_TRACE_ID": trace_id},
             config_overrides=_config_overrides(mode),
             cwd=_working_directory_for_current_task(),
         )
         prompt = _serialize_messages(message_list)
+        PERF_LOGGER.info(
+            "perf trace=%s event=model_request_started wall_ms=%d mono_ns=%d task_id=%s message_count=%d prompt_chars=%d model=%s",
+            trace_id,
+            int(time.time() * 1000),
+            started_ns,
+            task_id[:8] or "none",
+            len(message_list),
+            len(prompt),
+            MODEL,
+        )
         try:
             with Codex(config=config) as codex:
                 # Replace the SDK's default server-request handler so this
                 # bridge never silently approves shell or file-change requests.
                 codex._client._approval_handler = _approval_handler(mode)
+                thread_start_ns = time.perf_counter_ns()
                 thread = codex.thread_start(
                     model=MODEL,
                     approval_mode=ApprovalMode.auto_review,
@@ -573,6 +605,12 @@ class CodexSDKEngine(InferenceEngine):
                     cwd=_working_directory_for_current_task(),
                     base_instructions=_INSTRUCTIONS,
                 )
+                PERF_LOGGER.info(
+                    "perf trace=%s event=model_thread_ready wall_ms=%d mono_ns=%d elapsed_ms=%.3f task_id=%s",
+                    trace_id, int(time.time() * 1000), time.perf_counter_ns(),
+                    (time.perf_counter_ns() - thread_start_ns) / 1_000_000, task_id[:8] or "none",
+                )
+                turn_started_ns = time.perf_counter_ns()
                 result = thread.run(
                     prompt,
                     model=MODEL,
@@ -580,7 +618,17 @@ class CodexSDKEngine(InferenceEngine):
                     approval_mode=ApprovalMode.auto_review,
                     sandbox=Sandbox.read_only,
                 )
+                PERF_LOGGER.info(
+                    "perf trace=%s event=model_turn_completed wall_ms=%d mono_ns=%d elapsed_ms=%.3f task_id=%s",
+                    trace_id, int(time.time() * 1000), time.perf_counter_ns(),
+                    (time.perf_counter_ns() - turn_started_ns) / 1_000_000, task_id[:8] or "none",
+                )
         except Exception as exc:  # noqa: BLE001
+            PERF_LOGGER.warning(
+                "perf trace=%s event=model_turn_failed wall_ms=%d mono_ns=%d elapsed_ms=%.3f task_id=%s error_type=%s",
+                trace_id, int(time.time() * 1000), time.perf_counter_ns(),
+                (time.perf_counter_ns() - started_ns) / 1_000_000, task_id[:8] or "none", type(exc).__name__,
+            )
             raise EngineConnectionError(f"Codex turn failed: {type(exc).__name__}: {exc}") from exc
 
         usage = getattr(result, "usage", None)
@@ -590,6 +638,12 @@ class CodexSDKEngine(InferenceEngine):
                 "prompt_tokens": getattr(usage, "input_tokens", 0),
                 "completion_tokens": getattr(usage, "output_tokens", 0),
             }
+        PERF_LOGGER.info(
+            "perf trace=%s event=model_response_ready wall_ms=%d mono_ns=%d elapsed_ms=%.3f task_id=%s prompt_tokens=%d completion_tokens=%d",
+            trace_id, int(time.time() * 1000), time.perf_counter_ns(),
+            (time.perf_counter_ns() - started_ns) / 1_000_000, task_id[:8] or "none",
+            int(usage_dict.get("prompt_tokens", 0)), int(usage_dict.get("completion_tokens", 0)),
+        )
         return {"content": result.final_response or "", "usage": usage_dict, "model": MODEL}
 
     async def stream(self, messages, *, model: str = MODEL, temperature: float = 0.7, max_tokens: int = 1024, **kwargs: Any):

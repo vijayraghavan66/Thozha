@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from openjarvis.server.fcm_notifications import FCMRegistrationStore
+from openjarvis.server.performance import PERF_LOGGER
 from openjarvis.tasks.supervisor import LINK_SCOPE_CAPABILITIES, bounded_result_text, get_supervisor_store, utc_now
 
 router = APIRouter(prefix="/v1/jarvis", tags=["jarvis-supervisor"])
@@ -36,6 +37,107 @@ def _artifact_store():
 
         _ARTIFACT_STORE = ArtifactStore()
     return _ARTIFACT_STORE
+
+
+def _perf_trace_id(request: Request, seed: str = "") -> str:
+    """Use the phone's content-free request hash, or derive the same hash from its idempotency key."""
+    header = request.headers.get("x-jarvis-trace-id", "")
+    if seed:
+        derived = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+        if re.fullmatch(r"[0-9a-f]{12}", header) and not hmac.compare_digest(header, derived):
+            return derived
+        return derived
+    return header if re.fullmatch(r"[0-9a-f]{12}", header) else "unlinked"
+
+
+def _perf_log(trace: str, event: str, started_ns: int | None = None, **fields: Any) -> None:
+    """Emit timing metadata only; never include request, prompt, result, or credential data."""
+    elapsed = ""
+    if started_ns is not None:
+        elapsed = f" elapsed_ms={(time.perf_counter_ns() - started_ns) / 1_000_000:.3f}"
+    allowed = {"task_id", "route", "mode", "state", "scope", "status", "component", "operation", "count"}
+    extras = []
+    for key, value in fields.items():
+        if key not in allowed or not isinstance(value, (str, int, bool)):
+            continue
+        cleaned = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(value))[:80]
+        extras.append(f"{key}={cleaned}")
+    PERF_LOGGER.info(
+        "perf trace=%s event=%s wall_ms=%d mono_ns=%d%s%s",
+        trace,
+        re.sub(r"[^A-Za-z0-9_]", "_", event)[:48],
+        int(time.time() * 1000),
+        time.perf_counter_ns(),
+        elapsed,
+        (" " + " ".join(extras)) if extras else "",
+    )
+
+
+def _attach_perf_headers(response: Response, trace: str, started_ns: int) -> Response:
+    """Return content-free process timing for a caller's trace; never exposes tool/prompt data."""
+    response.headers["X-Jarvis-Trace-ID"] = trace
+    response.headers["X-Jarvis-Backend-Duration-Ms"] = f"{(time.perf_counter_ns() - started_ns) / 1_000_000:.3f}"
+    response.headers["X-Jarvis-Server-Wall-Ms"] = str(int(time.time() * 1000))
+    response.headers["X-Jarvis-Server-Mono-Ns"] = str(time.perf_counter_ns())
+    return response
+
+
+def _link_task_progress_summary(store: Any, task_id: str, state: str, task: dict[str, Any]) -> str:
+    """Project durable, allowlisted supervisor events into a small honest phone status string."""
+    if state != "RUNNING":
+        step = str(task.get("current_step") or "").lower()
+        if state == "CREATED":
+            return "Queued for execution."
+        if state == "PLANNING":
+            return "Preparing the task."
+        if state == "VERIFYING":
+            return "Checking the result."
+        if state == "WAITING_APPROVAL":
+            return "Waiting for your approval."
+        if state == "CANCELLED":
+            return "Task cancelled. The Mac will not continue this request."
+        if state == "FAILED":
+            return "The task failed before completion."
+        return {
+            "approval": "Preparing an approval request.",
+            "approved_operation": "Continuing within the approved plan.",
+        }.get(step, "")
+
+    try:
+        events = store.events_after(task_id, 0, 200)
+    except Exception:
+        events = []
+    for event in reversed(events):
+        kind = event.get("event_type")
+        payload = event.get("payload") or {}
+        if kind == "development.artifact_export_completed":
+            return "The approved archive is ready."
+        if kind == "development.artifact_export_started":
+            return "Packaging the approved project files."
+        if kind == "development.tests_completed":
+            count = payload.get("tests_ran")
+            failures = payload.get("failures", 0)
+            errors = payload.get("errors", 0)
+            if isinstance(count, int) and isinstance(failures, int) and isinstance(errors, int):
+                return f"Tests completed: {count} run, {failures + errors} failures."
+            return "The approved test run completed."
+        if kind == "development.operation_started":
+            operation = payload.get("operation")
+            return {
+                "write_file": "Writing an approved project file.",
+                "run_tests": "Running the approved test suite.",
+                "artifact_manifest": "Collecting the approved project manifest.",
+                "artifact_export": "Preparing the approved project archive.",
+            }.get(operation, "Running an approved project operation.")
+        if kind == "development.file_written":
+            return "An approved project file was written."
+        if kind == "development.execution_context_verified":
+            return "The isolated Linux worker was verified."
+        if kind == "approval.consumed":
+            return "Approval was recorded; the task is resuming."
+        if kind == "link_task.started":
+            return "The assistant is working on the task."
+    return "Working on the task."
 
 
 def _require_owned_completed_development_task(task_id: str, device_id: str) -> None:
@@ -499,8 +601,13 @@ async def revoke_fcm_token(request: Request) -> dict[str, str]:
 @router.post("/link/tasks")
 async def run_link_task(request: Request) -> JSONResponse:
     """Create/execute one authenticated, loopback-only, supervisor-gated Codex task."""
+    route_started_ns = time.perf_counter_ns()
+    trace = _perf_trace_id(request)
+    _perf_log(trace, "backend_receive", route_started_ns, route="link_task")
     _require_loopback(request)
+    auth_started_ns = time.perf_counter_ns()
     actor = authorize_supervisor_request(request)
+    _perf_log(trace, "authentication_complete", auth_started_ns, route="link_task")
     mode = request.query_params.get("mode", "")
     if mode not in {"", "async"}:
         raise HTTPException(status_code=422, detail="mode must be async when supplied")
@@ -532,6 +639,8 @@ async def run_link_task(request: Request) -> JSONResponse:
         raise HTTPException(status_code=403, detail="Only read_only or supervisor-gated assistant scope is enabled")
     if not isinstance(idempotency_key, str):
         raise HTTPException(status_code=422, detail="idempotency_key is required")
+    trace = _perf_trace_id(request, idempotency_key)
+    _perf_log(trace, "routing_validated", route_started_ns, route="link_task", mode=mode)
     if not isinstance(requester_device_id, str) or not re.fullmatch(
         r"[0-9a-f]{32}", requester_device_id,
     ):
@@ -556,6 +665,7 @@ async def run_link_task(request: Request) -> JSONResponse:
         raise HTTPException(status_code=503, detail="Link task runner requires the configured Codex SDK engine")
 
     store = get_supervisor_store()
+    persist_started_ns = time.perf_counter_ns()
     try:
         run = store.create_link_task(
             objective,
@@ -568,24 +678,33 @@ async def run_link_task(request: Request) -> JSONResponse:
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     task_id = run.get("task_id")
+    _perf_log(
+        trace,
+        "task_record_persisted",
+        persist_started_ns,
+        task_id=str(task_id or "")[:8],
+        state=str(run.get("status") or "CREATED"),
+    )
     if not run.get("created"):
         status = run.get("status")
         if status == "COMPLETED":
-            return JSONResponse({
+            response = JSONResponse({
                 "task_id": task_id,
                 "state": "COMPLETED",
                 "summary": run.get("result_summary") or "",
                 "result_digest": run.get("result_digest"),
                 "idempotent_replay": True,
             })
+            return _attach_perf_headers(response, trace, route_started_ns)
         if status in {"RUNNING", "WAITING_APPROVAL"}:
             task = store.get_task(task_id) or {}
-            return JSONResponse(status_code=202, content={
+            response = JSONResponse(status_code=202, content={
                 "task_id": task_id,
                 "state": task.get("state", status),
                 "summary": "Waiting for your approval to continue." if status == "WAITING_APPROVAL" else "",
                 "idempotent_replay": True,
             })
+            return _attach_perf_headers(response, trace, route_started_ns)
         if mode == "async" and status == "CREATED":
             task = store.get_task(task_id) or {}
             if task.get("state") == "CREATED":
@@ -595,12 +714,13 @@ async def run_link_task(request: Request) -> JSONResponse:
                         detail="This queued task predates durable prompt storage; resubmit it with a new request ID",
                     )
                 task_runner.wake()
-                return JSONResponse(status_code=202, content={
+                response = JSONResponse(status_code=202, content={
                     "task_id": task_id,
                     "state": "CREATED",
                     "summary": "Queued for execution.",
                     "idempotent_replay": True,
                 })
+                return _attach_perf_headers(response, trace, route_started_ns)
         if status == "FAILED":
             raise HTTPException(status_code=409, detail="This Link task already failed; create a new idempotency key")
         if status == "REJECTED":
@@ -613,12 +733,14 @@ async def run_link_task(request: Request) -> JSONResponse:
         # the runner is woken. The worker, not this HTTP request, atomically
         # claims and executes the task.
         task_runner.wake()
-        return JSONResponse(status_code=202, content={
+        _perf_log(trace, "task_accepted", route_started_ns, task_id=str(task_id or "")[:8], state="CREATED", mode="async")
+        response = JSONResponse(status_code=202, content={
             "task_id": task_id,
             "state": "CREATED",
             "summary": "Queued for execution.",
             "idempotent_replay": False,
         })
+        return _attach_perf_headers(response, trace, route_started_ns)
 
     objective_digest = hashlib.sha256(objective.strip().encode("utf-8")).hexdigest()
     try:
@@ -641,6 +763,8 @@ async def run_link_task(request: Request) -> JSONResponse:
         stream=False,
     )
     try:
+        model_started_ns = time.perf_counter_ns()
+        _perf_log(trace, "model_execution_started", model_started_ns, task_id=str(task_id or "")[:8], mode="sync")
         result = await asyncio.to_thread(
             _run_supervised_agent,
             task_id,
@@ -652,6 +776,7 @@ async def run_link_task(request: Request) -> JSONResponse:
             trace_store=getattr(request.app.state, "trace_store", None),
             bus=getattr(request.app.state, "bus", None),
         )
+        _perf_log(trace, "model_execution_returned", model_started_ns, task_id=str(task_id or "")[:8], mode="sync")
     except Exception as exc:
         logger.error("Link task failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=502, detail="Link task execution failed") from exc
@@ -664,6 +789,7 @@ async def run_link_task(request: Request) -> JSONResponse:
                 store.mark_link_task_waiting_approval(task_id, pending[-1]["id"])
             except (PermissionError, RuntimeError, ValueError):
                 logger.error("Link task approval state could not be recorded")
+        _perf_log(trace, "task_waiting_approval", route_started_ns, task_id=str(task_id or "")[:8], state="WAITING_APPROVAL")
         return JSONResponse(status_code=202, content={
             "task_id": task_id,
             "state": "WAITING_APPROVAL",
@@ -671,6 +797,7 @@ async def run_link_task(request: Request) -> JSONResponse:
             "idempotent_replay": False,
         })
     if task.get("state") == "CANCELLED":
+        _perf_log(trace, "task_cancelled", route_started_ns, task_id=str(task_id or "")[:8], state="CANCELLED")
         return JSONResponse({
             "task_id": task_id,
             "state": "CANCELLED",
@@ -681,6 +808,7 @@ async def run_link_task(request: Request) -> JSONResponse:
         raise HTTPException(status_code=502, detail="Link task did not reach a terminal state")
     link_run = store.link_task_run(task_id) or {}
     summary = _response_content(result)
+    _perf_log(trace, "task_response_ready", route_started_ns, task_id=str(task_id or "")[:8], state="COMPLETED")
     return JSONResponse({
         "task_id": task_id,
         "state": "COMPLETED",
@@ -712,7 +840,7 @@ async def get_link_task_status(idempotency_key: str, request: Request) -> dict[s
     if owner and actor != owner and not actor.startswith("api:"):
         raise HTTPException(status_code=403, detail="This task belongs to another paired device")
     state = record.get("task_state") or record.get("status") or "UNKNOWN"
-    summary = record.get("result_summary") if state == "COMPLETED" else ""
+    summary = record.get("result_summary") if state == "COMPLETED" else _link_task_progress_summary(store, record["task_id"], str(state), task)
     if state == "FAILED" and record.get("last_error") == "approval_expired":
         summary = "Approval expired before a decision. No operation ran; submit a new request if you still want it."
     return {
@@ -762,6 +890,7 @@ async def get_link_task_events(
         "tool.mcp_approval_dispatch_claimed", "approval.created", "approval.decision",
         "approval.expired", "approval.execution_completed", "approval.execution_failed",
         "approval.mac_mcp_dispatched",
+        "development.tool_performance",
     }
     safe_events = []
     for event in rows:
@@ -772,12 +901,14 @@ async def get_link_task_events(
         for key in (
             "from", "to", "step", "previous_state", "state", "approval_id",
             "operation", "decision", "error_code", "success", "executed",
-            "result_digest",
+            "result_digest", "tool", "duration_ms", "remote_worker",
         ):
             value = payload.get(key)
             if isinstance(value, str) and len(value) <= 80:
                 safe_payload[key] = value
-            elif key in {"success", "executed"} and isinstance(value, bool):
+            elif key in {"success", "executed", "remote_worker"} and isinstance(value, bool):
+                safe_payload[key] = value
+            elif key == "duration_ms" and isinstance(value, (int, float)) and 0 <= value <= 600_000:
                 safe_payload[key] = value
         safe_events.append({
             "seq": event["seq"],
@@ -998,10 +1129,12 @@ def _parse_pmset_battery(output: str) -> tuple[int | None, bool | None]:
     return percentage, charging
 
 
-def _read_mac_system_info() -> dict[str, Any]:
+def _read_mac_system_info(trace: str = "unlinked") -> dict[str, Any]:
     """Read only fixed battery and boot-time fields; never accepts a caller-supplied command."""
+    started_ns = time.perf_counter_ns()
     if sys.platform != "darwin":
         raise RuntimeError("system information is available only on macOS")
+    battery_started_ns = time.perf_counter_ns()
     battery = subprocess.run(
         ["/usr/bin/pmset", "-g", "batt"],
         capture_output=True,
@@ -1012,7 +1145,9 @@ def _read_mac_system_info() -> dict[str, Any]:
     if battery.returncode != 0:
         raise RuntimeError("battery status provider failed")
     battery_percent, charging = _parse_pmset_battery(battery.stdout)
+    battery_ms = (time.perf_counter_ns() - battery_started_ns) / 1_000_000
 
+    boot_started_ns = time.perf_counter_ns()
     boot = subprocess.run(
         ["/usr/sbin/sysctl", "-n", "kern.boottime"],
         capture_output=True,
@@ -1022,6 +1157,7 @@ def _read_mac_system_info() -> dict[str, Any]:
     )
     if boot.returncode != 0:
         raise RuntimeError("boot-time provider failed")
+    boot_ms = (time.perf_counter_ns() - boot_started_ns) / 1_000_000
     match = re.search(r"\bsec\s*=\s*(\d+)\b", boot.stdout)
     if match is None:
         raise RuntimeError("boot-time response was malformed")
@@ -1038,6 +1174,8 @@ def _read_mac_system_info() -> dict[str, Any]:
         parts.append(f"{minutes} minute" + ("s" if minutes != 1 else ""))
     if not parts:
         parts.append(f"{seconds} second" + ("s" if seconds != 1 else ""))
+    _perf_log(trace, "mac_system_info_complete", started_ns, component="mac_facts")
+    PERF_LOGGER.info("perf trace=%s event=mac_system_info_stages battery_ms=%.3f boot_ms=%.3f", trace, battery_ms, boot_ms)
     return {
         "online": True,
         "battery_percent": battery_percent,
@@ -1049,14 +1187,24 @@ def _read_mac_system_info() -> dict[str, Any]:
 
 
 @router.get("/system/info")
-async def companion_system_info(request: Request) -> dict[str, Any]:
+async def companion_system_info(request: Request, response: Response) -> dict[str, Any]:
     """Device-token-only, fixed read-only Mac facts for the paired companion."""
+    started_ns = time.perf_counter_ns()
+    trace = _perf_trace_id(request)
+    _perf_log(trace, "backend_receive", started_ns, route="system_info")
     _require_loopback(request)
+    auth_started_ns = time.perf_counter_ns()
     actor = authorize_supervisor_request(request)
     if not actor.startswith("device:"):
         raise HTTPException(status_code=403, detail="A paired companion device token is required")
+    _perf_log(trace, "authentication_complete", auth_started_ns, route="system_info")
     try:
-        return await asyncio.to_thread(_read_mac_system_info)
+        read_started_ns = time.perf_counter_ns()
+        result = await asyncio.to_thread(_read_mac_system_info, trace)
+        _perf_log(trace, "backend_response_ready", started_ns, route="system_info", status=200)
+        PERF_LOGGER.info("perf trace=%s event=mac_facts_read elapsed_ms=%.3f", trace, (time.perf_counter_ns() - read_started_ns) / 1_000_000)
+        _attach_perf_headers(response, trace, started_ns)
+        return result
     except Exception as exc:
         logger.warning("companion system info read failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Mac battery or uptime information could not be read") from exc
@@ -1373,31 +1521,40 @@ async def get_task(task_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.get("/tasks/{task_id}/artifacts")
-async def list_task_artifacts(task_id: str, request: Request) -> dict[str, Any]:
+async def list_task_artifacts(task_id: str, request: Request, response: Response) -> dict[str, Any]:
     """List downloadable archives only to the paired device that owns a completed development task."""
+    started_ns = time.perf_counter_ns()
     device_id = _device_actor(request)
     _require_owned_completed_development_task(task_id, device_id)
+    link_run = get_supervisor_store().link_task_run(task_id) or {}
+    trace = _perf_trace_id(request, str(link_run.get("idempotency_key") or ""))
     artifacts = _artifact_store().list_for_task(task_id, device_id)
+    _attach_perf_headers(response, trace, started_ns)
     return {"task_id": task_id, "artifacts": [item.to_wire(download_path=f"/v1/jarvis/tasks/{task_id}/artifacts/{item.artifact_id}/download") for item in artifacts]}
 
 
 @router.get("/tasks/{task_id}/artifacts/{artifact_id}/download")
 async def download_task_artifact(task_id: str, artifact_id: str, request: Request) -> Response:
     """Stream a size- and SHA-verified archive to its exact paired task owner."""
+    started_ns = time.perf_counter_ns()
     device_id = _device_actor(request)
     _require_owned_completed_development_task(task_id, device_id)
+    link_run = get_supervisor_store().link_task_run(task_id) or {}
+    trace = _perf_trace_id(request, str(link_run.get("idempotency_key") or ""))
     if not re.fullmatch(r"[0-9a-f]{64}", artifact_id):
         raise HTTPException(status_code=404, detail="Artifact not found")
     from openjarvis.tasks.artifact_store import ArtifactIntegrityError, ArtifactNotFoundError
 
     try:
+        _perf_log(trace, "artifact_download_read_start", route="artifact_download", task_id=task_id[:8])
         artifact, data = _artifact_store().download(task_id, device_id, artifact_id)
     except ArtifactNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Artifact not found") from exc
     except ArtifactIntegrityError as exc:
         logger.error("Stored Jarvis artifact failed integrity check (task=%s artifact=%s)", task_id, artifact_id[:12])
         raise HTTPException(status_code=500, detail="Stored artifact integrity check failed") from exc
-    return Response(
+    _perf_log(trace, "artifact_download_response_ready", started_ns, route="artifact_download", task_id=task_id[:8], count=len(data))
+    response = Response(
         content=data,
         media_type="application/zip",
         headers={
@@ -1408,6 +1565,7 @@ async def download_task_artifact(task_id: str, artifact_id: str, request: Reques
             "ETag": f'"{artifact.archive_sha256}"',
         },
     )
+    return _attach_perf_headers(response, trace, started_ns)
 
 
 @router.get("/approvals/pending")

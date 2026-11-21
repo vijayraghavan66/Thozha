@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import threading
+import time
 import uuid
 import weakref
 from dataclasses import replace
@@ -19,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from openjarvis.core.paths import get_config_dir
 from openjarvis.core.types import Message, Role, ToolCall
 from openjarvis.server.model_capabilities import is_embed_only_model
+from openjarvis.server.performance import PERF_LOGGER
 from openjarvis.server.models import (
     ChatCompletionChunk,
     ChatCompletionRequest,
@@ -34,6 +36,21 @@ from openjarvis.server.models import (
 )
 
 router = APIRouter()
+
+
+def _current_task_perf_identity() -> tuple[str, str]:
+    try:
+        from openjarvis.tasks.supervisor import current_task_context, get_supervisor_store
+
+        context = current_task_context()
+        if context is None:
+            return "unlinked", "none"
+        row = get_supervisor_store().link_task_run(context.task_id) or {}
+        key = row.get("idempotency_key")
+        seed = key if isinstance(key, str) and key else context.task_id
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12], context.task_id[:8]
+    except Exception:
+        return "unlinked", "none"
 
 
 def _to_messages(chat_messages) -> list[Message]:
@@ -768,6 +785,8 @@ def _handle_agent(
     ``traces.db`` stayed empty and spec_search's cold-start gate
     (``check_readiness``, min 20 traces) could never open.
     """
+    trace_id, trace_task = _current_task_perf_identity()
+    context_started_ns = time.perf_counter_ns()
     from openjarvis.agents._stubs import AgentContext
 
     # Build context from prior messages
@@ -776,6 +795,11 @@ def _handle_agent(
         prior = _to_messages(req.messages[:-1])
         for m in prior:
             ctx.conversation.add(m)
+    PERF_LOGGER.info(
+        "perf trace=%s event=context_assembled wall_ms=%d mono_ns=%d elapsed_ms=%.3f task_id=%s message_count=%d",
+        trace_id, int(time.time() * 1000), time.perf_counter_ns(),
+        (time.perf_counter_ns() - context_started_ns) / 1_000_000, trace_task, len(req.messages),
+    )
 
     # Last message is the input
     input_text = req.messages[-1].content if req.messages else ""
@@ -788,6 +812,7 @@ def _handle_agent(
         original_model = agent._model
         if model:
             agent._model = model
+        agent_started_ns = time.perf_counter_ns()
         try:
             if trace_store is not None:
                 from openjarvis.traces.collector import TraceCollector
@@ -798,6 +823,11 @@ def _handle_agent(
                 result = agent.run(input_text, context=ctx)
         finally:
             agent._model = original_model
+        PERF_LOGGER.info(
+            "perf trace=%s event=agent_run_completed wall_ms=%d mono_ns=%d elapsed_ms=%.3f task_id=%s",
+            trace_id, int(time.time() * 1000), time.perf_counter_ns(),
+            (time.perf_counter_ns() - agent_started_ns) / 1_000_000, trace_task,
+        )
 
     usage = UsageInfo(
         prompt_tokens=result.metadata.get("prompt_tokens", 0),
