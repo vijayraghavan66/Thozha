@@ -245,3 +245,14 @@ tasks.register<JavaExec>("verifyOpenJarvisApprovalReview") {
     ) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.data.ApprovalReviewParsingChecksKt")
 }
+
+tasks.register<JavaExec>("verifyTaskResultSummary") {
+    group = "verification"
+    description = "Prevents nullable task fields from rendering as the literal string null in Home."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.data.TaskSummaryChecksKt")
+}

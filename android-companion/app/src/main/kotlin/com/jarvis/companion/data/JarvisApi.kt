@@ -170,12 +170,17 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         return pin
     }
 
-    private fun parseLinkTaskResult(json: JSONObject) = LinkTaskResult(
-        taskId = json.requiredString("task_id"),
-        state = json.requiredString("state").uppercase(),
-        summary = json.optString("result_text").ifBlank { json.optString("summary", "") },
-        resultDigest = json.optString("result_digest", ""),
-    )
+    private fun parseLinkTaskResult(json: JSONObject): LinkTaskResult {
+        val state = json.requiredString("state").uppercase()
+        val resultText = json.optString("result_text").takeUnless { json.isNull("result_text") || it == "null" }
+        val summary = json.optString("summary").takeUnless { json.isNull("summary") || it == "null" }
+        return LinkTaskResult(
+            taskId = json.requiredString("task_id"),
+            state = state,
+            summary = linkTaskSummary(state, resultText, summary),
+            resultDigest = json.optString("result_digest").takeUnless { json.isNull("result_digest") || it == "null" }.orEmpty(),
+        )
+    }
 
     fun parseInvitationPayload(rawPayload: String): PairingInvitation {
         if (rawPayload.length > 8192) throw ApiException("This QR is too large to be a Jarvis pairing invitation.")
@@ -694,6 +699,17 @@ internal fun parseSupervisorApprovalReview(item: Map<String, Any?>, approval: Ap
             developmentPlan = plan,
         )
     }.getOrElse { throw ApiException("The pending approval details could not be verified.") }
+}
+
+internal fun linkTaskSummary(state: String, resultText: String?, summary: String?): String {
+    fun useful(value: String?): String? = value?.trim()?.takeIf { it.isNotEmpty() && it != "null" }
+    return useful(resultText) ?: useful(summary) ?: when (state.uppercase()) {
+        "PLANNING", "RUNNING", "VERIFYING", "CREATED", "QUEUED" -> "Jarvis is processing this task."
+        "WAITING_APPROVAL" -> "Jarvis is waiting for your approval."
+        "COMPLETED" -> "Task completed, but the Mac returned no result text."
+        "FAILED" -> "The task failed. Check Activity for the recorded error."
+        else -> "Task status: ${state.uppercase()}"
+    }
 }
 
 private fun JSONObject.requiredString(vararg keys: String): String {
