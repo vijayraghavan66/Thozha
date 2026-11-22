@@ -4,7 +4,7 @@ This protocol adds first-pair onboarding over the explicitly configured private 
 
 ## Owner-side QR creation
 
-The Mac UI calls `POST /v1/jarvis/pair/invitations` on the loopback OpenJarvis API with its master bearer credential and same-origin loopback UI request headers. An empty body retains the legacy v1 QR. A body must be exactly `{"transport":"wifi"}` to request v2. The request fails closed unless the gateway opt-in is enabled, the configured interface and private bind address match the live interface, the live SSID exactly matches the configured SSID, the port is 8443, a matching TLS certificate identity exists, and a listener accepts a connection on that interface/port.
+The Mac UI calls `POST /v1/jarvis/pair/invitations` on the loopback OpenJarvis API. The existing loopback peer, Host and same-origin UI checks remain the authorization boundary; the UI does not need a bearer/API key. An empty body retains the legacy v1 QR. A body must be exactly `{"transport":"wifi"}` to request v2. The request fails closed unless the gateway opt-in is enabled, the configured interface and private bind address match the live interface, the live SSID exactly matches the configured SSID, the port is 8443, a matching TLS certificate identity exists, and a listener accepts a connection on that interface/port.
 
 The v2 QR payload is canonical JSON: UTF-8, sorted object keys, compact separators, no ASCII escaping. Its ECDSA P-256/SHA-256 `server_signature` covers every field except the signature itself:
 

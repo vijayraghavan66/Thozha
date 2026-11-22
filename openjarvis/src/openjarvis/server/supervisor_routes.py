@@ -366,7 +366,6 @@ def _approval_payload(item: dict[str, Any]) -> dict[str, Any]:
 @router.post("/pair/invitations")
 async def create_pairing_invitation(request: Request) -> dict[str, Any]:
     _authorize_local_pair_ui(request, state_changing=True)
-    authorize_supervisor_request(request, master_only=True)
     store = get_supervisor_store()
     transport, body = await _pair_invitation_request(request)
     private_key, public_der, server_fingerprint = _pairing_server_identity(store)

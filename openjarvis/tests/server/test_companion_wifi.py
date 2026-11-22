@@ -181,22 +181,19 @@ def test_gateway_tls_pin_is_signed_over_loopback_and_requires_auth(tmp_path, mon
 def _pairing_test_client(tmp_path, monkeypatch):
     store = SupervisorStore(str(tmp_path / "supervisor.db"))
     monkeypatch.setattr(supervisor, "_STORE_INSTANCE", store)
-    monkeypatch.setenv("OPENJARVIS_API_KEY", "pairing-test-master-key")
     app = FastAPI()
     app.include_router(router)
     client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 12345))
     return client, store
 
 
-def test_wifi_qr_creation_stays_loopback_master_authenticated_and_v1_default(tmp_path, monkeypatch):
+def test_wifi_qr_creation_stays_loopback_origin_guarded_and_v1_default(tmp_path, monkeypatch):
     client, store = _pairing_test_client(tmp_path, monkeypatch)
-    headers = {"Authorization": "Bearer pairing-test-master-key", "Origin": "http://127.0.0.1:8000"}
+    headers = {"Origin": "http://127.0.0.1:8000"}
 
-    denied = client.post("/v1/jarvis/pair/invitations", headers={"Origin": "http://127.0.0.1:8000"})
-    assert denied.status_code == 401
     bad_origin = client.post(
         "/v1/jarvis/pair/invitations",
-        headers={"Authorization": "Bearer pairing-test-master-key", "Origin": "https://attacker.example"},
+        headers={"Origin": "https://attacker.example"},
     )
     assert bad_origin.status_code == 403
     unexpected = client.post(
@@ -255,7 +252,7 @@ def test_wifi_qr_refuses_invalid_or_disabled_gateway_configuration(
         "openjarvis.server.supervisor_routes.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=f"Current Wi-Fi Network: {ssid}\n"),
     )
-    headers = {"Authorization": "Bearer pairing-test-master-key", "Origin": "http://127.0.0.1:8000"}
+    headers = {"Origin": "http://127.0.0.1:8000"}
     response = client.post(
         "/v1/jarvis/pair/invitations", headers=headers, json={"transport": "wifi"},
     )
@@ -287,7 +284,7 @@ def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_
         ),
     )
     monkeypatch.setattr("socket.create_connection", lambda *_args, **_kwargs: contextlib.nullcontext())
-    headers = {"Authorization": "Bearer pairing-test-master-key", "Origin": "http://127.0.0.1:8000"}
+    headers = {"Origin": "http://127.0.0.1:8000"}
     response = client.post(
         "/v1/jarvis/pair/invitations", headers=headers, json={"transport": "wifi"},
     )
@@ -341,7 +338,7 @@ def test_wifi_qr_rejects_unverifiable_tls_endpoint(tmp_path, monkeypatch, failur
     else:
         monkeypatch.setattr("socket.create_connection", lambda *_args, **_kwargs: contextlib.nullcontext())
 
-    headers = {"Authorization": "Bearer pairing-test-master-key", "Origin": "http://127.0.0.1:8000"}
+    headers = {"Origin": "http://127.0.0.1:8000"}
     response = client.post(
         "/v1/jarvis/pair/invitations", headers=headers, json={"transport": "wifi"},
     )
