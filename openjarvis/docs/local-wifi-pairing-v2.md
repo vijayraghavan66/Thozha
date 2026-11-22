@@ -18,6 +18,12 @@ The v2 QR payload is canonical JSON: UTF-8, sorted object keys, compact separato
 
 The invitation remains short-lived and single-use (the existing store creates a five-minute invitation). A QR is a temporary enrollment request, not a persistent device token. Mac-side local confirmation still approves or rejects the device’s submitted public-key fingerprint. Only after approval can the device prove possession of its key over a fresh, short-lived claim challenge and receive its expiring, revocable token.
 
+## Mac-local paired-device management
+
+The Mac UI can list paired devices with `GET /v1/jarvis/pair/devices`. It returns only device ID/name, a derived SHA-256 public-key fingerprint, created/expiry/revocation timestamps, and active/expired/revoked status. Responses are `Cache-Control: no-store`; public key bytes, access tokens, token hashes, and FCM credentials are excluded.
+
+Removal uses `POST /v1/jarvis/pair/devices/{device_id}/revoke` with exactly `{"confirm":true}`. Both routes require the existing loopback peer, Host, and same-origin UI checks. Revocation atomically invalidates the device token and revokes its FCM registration. A retry after device-token revocation can retry FCM cleanup without restoring device access. These Mac-local management routes are not exposed through the companion LAN gateway. The existing master-only `POST /v1/jarvis/devices/{device_id}/revoke` endpoint remains available and unchanged.
+
 ## LAN gateway routes
 
 The allowlisted gateway exposes only these invitation-ID-scoped paths without a device bearer token:

@@ -89,6 +89,10 @@ def test_gateway_allows_only_companion_paths_and_methods(gateway):
     assert client.post("/v1/jarvis/pair/start", headers=headers).status_code == 404
     assert client.post("/v1/jarvis/pair/complete", headers=headers, json={}).status_code == 404
     assert client.get("/v1/jarvis/pair/pending", headers=headers).status_code == 404
+    assert client.get("/v1/jarvis/pair/devices", headers=headers).status_code == 404
+    assert client.post(
+        f"/v1/jarvis/pair/devices/{'a' * 32}/revoke", headers=headers, json={"confirm": True},
+    ).status_code == 404
     assert client.post(f"/v1/jarvis/pair/{'a' * 32}/decision", headers=headers, json={}).status_code == 404
     assert client.get("/v1/chat/completions", headers=headers).status_code == 404
     assert client.get("/docs").status_code == 404

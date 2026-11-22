@@ -28,6 +28,7 @@ from openjarvis.tasks.supervisor import LINK_SCOPE_CAPABILITIES, bounded_result_
 router = APIRouter(prefix="/v1/jarvis", tags=["jarvis-supervisor"])
 logger = logging.getLogger(__name__)
 _ARTIFACT_STORE = None
+_DEVICE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _artifact_store():
@@ -2251,6 +2252,105 @@ async def revoke_device(device_id: str, request: Request) -> dict[str, Any]:
     registrations = FCMRegistrationStore(store.db_path)
     try:
         registrations.revoke(device_id)
+    finally:
+        registrations.close()
+    return {"status": "revoked", "device_id": device_id}
+
+
+@router.get("/pair/devices")
+async def list_paired_devices(request: Request) -> dict[str, Any]:
+    """List redacted companion metadata only from the loopback Mac UI."""
+    _authorize_local_pair_ui(request, state_changing=True)
+    store = get_supervisor_store()
+    now = utc_now()
+    with store._lock:
+        rows = store._db.execute(
+            "SELECT id,device_name,public_key_b64,created_at,expires_at,revoked_at "
+            "FROM paired_devices ORDER BY created_at DESC LIMIT 100"
+        ).fetchall()
+    devices: list[dict[str, Any]] = []
+    import base64
+
+    for row in rows:
+        try:
+            public_key_der = base64.b64decode(row["public_key_b64"], validate=True)
+        except (ValueError, TypeError) as exc:
+            logger.error("Paired-device metadata unavailable (invalid public key encoding)")
+            raise HTTPException(status_code=503, detail="A paired-device identity could not be verified") from exc
+        device_id = row["id"]
+        if not isinstance(device_id, str) or not _DEVICE_ID_RE.fullmatch(device_id):
+            logger.error("Paired-device metadata unavailable (invalid device identifier)")
+            raise HTTPException(status_code=503, detail="A paired-device identity could not be verified")
+        revoked_at = row["revoked_at"]
+        expires_at = row["expires_at"]
+        status = "revoked" if revoked_at else "expired" if expires_at <= now else "active"
+        raw_name = row["device_name"] or "Android companion"
+        safe_name = " ".join(
+            "".join(char for char in str(raw_name) if char >= " " and char != "\x7f").split()
+        )[:80] or "Android companion"
+        devices.append({
+            "device_id": device_id,
+            "device_name": safe_name,
+            "public_key_fingerprint": "SHA256:" + hashlib.sha256(public_key_der).hexdigest(),
+            "created_at": row["created_at"],
+            "expires_at": expires_at,
+            "revoked_at": revoked_at,
+            "status": status,
+        })
+    return JSONResponse(
+        content={"devices": devices, "count": len(devices)},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post("/pair/devices/{device_id}/revoke")
+async def revoke_paired_device_from_local_ui(device_id: str, request: Request) -> dict[str, Any]:
+    """Revoke a companion only after explicit confirmation from the loopback Mac UI."""
+    _authorize_local_pair_ui(request, state_changing=True)
+    if not _DEVICE_ID_RE.fullmatch(device_id):
+        raise HTTPException(status_code=404, detail="Paired device not found")
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(status_code=415, detail="Content-Type must be application/json")
+    content_length = request.headers.get("content-length", "0")
+    try:
+        if int(content_length or "0") > 256:
+            raise HTTPException(status_code=413, detail="Confirmation request is too large")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Content-Length") from exc
+    raw_body = bytearray()
+    async for chunk in request.stream():
+        raw_body.extend(chunk)
+        if len(raw_body) > 256:
+            raise HTTPException(status_code=413, detail="Confirmation request is too large")
+    try:
+        body = json.loads(raw_body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Expected JSON confirmation body") from exc
+    if not isinstance(body, dict) or set(body) != {"confirm"} or body.get("confirm") is not True:
+        raise HTTPException(status_code=422, detail="Explicit {confirm: true} is required")
+
+    store = get_supervisor_store()
+    changed = store.revoke_device(device_id)
+    if not changed:
+        with store._lock:
+            existing = store._db.execute(
+                "SELECT revoked_at FROM paired_devices WHERE id=?", (device_id,),
+            ).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Active device not found")
+        if not existing["revoked_at"]:
+            raise HTTPException(status_code=409, detail="Device revocation could not be confirmed")
+
+    registrations = FCMRegistrationStore(store.db_path)
+    try:
+        registrations.revoke(device_id)
+    except Exception as exc:
+        logger.error("Paired device revoked; notification-token cleanup failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Device access is revoked, but notification cleanup needs retry",
+        ) from exc
     finally:
         registrations.close()
     return {"status": "revoked", "device_id": device_id}
