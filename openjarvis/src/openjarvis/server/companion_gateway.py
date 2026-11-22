@@ -213,6 +213,12 @@ def create_gateway_app(
             raise HTTPException(status_code=404, detail="Task not found")
         return await _proxy(request, backend_path=f"/v1/jarvis/tasks/{task_id}")
 
+    @app.get("/v1/jarvis/system/info")
+    async def get_system_info(request: Request):
+        """Return only the existing authenticated, read-only Mac status fields."""
+        _device_id_for_request(request, request.app.state.supervisor_store)
+        return await _proxy(request, backend_path="/v1/jarvis/system/info")
+
     @app.post("/v1/jarvis/link/tasks")
     async def submit_link_task(request: Request):
         _device_id_for_request(request, request.app.state.supervisor_store)
