@@ -6,6 +6,8 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.SystemClock
+import java.net.Inet4Address
+import java.net.Inet6Address
 import java.net.InetAddress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -14,7 +16,28 @@ data class LocalGatewayEndpoint(
     val hostname: String,
     val port: Int,
     val address: InetAddress,
-)
+) {
+    /** Connect to the DNS-SD address; retain hostname separately for the pinned TLS identity. */
+    fun httpsBaseUrl(): String {
+        val literal = (address.hostAddress ?: throw IllegalStateException("Resolved Mac gateway address is empty")).substringBefore('%')
+        val urlHost = if (address is Inet6Address) "[$literal]" else literal
+        return "https://$urlHost:$port"
+    }
+}
+
+internal fun isAllowedPrivateGatewayAddress(address: InetAddress): Boolean {
+    if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress || address.isMulticastAddress) return false
+    return when (address) {
+        is Inet4Address -> {
+            val bytes = address.address.map { it.toInt() and 0xff }
+            bytes[0] == 10 ||
+                (bytes[0] == 172 && bytes[1] in 16..31) ||
+                (bytes[0] == 192 && bytes[1] == 168)
+        }
+        is Inet6Address -> (address.address[0].toInt() and 0xfe) == 0xfc // ULA fc00::/7
+        else -> false
+    }
+}
 
 /** Discovers only the previously paired Mac's pinned DNS-SD identity. */
 object LocalGatewayDiscovery {
@@ -149,8 +172,10 @@ object LocalGatewayDiscovery {
                         val hostAttribute = info.attributes["tls-host"]?.toString(Charsets.UTF_8)
                         val address = info.host
                         if (hostAttribute == pin.hostname && info.port == pin.port && address != null) {
-                            val answers = runCatching { InetAddress.getAllByName(pin.hostname).toList() }.getOrDefault(emptyList())
-                            if (answers.any { it.address.contentEquals(address.address) }) {
+                            // Android's JVM resolver does not resolve .local reliably. The DNS-SD SRV
+                            // address is usable only on private LAN ranges; TLS pin + exact DNS SAN
+                            // validation below establishes the Mac identity before any token is sent.
+                            if (isAllowedPrivateGatewayAddress(address)) {
                                 val endpoint = LocalGatewayEndpoint(pin.hostname, pin.port, address)
                                 resolved[0] = endpoint
                                 cached = endpoint

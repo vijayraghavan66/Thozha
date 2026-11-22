@@ -566,7 +566,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             if (loopbackEndpointReachable(base)) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
             else LocalGatewayDiscovery.discoverOrWait(context, pin)
         }
-        val effectiveBase = if (wifiEndpoint != null) "https://${wifiEndpoint.hostname}:${wifiEndpoint.port}" else base
+        val effectiveBase = wifiEndpoint?.httpsBaseUrl() ?: base
         val connection = (URL(effectiveBase + artifact.downloadPath).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             instanceFollowRedirects = false
@@ -582,7 +582,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         if (wifiPin != null && wifiEndpoint != null) {
             val tls = connection as? javax.net.ssl.HttpsURLConnection
                 ?: throw ApiException("The discovered Mac gateway did not use HTTPS.")
-            tls.sslSocketFactory = LocalGatewayTls.socketFactory(wifiPin.certificateSha256)
+            LocalGatewayTls.configure(tls, wifiPin)
         }
         try {
             val status = connection.responseCode
@@ -740,7 +740,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
                 "wifi_cached=${wifiEndpoint != null}",
             )
         }
-        val effectiveBase = if (wifiEndpoint != null) "https://${wifiEndpoint.hostname}:${wifiEndpoint.port}" else base
+        val effectiveBase = wifiEndpoint?.httpsBaseUrl() ?: base
         val connection = (URL(effectiveBase + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
             instanceFollowRedirects = false
@@ -760,7 +760,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         if (wifiPin != null && wifiEndpoint != null) {
             val tls = connection as? javax.net.ssl.HttpsURLConnection
                 ?: throw ApiException("The discovered Mac gateway did not use HTTPS.")
-            tls.sslSocketFactory = LocalGatewayTls.socketFactory(wifiPin.certificateSha256)
+            LocalGatewayTls.configure(tls, wifiPin)
         }
         try {
             if (body != null) connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }

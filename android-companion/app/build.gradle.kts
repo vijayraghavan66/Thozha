@@ -126,6 +126,17 @@ tasks.register<JavaExec>("verifyLocalWifiPresentation") {
     mainClass.set("com.jarvis.companion.presentation.LocalWifiPresentationChecks")
 }
 
+tasks.register<JavaExec>("verifyLocalGatewayRouting") {
+    group = "verification"
+    description = "Checks private DNS-SD address selection and exact pinned certificate DNS-name verification."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.data.LocalGatewayRoutingChecks")
+}
+
 tasks.register<JavaExec>("verifyAssistantFormatting") {
     group = "verification"
     description = "Runs dependency-free assistant-text formatting and escaping regression vectors."

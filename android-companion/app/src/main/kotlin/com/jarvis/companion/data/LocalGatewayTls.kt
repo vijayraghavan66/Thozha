@@ -3,12 +3,17 @@ package com.jarvis.companion.data
 import java.security.MessageDigest
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
+import javax.net.ssl.HostnameVerifier
+import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.SSLSession
 import javax.net.ssl.X509TrustManager
 
 /** TLS trust manager that accepts only the certificate pinned over paired USB. */
 object LocalGatewayTls {
+    private val localHostnamePattern = Regex("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.local$", RegexOption.IGNORE_CASE)
+
     fun socketFactory(expectedFingerprint: String): SSLSocketFactory {
         require(expectedFingerprint.matches(Regex("sha256:[0-9a-f]{64}"))) { "invalid local gateway certificate pin" }
         val expected = expectedFingerprint.removePrefix("sha256:")
@@ -32,5 +37,32 @@ object LocalGatewayTls {
             }
         }
         return SSLContext.getInstance("TLS").apply { init(null, arrayOf(trustManager), null) }.socketFactory
+    }
+
+    fun hostnameVerifier(expectedHostname: String): HostnameVerifier {
+        require(localHostnamePattern.matches(expectedHostname)) { "invalid local gateway hostname" }
+        val canonicalHost = expectedHostname.lowercase(java.util.Locale.ROOT)
+        return HostnameVerifier { _, session -> matchesPinnedDnsName(session, canonicalHost) }
+    }
+
+    fun configure(connection: HttpsURLConnection, pin: LocalGatewayPin) {
+        connection.sslSocketFactory = socketFactory(pin.certificateSha256)
+        connection.hostnameVerifier = hostnameVerifier(pin.hostname)
+        // The TCP URL targets the resolved private IP, while the TLS certificate and HTTP authority
+        // remain bound to the hostname learned over the paired route.
+        connection.setRequestProperty("Host", "${pin.hostname}:${pin.port}")
+    }
+
+    internal fun matchesPinnedDnsName(session: SSLSession, expectedHostname: String): Boolean {
+        val certificate = session.peerCertificates.firstOrNull() as? X509Certificate ?: return false
+        return matchesDnsSubjectAlternativeName(certificate.subjectAlternativeNames, expectedHostname)
+    }
+
+    internal fun matchesDnsSubjectAlternativeName(names: Collection<List<*>>?, expectedHostname: String): Boolean {
+        if (names == null || !localHostnamePattern.matches(expectedHostname)) return false
+        return names.any { entry ->
+            entry.size >= 2 && entry[0] == 2 &&
+                (entry[1] as? String)?.equals(expectedHostname, ignoreCase = true) == true
+        }
     }
 }
