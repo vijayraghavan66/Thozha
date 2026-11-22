@@ -13,7 +13,7 @@ swift build -c release
 Tests/test-package-staging-safety.sh
 ```
 
-The script requires a fresh staging directory whose parent already exists. It refuses existing output directories and symlinks, never recursively deletes a caller-supplied path, and uses no-clobber moves for final artifacts. The script creates a locally testable app and an unsigned `.pkg` at the specified staging path. The app is ad-hoc signed for local inspection; the installer package is not Developer ID signed or notarized. Do not distribute it as a trusted consumer installer.
+The script requires a fresh staging directory whose parent already exists. It refuses existing output directories and symlinks, never recursively deletes a caller-supplied path, and uses no-clobber moves for final artifacts. The app is ad-hoc signed for local inspection. On this host, `pkgbuild` serializes macOS-managed provenance metadata as AppleDouble entries, so the script fails closed and does not publish a `.pkg`; a package can be emitted only when the payload check finds no such entries. Even then, a package is not Developer ID signed or notarized. Do not distribute it as a trusted consumer installer.
 
 The staging app:
 
@@ -24,6 +24,8 @@ The staging app:
 - does not read, copy, or change existing Jarvis credentials, pairing, task state, LaunchAgents, or VM files.
 
 No internet download, package-manager invocation, privileged operation, firewall change, TCC request, or network listener is performed.
+
+`Tests/test-package-staging-safety.sh` verifies that existing output directories and symlink targets are left untouched. A package-payload check also refuses AppleDouble paths; the current Mac's `pkgbuild` emits such paths from OS-managed provenance xattrs, which remains a packaging blocker.
 
 ## Remaining installer work
 

@@ -56,7 +56,7 @@ codesign --force --deep --sign - "$STAGE/root/Applications/$APP_NAME"
 # Keep only ordinary bundle files; AppleDouble metadata is not part of the app.
 find "$STAGE/root" -name '._*' -delete
 APP_TMP="$OUT/.Thozha Setup.app.tmp-$$"
-PKG_TMP="$OUT/.ThozhaSetup-$VERSION-unsigned.pkg.tmp-$$"
+PKG_TMP="$STAGE/ThozhaSetup-$VERSION-unsigned.pkg"
 APP_FINAL="$OUT/$APP_NAME"
 PKG_FINAL="$OUT/ThozhaSetup-$VERSION-unsigned.pkg"
 ditto --norsrc --noextattr --noqtn --noacl "$STAGE/root/Applications/$APP_NAME" "$APP_TMP"
@@ -69,8 +69,25 @@ if [[ -e "$APP_TMP" ]]; then
   echo "App bundle could not be placed without overwriting an existing target." >&2
   exit 5
 fi
+# ditto may emit AppleDouble sidecars on some filesystems. Strip these before
+# creating the component package, then verify that the real app signature holds.
+find "$APP_FINAL" -name '._*' -delete
+if find "$APP_FINAL" -name '._*' -print -quit | grep -q .; then
+  echo "AppleDouble metadata remains in the app bundle; refusing to package it." >&2
+  exit 6
+fi
+codesign --verify --deep --strict "$APP_FINAL"
+# macOS may attach OS-managed provenance xattrs; pkgbuild can serialize them as
+# AppleDouble entries. If that happens, the script refuses the package below.
 pkgbuild --component "$APP_FINAL" --identifier com.thozha.setup.staging --version "$VERSION" \
   --install-location /Applications "$PKG_TMP" >/dev/null
+if pkgutil --payload-files "$PKG_TMP" | grep -q '\._'; then
+  echo "pkgbuild included AppleDouble metadata entries; refusing to publish this package." >&2
+  exit 6
+fi
+EXPANDED="$STAGE/expanded-package"
+pkgutil --expand-full "$PKG_TMP" "$EXPANDED"
+codesign --verify --deep --strict "$EXPANDED/Payload/$APP_NAME"
 if [[ -e "$PKG_FINAL" || -L "$PKG_FINAL" ]]; then
   echo "Refusing to replace existing package: $PKG_FINAL" >&2
   exit 5
@@ -80,7 +97,6 @@ if [[ -e "$PKG_TMP" ]]; then
   echo "Package could not be placed without overwriting an existing target." >&2
   exit 5
 fi
-find "$OUT/$APP_NAME" -name '._*' -delete
 echo "Created local staging artifacts (unsigned for distribution):"
 echo "$APP_FINAL"
 echo "$PKG_FINAL"
