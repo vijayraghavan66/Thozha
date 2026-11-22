@@ -22,6 +22,7 @@ object LocalWifiPresentationChecks {
 
         val actualWifiRequest = LocalWifiPresentation.state(true, true, true, "wifi")
         check(actualWifiRequest.latestRouteLabel == "Last confirmed request used Wi-Fi")
+        check(actualWifiRequest.identityLabel == "Mac identity pinned; Wi-Fi route confirmed")
 
         check(ConnectionRoutePresentation.label("wifi", "Legacy fallback") == "Local Wi-Fi")
         check(ConnectionRoutePresentation.label("usb", "Legacy fallback") == "Local USB")

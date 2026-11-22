@@ -17,6 +17,7 @@ data class LocalWifiPresentation(
                 !paired -> "Pair this phone with the Mac first"
                 !localNetworkPermission -> "Local network access is off; USB remains available"
                 !gatewayIdentityPinned -> "Mac Wi-Fi identity has not been verified"
+                lastSuccessfulRoute.equals("wifi", ignoreCase = true) -> "Mac identity pinned; Wi-Fi route confirmed"
                 else -> "Mac identity pinned; Wi-Fi reachability is not yet confirmed"
             }
             val route = when (lastSuccessfulRoute.lowercase()) {
