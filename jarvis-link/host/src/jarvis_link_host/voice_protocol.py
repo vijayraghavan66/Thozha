@@ -5,8 +5,8 @@ from dataclasses import dataclass
 import struct
 
 MAGIC = b"THZV"
-VERSION = 1
-HEADER = struct.Struct(">4sBBHIQ")
+VERSION = 2
+HEADER = struct.Struct(">4sBBHIIQ")
 MAX_PCM_BYTES = 64 * 1024
 MAX_AUDIO_SECONDS = 20
 
@@ -19,6 +19,7 @@ class VoiceProtocolError(ValueError):
 class PcmFrame:
     kind: int
     sample_rate: int
+    turn_id: int
     sequence: int
     elapsed_ms: int
     pcm: bytes
@@ -26,16 +27,16 @@ class PcmFrame:
 
 def encode_frame(frame: PcmFrame) -> bytes:
     validate_frame(frame)
-    return HEADER.pack(MAGIC, VERSION, frame.kind, frame.sample_rate, frame.sequence, frame.elapsed_ms) + frame.pcm
+    return HEADER.pack(MAGIC, VERSION, frame.kind, frame.sample_rate, frame.turn_id, frame.sequence, frame.elapsed_ms) + frame.pcm
 
 
 def decode_frame(payload: bytes) -> PcmFrame:
     if len(payload) < HEADER.size:
         raise VoiceProtocolError("frame header is truncated")
-    magic, version, kind, sample_rate, sequence, elapsed_ms = HEADER.unpack_from(payload)
+    magic, version, kind, sample_rate, turn_id, sequence, elapsed_ms = HEADER.unpack_from(payload)
     if magic != MAGIC or version != VERSION:
         raise VoiceProtocolError("frame protocol version is invalid")
-    frame = PcmFrame(kind, sample_rate, sequence, elapsed_ms, payload[HEADER.size:])
+    frame = PcmFrame(kind, sample_rate, turn_id, sequence, elapsed_ms, payload[HEADER.size:])
     validate_frame(frame)
     return frame
 
@@ -45,6 +46,8 @@ def validate_frame(frame: PcmFrame) -> None:
         raise VoiceProtocolError("frame kind is unsupported")
     if frame.sample_rate not in (16_000, 24_000, 48_000):
         raise VoiceProtocolError("sample rate is unsupported")
+    if not 0 <= frame.turn_id <= 0xFFFFFFFF:
+        raise VoiceProtocolError("turn identifier is outside the protocol range")
     if not 0 <= frame.sequence <= 0xFFFFFFFF:
         raise VoiceProtocolError("frame sequence is outside the protocol range")
     if not 0 <= frame.elapsed_ms <= 0xFFFFFFFFFFFFFFFF:
