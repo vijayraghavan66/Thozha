@@ -326,3 +326,11 @@ tasks.register<JavaExec>("verifyTaskNotifications") {
     classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.link.TaskNotificationChecksKt")
 }
+
+tasks.register<JavaExec>("verifyStaticPreview") {
+    group = "verification"
+    description = "Checks verified static preview archive import and traversal/manifest rejection."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.workspace.StaticPreviewChecksKt")
+}
