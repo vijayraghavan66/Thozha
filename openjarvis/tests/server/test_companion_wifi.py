@@ -68,6 +68,18 @@ def test_manual_ssid_attestation_is_only_used_when_ssid_unavailable(monkeypatch)
     assert not companion_wifi_gateway._network_matches_allowlist("en0", "Airtel_Minnal Murali", 2000)
 
 
+def test_dns_sd_advertisement_uses_pinned_hostname_and_private_interface_ip():
+    args = companion_wifi_gateway._dns_sd_registration_args(
+        "/usr/bin/dns-sd", "thozha-mac.local", "192.168.1.8", 8443,
+    )
+    assert args[1] == "-P"
+    assert args[2:8] == [
+        "Jarvis Companion", "_jarvis-companion._tcp.", "local.", "8443",
+        "thozha-mac.local", "192.168.1.8",
+    ]
+    assert "tls-host=thozha-mac.local" in args
+
+
 def test_gateway_tls_pin_is_signed_over_loopback_and_requires_auth(tmp_path, monkeypatch):
     store = SupervisorStore(str(tmp_path / "supervisor.db"))
     monkeypatch.setattr(supervisor, "_STORE_INSTANCE", store)

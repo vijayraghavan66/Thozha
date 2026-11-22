@@ -11,6 +11,7 @@ This separate runner exposes a narrow, authenticated Android companion API over 
 - A self-signed TLS certificate/private key are stored in the OpenJarvis config directory with private filesystem permissions. The Android device must first obtain the certificate fingerprint over its existing paired route and verify the Mac’s signed identity before persisting the pin. The bearer device token is sent only after the TLS pin verifies.
 - The gateway validates active enrolled-device bearer tokens and forwards only allowlisted task, approval, and device-registration endpoints to the fixed loopback backend. The supervisor remains responsible for authorization and operation execution.
 - DNS-SD advertises the local gateway. Discovery is a hint only; Android still requires the pinned hostname, certificate fingerprint, and authenticated API token.
+- The Bonjour advertisement uses the proxy-registration form with the actual pinned `.local` hostname and configured interface IP as its SRV/A target. This is important: advertising the default host as `localhost` cannot be accepted by Android's pinned-host address check.
 
 ## Manual start (not enabled by default)
 

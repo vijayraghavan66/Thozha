@@ -112,6 +112,22 @@ def _network_matches_allowlist(interface: str, allowed_ssid: str, manual_expiry:
     return _wifi_interface_connected(interface)
 
 
+def _dns_sd_registration_args(executable: str, hostname: str, bind_host: str, port: int) -> list[str]:
+    """Advertise the real HTTPS host/address instead of dns-sd's localhost SRV target."""
+    return [
+        executable,
+        "-P",
+        "Jarvis Companion",
+        "_jarvis-companion._tcp.",
+        "local.",
+        str(port),
+        hostname,
+        bind_host,
+        f"tls-host={hostname}",
+        "protocol=1",
+    ]
+
+
 def serve() -> None:
     if not wifi_gateway_enabled():
         raise RuntimeError("Local Wi-Fi gateway is disabled")
@@ -139,10 +155,7 @@ def serve() -> None:
     if not Path(dns_sd).is_file():
         raise RuntimeError("macOS dns-sd is unavailable; gateway was not started")
     advertiser = subprocess.Popen(
-        [
-            dns_sd, "-R", "Jarvis Companion", "_jarvis-companion._tcp.", "local.", str(port),
-            f"tls-host={hostname}", "protocol=1",
-        ],
+        _dns_sd_registration_args(dns_sd, hostname, bind_host, port),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
