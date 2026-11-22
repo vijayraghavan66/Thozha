@@ -1,6 +1,9 @@
 package com.jarvis.companion.ui
 
 import android.provider.Settings
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -32,8 +35,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -51,24 +56,43 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.core.view.WindowCompat
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 
-/** Root of the Jarvis 3.0 interface: four icon-only tabs, spring transitions, and full-screen overlays. */
+internal enum class ThozhaDestination(val label: String) {
+    HOME("Home"), CHAT("Chat"), TASKS("Tasks"), DEVICES("Devices"),
+}
+
+/** Root of Thozha: four labeled destinations, spring transitions, and focused secondary overlays. */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun JarvisApp(store: JarvisStore) {
     val context = LocalContext.current
     val systemScale = remember { Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) }
     val reduced = reducedMotion(systemScale, store.reduceMotion)
+    var lightTheme by remember(context) { mutableStateOf(AppearancePreference.isLight(context)) }
+    JarvisColor.useLightMode(lightTheme)
+    var destination by remember { mutableStateOf(ThozhaDestination.HOME) }
     val imeVisible = WindowInsets.isImeVisible
+    SideEffect {
+        context.findActivity()?.window?.let { window ->
+            WindowCompat.getInsetsController(window, window.decorView).apply {
+                isAppearanceLightStatusBars = lightTheme
+                isAppearanceLightNavigationBars = lightTheme
+            }
+        }
+    }
 
     // Telegram carries each sync as a user message and a bot response. Five-second polling caused
     // TDLib flood waits when send and sync share the same bot chat. Each sync is a Telegram message
@@ -94,18 +118,18 @@ fun JarvisApp(store: JarvisStore) {
         }
     }
 
-    // Opening an overlay or changing tab must not leave the composer focused behind it with the keyboard up.
+    // Leaving Chat must not leave its composer focused behind another destination or overlay.
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
-    LaunchedEffect(store.overlay, store.tab) {
-        if (store.overlay != null || store.tab != Tab.HOME) {
+    LaunchedEffect(store.overlay, destination) {
+        if (store.overlay != null || destination != ThozhaDestination.CHAT) {
             focusManager.clearFocus(force = true)
             keyboard?.hide()
         }
     }
 
-    BackHandler(enabled = store.overlay != null || store.tab != Tab.HOME) {
-        if (store.overlay != null) store.openOverlay(null) else store.selectTab(Tab.HOME)
+    BackHandler(enabled = store.overlay != null || destination != ThozhaDestination.HOME) {
+        if (store.overlay != null) store.openOverlay(null) else destination = ThozhaDestination.HOME
     }
 
     CompositionLocalProvider(LocalReducedMotion provides reduced) {
@@ -119,30 +143,39 @@ fun JarvisApp(store: JarvisStore) {
                         .align(Alignment.CenterHorizontally),
                 ) {
                     AnimatedContent(
-                        targetState = store.tab,
+                        targetState = destination,
                         transitionSpec = {
                             if (reduced) {
                                 EnterTransition.None togetherWith ExitTransition.None
                             } else {
                                 val direction = if (targetState.ordinal > initialState.ordinal) 1 else -1
-                                (fadeIn(motionSpring<Float>(false)) +
-                                    slideInHorizontally(motionSpring<IntOffset>(false)) { full -> full / 10 * direction }) togetherWith
-                                    (fadeOut(motionSpring<Float>(false)) +
-                                        slideOutHorizontally(motionSpring<IntOffset>(false)) { full -> -full / 10 * direction })
+                                (fadeIn(motionSpring<Float>(reduced)) +
+                                    slideInHorizontally(motionSpring<IntOffset>(reduced)) { full -> full / 10 * direction }) togetherWith
+                                    (fadeOut(motionSpring<Float>(reduced)) +
+                                        slideOutHorizontally(motionSpring<IntOffset>(reduced)) { full -> -full / 10 * direction })
                             }
                         },
                         label = "tab-content",
                         modifier = Modifier.fillMaxSize(),
-                    ) { tab ->
-                        when (tab) {
-                            Tab.HOME -> HomeScreen(
+                    ) { target ->
+                        when (target) {
+                            ThozhaDestination.HOME -> HomeOverviewScreen(
+                                store,
+                                onOpenChat = { destination = ThozhaDestination.CHAT },
+                                onOpenTasks = { destination = ThozhaDestination.TASKS },
+                                onOpenDevices = { destination = ThozhaDestination.DEVICES },
+                                onOpenSettings = { store.openOverlay(Overlay.SETTINGS) },
+                            )
+                            ThozhaDestination.CHAT -> HomeScreen(
                                 store,
                                 onOpenSettings = { store.openOverlay(Overlay.SETTINGS) },
-                                onOpenConnection = { store.selectTab(Tab.LIVE) },
+                                onOpenConnection = { destination = ThozhaDestination.DEVICES },
                             )
-                            Tab.ACTIVITY -> ActivityScreen(store)
-                            Tab.APPROVALS -> ApprovalsScreen(store)
-                            Tab.LIVE -> LiveScreen(store)
+                            ThozhaDestination.TASKS -> TasksScreen(store)
+                            ThozhaDestination.DEVICES -> DevicesScreen(
+                                store,
+                                onOpenSettings = { store.openOverlay(Overlay.SETTINGS) },
+                            )
                         }
                     }
                 }
@@ -151,17 +184,31 @@ fun JarvisApp(store: JarvisStore) {
                     enter = fadeIn(motionSpring<Float>(reduced)),
                     exit = fadeOut(motionSpring<Float>(reduced)),
                 ) {
-                    BottomTabs(store)
+                    BottomTabs(selected = destination, onSelect = { destination = it })
                 }
             }
 
-            OverlayHost(store, reduced)
+            OverlayHost(
+                store = store,
+                reduced = reduced,
+                lightTheme = lightTheme,
+                onLightThemeChange = { enabled ->
+                    lightTheme = enabled
+                    AppearancePreference.setLight(context, enabled)
+                    JarvisColor.useLightMode(enabled)
+                },
+            )
         }
     }
 }
 
 @Composable
-private fun OverlayHost(store: JarvisStore, reduced: Boolean) {
+private fun OverlayHost(
+    store: JarvisStore,
+    reduced: Boolean,
+    lightTheme: Boolean,
+    onLightThemeChange: (Boolean) -> Unit,
+) {
     // Keep the last overlay while it animates out, so its content does not disappear mid-transition.
     var shown by remember { mutableStateOf(Overlay.SETTINGS) }
     store.overlay?.let { shown = it }
@@ -172,7 +219,12 @@ private fun OverlayHost(store: JarvisStore, reduced: Boolean) {
     ) {
         Box(Modifier.fillMaxSize().background(JarvisColor.Background)) {
             when (shown) {
-                Overlay.SETTINGS -> SettingsScreen(store, onClose = { store.openOverlay(null) })
+                Overlay.SETTINGS -> SettingsScreen(
+                    store,
+                    onClose = { store.openOverlay(null) },
+                    lightTheme = lightTheme,
+                    onLightThemeChange = onLightThemeChange,
+                )
                 Overlay.HISTORY -> HistoryScreen(store, onClose = { store.openOverlay(null) })
             }
         }
@@ -180,9 +232,9 @@ private fun OverlayHost(store: JarvisStore, reduced: Boolean) {
 }
 
 @Composable
-private fun BottomTabs(store: JarvisStore) {
+private fun BottomTabs(selected: ThozhaDestination, onSelect: (ThozhaDestination) -> Unit) {
     val haptics = LocalHapticFeedback.current
-    val tabs = Tab.entries
+    val tabs = ThozhaDestination.entries
     BoxWithConstraints(
         Modifier
             .fillMaxWidth()
@@ -191,7 +243,7 @@ private fun BottomTabs(store: JarvisStore) {
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         val itemWidth = maxWidth / tabs.size
-        val position by animateFloatAsState(targetValue = store.tab.ordinal.toFloat(), animationSpec = jarvisSpring())
+        val position by animateFloatAsState(targetValue = selected.ordinal.toFloat(), animationSpec = jarvisSpring())
         Box(
             Modifier
                 .offset(x = itemWidth * position)
@@ -202,37 +254,58 @@ private fun BottomTabs(store: JarvisStore) {
         )
         Row(Modifier.fillMaxWidth()) {
             tabs.forEach { tab ->
-                val selected = tab == store.tab
+                val isSelected = tab == selected
                 Box(
                     Modifier
                         .weight(1f)
-                        .height(56.dp)
+                        .height(60.dp)
                         .semantics {
                             contentDescription = tab.label
-                            this.selected = selected
+                            this.selected = isSelected
                             role = Role.Tab
                         }
                         .clickable(role = Role.Tab) {
-                            if (!selected) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            store.selectTab(tab)
+                            if (!isSelected) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onSelect(tab)
                         },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Image(
-                        painter = rememberVectorPainter(iconFor(tab)),
-                        contentDescription = null,
-                        colorFilter = ColorFilter.tint(if (selected) JarvisColor.Sage else JarvisColor.TextMuted),
-                        modifier = Modifier.size(24.dp),
-                    )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(2.dp),
+                    ) {
+                        Image(
+                            painter = rememberVectorPainter(iconFor(tab)),
+                            contentDescription = null,
+                            colorFilter = ColorFilter.tint(if (isSelected) JarvisColor.Sage else JarvisColor.TextMuted),
+                            modifier = Modifier.size(21.dp),
+                        )
+                        BasicText(
+                            tab.label,
+                            style = JarvisType.Caption.copy(
+                                color = if (isSelected) JarvisColor.Sage else JarvisColor.TextMuted,
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                textAlign = TextAlign.Center,
+                            ),
+                            maxLines = 1,
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-private fun iconFor(tab: Tab): ImageVector = when (tab) {
-    Tab.HOME -> JarvisIcons.Home
-    Tab.ACTIVITY -> JarvisIcons.Activity
-    Tab.APPROVALS -> JarvisIcons.Approvals
-    Tab.LIVE -> JarvisIcons.Live
+private fun iconFor(tab: ThozhaDestination): ImageVector = when (tab) {
+    ThozhaDestination.HOME -> JarvisIcons.Home
+    ThozhaDestination.CHAT -> JarvisIcons.Chat
+    ThozhaDestination.TASKS -> JarvisIcons.Tasks
+    ThozhaDestination.DEVICES -> JarvisIcons.Devices
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

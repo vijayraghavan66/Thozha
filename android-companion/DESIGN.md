@@ -52,7 +52,7 @@ components:
 
 ## Tokens and runtime ownership
 
-Compose colors, typography, spacing, shapes, and motion are owned by `app/src/main/kotlin/com/jarvis/companion/ui/JarvisTheme.kt`. Frontmatter uses density-independent px equivalents (1 CSS px maps to 1 Android dp/sp at default font scale). Android XML colors and theme resources own only window chrome and non-Compose setup activities and mirror the same ink-and-sage palette. Navigation lives in `JarvisApp.kt`; screen behavior lives in the `ui/` package.
+Compose colors, typography, spacing, shapes, and motion are owned by `app/src/main/kotlin/com/jarvis/companion/ui/JarvisTheme.kt`. The app offers a deep ink-and-sage dark palette and a warm paper-and-forest light palette, both checked for accessible text contrast. Frontmatter describes the dark palette; runtime colors switch through the persisted appearance preference. Android XML colors and theme resources own only window chrome and non-Compose setup activities. Navigation lives in `JarvisApp.kt`; screen behavior lives in the `ui/` package.
 
 | Token | Value | Use |
 |---|---|---|
@@ -77,12 +77,11 @@ Compose colors, typography, spacing, shapes, and motion are owned by `app/src/ma
 
 ## Navigation and screens
 
-- Four icon-only destinations: Home, Activity, Approvals, Connection. Settings remains an overlay. Every icon has an accessibility name and a 56 dp touch target.
-- Home is the request and result surface. User messages align right; real Mac replies align left with a restrained Jarvis marker.
-- Home's presence signal is driven by the latest task and composer state; it never implies progress the supervisor did not report.
-- Activity presents real task states and summaries without inferred percentages.
-- Approvals lists exact Mac operations; details retain the full readable operation, target, expiry, redacted arguments, and digest.
-- Connection leads with paired/reachable state and last real sync. Raw relay endpoints and hardware diagnostics belong in advanced details, not the primary status.
+- Four labeled destinations: Home, Chat, Tasks, Devices. Settings remains secondary. Navigation labels have accessible tab roles and 60 dp touch targets.
+- Home presents assistant identity, truthful Mac availability, a real request composer, pending approvals, and the latest task summaries.
+- Chat holds the persistent conversation. User messages align right; real Mac replies align left. Code and long answers remain readable and selectable.
+- Tasks combines the real execution timeline, exact operation approvals, cancellation, and verified artifacts. No inferred percentage or fake streaming is shown.
+- Devices presents paired-computer status, last successful transport, local Wi-Fi identity/reachability, and optional Telegram state. Raw endpoints stay in advanced details.
 - Settings exposes appearance, notifications, privacy, local-model controls, and Advanced setup.
 
 ## Interaction and motion
@@ -90,6 +89,7 @@ Compose colors, typography, spacing, shapes, and motion are owned by `app/src/ma
 - The keyboard Send action and the send icon have the same behavior. Preserve the draft until it is accepted locally; disable duplicate sends while a request is in progress.
 - A busy send keeps its button dimensions and displays an indeterminate spinner. No percentage is shown for work with unknown duration.
 - Screen and navigation motion is brief and eased (140–180 ms). Reduced-motion settings disable it. Haptics are supplemental feedback.
+- Dark and light appearance is user-selectable and persists across launches. Status semantics and contrast remain visible in both palettes.
 - The presence signal uses three light strokes and animates only while a real task is active. Waiting approval, completion, failure, pause, and idle are static, distinct states.
 - `adjustResize` keeps the composer available with the keyboard. Inputs and important controls remain reachable above system navigation.
 - Errors stay attached to the task with a clear recovery step. A network timeout is described as unresolved because the Mac may still be working.

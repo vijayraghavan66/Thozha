@@ -42,6 +42,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -59,7 +63,12 @@ import com.jarvis.companion.telegram.TelegramActivity
 
 /** Settings: real connection diagnostics, a real sync action, real preferences, and the existing setup screens. */
 @Composable
-fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
+fun SettingsScreen(
+    store: JarvisStore,
+    onClose: () -> Unit,
+    lightTheme: Boolean = false,
+    onLightThemeChange: (Boolean) -> Unit = {},
+) {
     val context = LocalContext.current
     val settings = remember(context) { LinkSettings(context) }
     val modelPreflight = remember(context) { LocalAiManager.get(context).preflight() }
@@ -163,7 +172,7 @@ fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
                                 BasicText("I reviewed the Gemma terms", style = JarvisType.Section.copy(color = JarvisColor.Text))
                                 BasicText("Required before importing this gated model.", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
                             }
-                            Toggle(on = modelTermsAccepted) { modelTermsAccepted = !modelTermsAccepted }
+                            Toggle(on = modelTermsAccepted, label = "I reviewed the Gemma terms") { modelTermsAccepted = !modelTermsAccepted }
                         }
                     }
                     TextAction("Read Gemma terms", filled = false, modifier = Modifier.fillMaxWidth()) {
@@ -194,6 +203,17 @@ fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
                 SurfaceCard {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
+                            BasicText("Light appearance", style = JarvisType.Section.copy(color = JarvisColor.Text))
+                            BasicText("A warm, high-contrast palette for bright rooms.", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+                        }
+                        Toggle(on = lightTheme, label = "Light appearance") { onLightThemeChange(!lightTheme) }
+                    }
+                }
+            }
+            item {
+                SurfaceCard {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
                             BasicText("Reduce motion", style = JarvisType.Section.copy(color = JarvisColor.Text))
                             Spacer(Modifier.height(2.dp))
                             BasicText(
@@ -201,7 +221,7 @@ fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
                                 style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
                             )
                         }
-                        Toggle(on = store.reduceMotion) { store.updateReduceMotion(!store.reduceMotion) }
+                        Toggle(on = store.reduceMotion, label = "Reduce motion") { store.updateReduceMotion(!store.reduceMotion) }
                     }
                 }
             }
@@ -343,13 +363,18 @@ private fun aiModeLabel(mode: com.jarvis.companion.localai.LocalAiRequestMode): 
 
 /** A native switch drawn with Compose; the knob moves on a spring. */
 @Composable
-private fun Toggle(on: Boolean, onToggle: () -> Unit) {
+private fun Toggle(on: Boolean, label: String, onToggle: () -> Unit) {
     val knob by animateDpAsState(targetValue = if (on) 22.dp else 2.dp, animationSpec = jarvisSpring())
     Box(
         Modifier
             .size(width = 50.dp, height = 30.dp)
             .clip(RoundedCornerShape(50))
             .background(if (on) JarvisColor.Sage else JarvisColor.Border)
+            .semantics {
+                contentDescription = label
+                stateDescription = if (on) "On" else "Off"
+                role = androidx.compose.ui.semantics.Role.Switch
+            }
             .clickable(role = androidx.compose.ui.semantics.Role.Switch, onClick = onToggle),
     ) {
         Box(

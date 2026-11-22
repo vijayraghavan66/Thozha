@@ -57,7 +57,7 @@ fun ScreenHeader(title: String, subtitle: String) {
 
 /** Task records from the Mac, grouped by real state. Nothing is shown as done until the Mac reports it. */
 @Composable
-fun ActivityScreen(store: JarvisStore) {
+fun ActivityScreen(store: JarvisStore, showHeader: Boolean = true) {
     var pendingArtifact by remember { mutableStateOf<TaskArtifact?>(null) }
     val saveArchive = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         val artifact = pendingArtifact
@@ -66,7 +66,7 @@ fun ActivityScreen(store: JarvisStore) {
     }
     val sections = remember(store.entries, store.now) { TimelinePresentation.sections(store.entries) { clockTime(it) } }
     Column(Modifier.fillMaxSize()) {
-        ScreenHeader("Activity", "Tasks as the Mac has reported them. Unconfirmed requests stay marked as such.")
+        if (showHeader) ScreenHeader("Activity", "Tasks as the Mac has reported them. Unconfirmed requests stay marked as such.")
         if (sections.isEmpty()) {
             EmptyNote("No tasks yet", "Requests you send and the Mac's real results appear here, with the state the Mac reports.")
         } else {
@@ -232,7 +232,7 @@ private fun TaskRow(row: TimelineRow, progress: List<TaskProgressEvent>, store: 
  * the digest and the expiry. The decision controls appear only on the detail page, and only while not expired.
  */
 @Composable
-fun ApprovalsScreen(store: JarvisStore) {
+fun ApprovalsScreen(store: JarvisStore, showHeader: Boolean = true) {
     var selectedId by remember { mutableStateOf<String?>(null) }
     val selected = store.approvals.firstOrNull { it.approvalId == selectedId }
     if (selectedId != null && selected == null) selectedId = null
@@ -246,7 +246,7 @@ fun ApprovalsScreen(store: JarvisStore) {
         modifier = Modifier.fillMaxSize(),
     ) { current ->
         if (current == null) {
-            ApprovalList(store) { selectedId = it.approvalId }
+            ApprovalList(store, showHeader) { selectedId = it.approvalId }
         } else {
             ApprovalDetail(store, current) { selectedId = null }
         }
@@ -254,9 +254,9 @@ fun ApprovalsScreen(store: JarvisStore) {
 }
 
 @Composable
-private fun ApprovalList(store: JarvisStore, onSelect: (ApprovalReview) -> Unit) {
+private fun ApprovalList(store: JarvisStore, showHeader: Boolean, onSelect: (ApprovalReview) -> Unit) {
     Column(Modifier.fillMaxSize()) {
-        ScreenHeader("Approvals", "Exact operations the Mac is waiting on. Nothing runs until you approve it once.")
+        if (showHeader) ScreenHeader("Approvals", "Exact operations the Mac is waiting on. Nothing runs until you approve it once.")
         if (store.approvals.isEmpty() && store.approvalDecisions.isEmpty()) {
             EmptyNote(
                 "Nothing waiting",

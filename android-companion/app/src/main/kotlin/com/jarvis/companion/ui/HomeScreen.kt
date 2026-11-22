@@ -243,7 +243,11 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit, onOpenConnection:
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
                 itemsIndexed(newest, key = { _, item -> item.id }) { _, item ->
-                    MessageRow(item, onSpeak = if (item.speaker == Speaker.JARVIS) ({ voice.speak(item.text) }) else null)
+                    MessageRow(
+                        item,
+                        assistantName = store.assistantName,
+                        onSpeak = if (item.speaker == Speaker.JARVIS) ({ voice.speak(item.text) }) else null,
+                    )
                 }
             }
         }
@@ -253,7 +257,7 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit, onOpenConnection:
 }
 
 @Composable
-private fun MessageRow(item: ConversationItem, onSpeak: (() -> Unit)?) {
+private fun MessageRow(item: ConversationItem, assistantName: String, onSpeak: (() -> Unit)?) {
     val isUser = item.speaker == Speaker.USER
     Column(
         Modifier.fillMaxWidth(),
@@ -272,7 +276,7 @@ private fun MessageRow(item: ConversationItem, onSpeak: (() -> Unit)?) {
             }
         } else {
             Column(Modifier.fillMaxWidth()) {
-                SectionLabel("Jarvis", Modifier.padding(bottom = 6.dp))
+                SectionLabel(assistantName, Modifier.padding(bottom = 6.dp))
                 SelectionContainer {
                     BasicText(
                         item.text.ifBlank { "No text was returned for this request." },

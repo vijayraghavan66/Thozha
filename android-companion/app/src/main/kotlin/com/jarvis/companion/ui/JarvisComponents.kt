@@ -33,7 +33,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Path
@@ -116,7 +115,7 @@ fun HeroSurfaceCard(
             .fillMaxWidth()
             .animateContentSize(jarvisSpring())
             .clip(shape)
-            .background(Brush.linearGradient(listOf(JarvisColor.SurfaceRaised, JarvisColor.SageTint)))
+            .background(JarvisColor.SurfaceRaised)
             .border(1.dp, JarvisColor.Border.copy(alpha = 0.72f), shape)
             .padding(20.dp),
     ) {

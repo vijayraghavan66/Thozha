@@ -1,5 +1,6 @@
 package com.jarvis.companion.presentation
 
+
 private var assertions = 0
 
 private fun check(condition: Boolean, message: String) {
@@ -16,6 +17,16 @@ private fun record(id: String, state: String?, text: String = "", summary: Strin
     )
 
 fun main() {
+    // --- Thozha shell and theme --------------------------------------------------------------------------------
+    check(
+        com.jarvis.companion.ui.ThozhaDestination.entries.map { it.label } == listOf("Home", "Chat", "Tasks", "Devices"),
+        "primary navigation is Home, Chat, Tasks, Devices",
+    )
+    check(com.jarvis.companion.ui.ThozhaPalette.Dark.contrast(com.jarvis.companion.ui.ThozhaPalette.Dark.text, com.jarvis.companion.ui.ThozhaPalette.Dark.background) >= 7.0, "dark theme primary text contrast is at least 7:1")
+    check(com.jarvis.companion.ui.ThozhaPalette.Dark.contrast(com.jarvis.companion.ui.ThozhaPalette.Dark.textMuted, com.jarvis.companion.ui.ThozhaPalette.Dark.background) >= 5.0, "dark theme secondary text remains readable")
+    check(com.jarvis.companion.ui.ThozhaPalette.Light.contrast(com.jarvis.companion.ui.ThozhaPalette.Light.text, com.jarvis.companion.ui.ThozhaPalette.Light.background) >= 7.0, "light theme primary text contrast is at least 7:1")
+    check(com.jarvis.companion.ui.ThozhaPalette.Light.contrast(com.jarvis.companion.ui.ThozhaPalette.Light.textMuted, com.jarvis.companion.ui.ThozhaPalette.Light.background) >= 5.0, "light theme secondary text remains readable")
+
     // --- states -----------------------------------------------------------------------------------------------
     check(TaskStates.toneFor("completed") == TaskTone.COMPLETED, "state names are case-insensitive")
     check(TaskStates.toneFor("WAITING_APPROVAL") == TaskTone.WAITING, "approval wait is WAITING")

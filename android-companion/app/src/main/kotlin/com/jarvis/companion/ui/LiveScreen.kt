@@ -57,7 +57,12 @@ import com.jarvis.companion.voice.VoiceRecognitionProvider
  * A configured route is never treated as proof that the Mac is reachable.
  */
 @Composable
-fun LiveScreen(store: JarvisStore) {
+fun LiveScreen(
+    store: JarvisStore,
+    showHeader: Boolean = true,
+    showPhoneDetails: Boolean = true,
+    showVoice: Boolean = true,
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val status = store.linkStatus
     val telegram = store.telegram
@@ -82,7 +87,7 @@ fun LiveScreen(store: JarvisStore) {
     var diagnosticsExpanded by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
-        ScreenHeader("Connection", "Mac and phone status, from the latest real sync.")
+        if (showHeader) ScreenHeader("Devices", "Paired computers and their real connection state.")
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
@@ -188,15 +193,17 @@ fun LiveScreen(store: JarvisStore) {
                 }
             }
 
-            item { SectionLabel("This phone") }
-            item {
-                FactCard(
-                    listOf(
-                        "Device" to listOf(phone.manufacturer, phone.model).filter(String::isNotBlank).joinToString(" "),
-                        "Android" to "${phone.androidApi} · ${phone.supportedAbis.firstOrNull() ?: "Unknown processor"}",
-                        "Memory" to "${memoryLabel(phone.totalRamBytes)} total · ${memoryLabel(phone.availableRamBytes)} available",
-                    ),
-                )
+            if (showPhoneDetails) {
+                item { SectionLabel("This phone") }
+                item {
+                    FactCard(
+                        listOf(
+                            "Device" to listOf(phone.manufacturer, phone.model).filter(String::isNotBlank).joinToString(" "),
+                            "Android" to "${phone.androidApi} · ${phone.supportedAbis.firstOrNull() ?: "Unknown processor"}",
+                            "Memory" to "${memoryLabel(phone.totalRamBytes)} total · ${memoryLabel(phone.availableRamBytes)} available",
+                        ),
+                    )
+                }
             }
 
             item {
@@ -232,8 +239,10 @@ fun LiveScreen(store: JarvisStore) {
                 }
             }
 
-            item { SectionLabel("Voice") }
-            item { LiveVoiceControls(store) }
+            if (showVoice) {
+                item { SectionLabel("Voice") }
+                item { LiveVoiceControls(store) }
+            }
             item { Spacer(Modifier.height(16.dp)) }
         }
     }

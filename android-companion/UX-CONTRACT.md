@@ -11,13 +11,13 @@
 
 | Capability | Canonical owner | Source of truth | Verification |
 |---|---|---|---|
-| Main navigation | `JarvisApp` four-item bottom navigation plus Settings overlay | `DESIGN.md` | Build and phone review |
+| Main navigation | `JarvisApp` Home/Chat/Tasks/Devices navigation plus Settings overlay | `DESIGN.md` | Build and phone review |
 | Free-text request and reply | Home conversation in `MainActivity`; `LinkRuntime` local record | This contract and the authenticated Mac task API | Android build, Mac tests, real-device task |
 | Task status/result | Activity task list and task detail | OpenJarvis supervisor result | API result plus phone display |
 | Link approval review | Activity/detail in `MainActivity` | Encrypted Link approval event and Mac supervisor | Exact digest and device decision test |
 | Pairing invitation scan | Google Play services Code Scanner | Signed QR contract | Phone scan and Mac confirmation |
 | Device credential | Android Keystore and encrypted `SecureStore` | Pairing API | Restart and authenticated request |
-| Connection status | Connection tab in `JarvisApp` | Link pairing state, last sync, and Telegram session | Fresh unpaired, paired, reachable, stale, and error states |
+| Connection status | Devices destination in `JarvisApp` | Link pairing state, last sync, and Telegram session | Fresh unpaired, paired, reachable, stale, and error states |
 
 ## Home task flow
 
@@ -51,7 +51,7 @@ Do not queue a privileged approval decision offline. After interruption, refresh
 
 ## Navigation, keyboard, and motion
 
-- Home, Activity, Approvals, and Connection are peer destinations represented by icon-only controls with accessibility labels. Settings remains an overlay.
+- Home, Chat, Tasks, and Devices are peer destinations represented by labeled icon tabs with accessibility names. Settings remains secondary.
 - The input uses `IME_ACTION_SEND`; tapping the send control and keyboard action perform the same operation.
 - The window uses `adjustResize`, and the composer remains above the virtual keyboard and bottom navigation.
 - Animations are short and eased. Respect the system reduced-motion setting. Animation never replaces text state or action feedback.
