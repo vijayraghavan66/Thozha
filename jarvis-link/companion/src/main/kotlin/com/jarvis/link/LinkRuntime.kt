@@ -408,7 +408,7 @@ class LinkRuntime(
             "task_id" to "",
             "transport" to transport,
             "capability_scope" to capabilityScope,
-            "lookup_link_status" to lookupLinkStatus,
+            "lookup_link_status" to (lookupLinkStatus && executionTarget == "MAC"),
             "updated_at_unix_ms" to now(),
         ))
         save(mapOf("conversation" to entries.takeLast(100)))
