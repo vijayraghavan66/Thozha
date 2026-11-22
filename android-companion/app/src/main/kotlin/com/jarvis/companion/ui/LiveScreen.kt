@@ -42,6 +42,7 @@ import com.jarvis.companion.link.LinkMode
 import com.jarvis.companion.link.LinkSettings
 import com.jarvis.companion.data.LocalGatewayDiscovery
 import com.jarvis.companion.AdvancedActivity
+import com.jarvis.companion.telegram.TelegramActivity
 import com.jarvis.companion.localai.AndroidDeviceProfileReader
 import com.jarvis.companion.presentation.MacLinkPresentation
 import com.jarvis.companion.presentation.ConnectionRoutePresentation
@@ -122,7 +123,9 @@ fun LiveScreen(
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             if (connection.paired || connection.pendingEnrollment) store.syncNow()
-                            else context.startActivity(Intent(context, AdvancedActivity::class.java))
+                            else context.startActivity(
+                                Intent(context, AdvancedActivity::class.java).putExtra("open_device_pairing", true),
+                            )
                         }
                         if (!connection.paired || connection.pendingEnrollment) {
                             BasicText(
@@ -147,6 +150,37 @@ fun LiveScreen(
                         "Queued on phone" to "${status?.outboxSize ?: 0} messages",
                     ),
                 )
+            }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SectionLabel("Optional remote access")
+                    SurfaceCard {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            BasicText(
+                                if (store.telegramRemoteEnabled) "Telegram remote access is on" else "Local-only mode",
+                                style = JarvisType.Section.copy(color = JarvisColor.Text),
+                            )
+                            BasicText(
+                                if (store.telegramRemoteEnabled)
+                                    "Telegram is optional. Turning it off keeps its saved sign-in on this phone and uses only local Mac routes."
+                                else
+                                    "This phone uses the Mac's local Wi-Fi or USB route. No Telegram account or cloud relay is required.",
+                                style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
+                            )
+                            TextAction(
+                                label = if (store.telegramRemoteEnabled) "Turn off Telegram remote access" else "Enable Telegram remote access",
+                                filled = store.telegramRemoteEnabled,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { store.updateTelegramRemoteEnabled(!store.telegramRemoteEnabled) }
+                            TextAction(
+                                label = "Telegram account setup",
+                                filled = false,
+                                enabled = store.telegramRemoteEnabled,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { context.startActivity(Intent(context, TelegramActivity::class.java)) }
+                        }
+                    }
+                }
             }
             item {
                 TextAction(

@@ -63,6 +63,8 @@ class SecureStore(context: Context) {
         token: String,
         serverPublicKeyDer: ByteArray,
         serverFingerprint: String,
+        baseUrl: String? = null,
+        localGatewayPin: LocalGatewayPin? = null,
     ) {
         require(token.isNotBlank())
         val pin = validateServerIdentity(serverPublicKeyDer, serverFingerprint)
@@ -70,15 +72,28 @@ class SecureStore(context: Context) {
         if (existing != null && !sameServerIdentity(existing, pin)) {
             throw SecurityException("The Mac server identity changed from the pinned key.")
         }
+        localGatewayPin?.let(::validateLocalGatewayPin)
         val (tokenIv, tokenCipher) = encrypt(token)
         val (pinIv, pinCipher) = encrypt(pinRecord(pin))
-        prefs.edit()
+        val edit = prefs.edit()
             .putString(KEY_DEVICE_ID, deviceId)
             .putString(KEY_TOKEN_IV, encode(tokenIv))
             .putString(KEY_TOKEN_CIPHER, encode(tokenCipher))
             .putString(KEY_SERVER_PIN_IV, encode(pinIv))
             .putString(KEY_SERVER_PIN_CIPHER, encode(pinCipher))
-            .apply()
+        baseUrl?.let { edit.putString(KEY_BASE_URL, it.trim().trimEnd('/')) }
+        if (localGatewayPin != null) {
+            val wifiRecord = listOfNotNull(
+                localGatewayPin.hostname,
+                localGatewayPin.port.toString(),
+                localGatewayPin.certificateSha256,
+                localGatewayPin.address,
+            ).joinToString("\n")
+            val (wifiIv, wifiCipher) = encrypt(wifiRecord)
+            edit.putString(KEY_WIFI_PIN_IV, encode(wifiIv))
+                .putString(KEY_WIFI_PIN_CIPHER, encode(wifiCipher))
+        }
+        edit.apply()
     }
 
     fun pinnedServerIdentity(): PinnedServerIdentity? {

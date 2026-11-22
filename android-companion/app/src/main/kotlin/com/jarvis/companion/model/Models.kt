@@ -60,9 +60,15 @@ data class PairingInvitation(
     val serverFingerprint: String,
     val serverPublicKeyBase64: String,
     val verifiedServerKeyFingerprint: String? = null,
+    /** Present only for protocol v2 local-Wi-Fi invitations. */
+    val gatewayAddress: String? = null,
+    val gatewayPort: Int? = null,
+    val gatewayCertificateSha256: String? = null,
 )
 
-data class PairingSession(val invitationId: String)
+data class PairingSession(val invitation: PairingInvitation) {
+    val invitationId: String get() = invitation.invitationId
+}
 
 sealed interface PairingStatus {
     data object Pending : PairingStatus

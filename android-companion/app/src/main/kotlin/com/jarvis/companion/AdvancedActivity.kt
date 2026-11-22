@@ -1,7 +1,6 @@
 package com.jarvis.companion
 
 import android.app.AlertDialog
-import android.app.Activity
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -24,6 +23,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.ComponentActivity
 import com.jarvis.companion.data.JarvisApi
 import com.jarvis.companion.data.PairingInvitationSignature
 import com.jarvis.companion.data.SecureStore
@@ -47,15 +47,14 @@ import com.jarvis.companion.model.PairingInvitation
 import com.jarvis.companion.model.PairingSession
 import com.jarvis.companion.model.PairingStatus
 import com.jarvis.companion.model.TaskDetail
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
-import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-class AdvancedActivity : Activity() {
+class AdvancedActivity : ComponentActivity() {
     private enum class Screen { TASKS, APPROVALS, ACTIVITY, COMPLETED, DEVICE, TASK_DETAIL, APPROVAL_DETAIL }
 
     private lateinit var store: SecureStore
@@ -65,6 +64,15 @@ class AdvancedActivity : Activity() {
 
     private val pairingPollHandler = Handler(Looper.getMainLooper())
     private val pairingPollRunnable = Runnable { refreshPairingStatus() }
+    private val qrScanner = registerForActivityResult(ScanContract()) { result ->
+        val payload = result.contents
+        if (payload.isNullOrBlank()) {
+            statusMessage = "QR scan canceled or no code was read."
+            render()
+        } else {
+            handleInvitationQr(payload)
+        }
+    }
     private var screen = Screen.TASKS
     private var activeTasks: List<JarvisTask>? = null
     private var completedTasks: List<JarvisTask>? = null
@@ -75,6 +83,7 @@ class AdvancedActivity : Activity() {
     private var invitation: PairingInvitation? = null
     private var pairingSession: PairingSession? = null
     private var pairingStatus: PairingStatus? = null
+    private var invitationAwaitingLocalNetworkPermission: PairingInvitation? = null
     private var candidateTailscaleUrlDraft = ""
     private var isBusy = false
     private var errorMessage = ""
@@ -87,6 +96,7 @@ class AdvancedActivity : Activity() {
         store = SecureStore(this)
         api = JarvisApi(this, store)
         worker = Executors.newSingleThreadExecutor()
+        if (intent.getBooleanExtra("open_device_pairing", false)) screen = Screen.DEVICE
         LinkAlerts.ensureChannels(this)
         openApprovalFrom(intent)
         render()
@@ -163,13 +173,32 @@ class AdvancedActivity : Activity() {
     }
 
     @Deprecated("Deprecated in Java")
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         @Suppress("DEPRECATION")
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_POST_NOTIFICATIONS) {
-            linkMessage = if (LinkAlerts.canPost(this)) "Notifications allowed. New approval requests will alert you."
-            else "Notifications are off. Approvals still appear when you open the app."
-            render()
+        when (requestCode) {
+            REQUEST_POST_NOTIFICATIONS -> {
+                linkMessage = if (LinkAlerts.canPost(this)) "Notifications allowed. New approval requests will alert you."
+                else "Notifications are off. Approvals still appear when you open the app."
+                render()
+            }
+            REQUEST_CAMERA -> {
+                if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) startQrScanner()
+                else {
+                    statusMessage = "Camera access was denied. Pairing was not started; allow camera access when you choose to scan."
+                    render()
+                }
+            }
+            REQUEST_LOCAL_NETWORK -> {
+                val invitation = invitationAwaitingLocalNetworkPermission
+                invitationAwaitingLocalNetworkPermission = null
+                if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED && invitation != null) {
+                    submitPairing(invitation)
+                } else {
+                    statusMessage = "Local network access was denied. No pairing request was sent. Use a USB invitation or allow local network access in Android settings."
+                    render()
+                }
+            }
         }
     }
 
@@ -600,7 +629,7 @@ class AdvancedActivity : Activity() {
                         requestCameraAndScan()
                     })
                     addView(text(
-                        "Google Play services scans QR codes in its own UI. This app does not request camera permission or save camera images.",
+                        "QR scanning happens on this phone. Camera frames are used only to read the invitation and are not saved or uploaded.",
                         12, color(R.color.muted),
                     ).apply { setPadding(0, dp(10), 0, 0) })
                     if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
@@ -613,13 +642,24 @@ class AdvancedActivity : Activity() {
                 card(page) {
                     addView(text("Review this Mac invitation", 19, color(R.color.paper), bold = true))
                     addView(labelValue("INVITATION ID", currentInvitation.invitationId))
-                    addView(labelValue("LOCAL SERVER URL", currentInvitation.serverUrl))
+                    addView(labelValue(
+                        if (currentInvitation.gatewayAddress != null) "LOCAL WI-FI GATEWAY" else "LOCAL SERVER URL",
+                        currentInvitation.serverUrl,
+                    ))
+                    if (currentInvitation.gatewayAddress != null) {
+                        addView(labelValue("SIGNED PRIVATE ADDRESS", "${currentInvitation.gatewayAddress}:${currentInvitation.gatewayPort}"))
+                        addView(text("The QR binds HTTPS to the Mac certificate and signing identity.", 13, color(R.color.muted)))
+                    }
                     addView(labelValue("MAC SERVER FINGERPRINT", currentInvitation.serverFingerprint))
                     addView(labelValue(
                         "VERIFIED SERVER KEY FINGERPRINT",
                         currentInvitation.verifiedServerKeyFingerprint ?: "Not verified",
                     ))
-                addView(labelValue("USB REVERSE COMMAND", reverseCommand(currentInvitation.serverUrl)))
+                    if (currentInvitation.gatewayAddress == null) {
+                        addView(labelValue("USB REVERSE COMMAND", reverseCommand(currentInvitation.serverUrl)))
+                    } else {
+                        addView(text("Local Wi-Fi pairing — no USB tunnel is used.", 13, color(R.color.success)))
+                    }
                     addView(labelValue("EXPIRES", currentInvitation.expiresAt))
                     addView(labelValue("THIS PHONE", api.deviceName()))
                     addView(labelValue("PHONE KEY FINGERPRINT", store.signingKeyFingerprint()))
@@ -628,14 +668,7 @@ class AdvancedActivity : Activity() {
                         13, color(R.color.muted),
                     ).apply { setPadding(0, dp(10), 0, dp(12)) })
                     addView(actionButton(if (isBusy) "Sending signed request…" else "Request pairing on Mac", R.color.signal) {
-                        pairingSession = PairingSession(currentInvitation.invitationId)
-                        pairingStatus = PairingStatus.Pending
-                        runRequest("Sending a signed pairing request…", { api.completePairing(currentInvitation) }) { session ->
-                            pairingSession = session
-                            pairingStatus = PairingStatus.Pending
-                            statusMessage = "Request sent. Confirm this phone in the Mac's local pending-devices screen."
-                            schedulePairingPoll(PAIRING_POLL_INTERVAL_MS)
-                        }
+                        requestPairing(currentInvitation)
                     })
                     if (pairingSession == null) {
                         addView(actionButton("Scan a different invitation", R.color.muted, secondary = true) {
@@ -697,7 +730,7 @@ class AdvancedActivity : Activity() {
         card(page, compact = true) {
             addView(text("Local-only connection", 15, color(R.color.paper), bold = true))
             addView(text(
-                "Connect the phone by USB and run the reverse command shown in the invitation preview on the Mac. The QR URL must use loopback. LAN, public, VPN, and tunnel addresses are blocked; no remote listener is enabled.",
+                "A signed Mac QR can pair this phone directly over HTTPS on local Wi-Fi. USB remains available as recovery; public, VPN, and tunnel addresses are not accepted here.",
                 13, color(R.color.muted),
             ).apply { setPadding(0, dp(6), 0, 0) })
         }
@@ -1030,32 +1063,48 @@ class AdvancedActivity : Activity() {
     private fun requestCameraAndScan() {
         if (isBusy) return
         errorMessage = ""
-        statusMessage = "Opening the Google Play services QR scanner…"
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            statusMessage = "Camera access is used only to read the Mac's QR invitation. Frames are not saved or uploaded."
+            render()
+            requestPermissions(arrayOf(android.Manifest.permission.CAMERA), REQUEST_CAMERA)
+            return
+        }
+        startQrScanner()
+    }
+
+    private fun startQrScanner() {
+        statusMessage = "Opening the on-device QR scanner…"
         render()
-        val options = GmsBarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .enableAutoZoom()
-            .build()
-        GmsBarcodeScanning.getClient(this, options).startScan()
-            .addOnSuccessListener { barcode ->
-                val payload = barcode.rawValue
-                if (payload.isNullOrBlank()) {
-                    statusMessage = ""
-                    errorMessage = "The scanner did not return QR contents. Scan the Mac invitation again."
-                    render()
-                } else {
-                    handleInvitationQr(payload)
-                }
-            }
-            .addOnCanceledListener {
-                statusMessage = "QR scan canceled."
-                render()
-            }
-            .addOnFailureListener {
-                statusMessage = ""
-                errorMessage = "Google Play services could not start the QR scanner. Update Play services and try again."
-                render()
-            }
+        qrScanner.launch(
+            ScanOptions()
+                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt("Scan the short-lived QR shown by Thozha on your Mac")
+                .setBeepEnabled(false)
+                .setBarcodeImageEnabled(false)
+                .setOrientationLocked(false),
+        )
+    }
+
+    private fun requestPairing(invitation: PairingInvitation) {
+        if (invitation.gatewayAddress != null && Build.VERSION.SDK_INT >= 37 &&
+            checkSelfPermission("android.permission.ACCESS_LOCAL_NETWORK") != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            invitationAwaitingLocalNetworkPermission = invitation
+            statusMessage = "Allow local network access so this phone can reach the signed Mac gateway."
+            render()
+            requestPermissions(arrayOf("android.permission.ACCESS_LOCAL_NETWORK"), REQUEST_LOCAL_NETWORK)
+            return
+        }
+        submitPairing(invitation)
+    }
+
+    private fun submitPairing(invitation: PairingInvitation) {
+        runRequest("Sending a signed pairing request…", { api.completePairing(invitation) }) { session ->
+            pairingSession = session
+            pairingStatus = PairingStatus.Pending
+            statusMessage = "Request sent. Confirm this phone in the Mac's local pending-devices screen."
+            schedulePairingPoll(PAIRING_POLL_INTERVAL_MS)
+        }
     }
 
     /** Runs the shared Python-signed fixture through the production QR parser on-device. */
@@ -1140,7 +1189,7 @@ class AdvancedActivity : Activity() {
         val session = pairingSession ?: return
         if (screen != Screen.DEVICE || isBusy) return
         pairingPollHandler.removeCallbacks(pairingPollRunnable)
-        runRequest("Checking for Mac confirmation…", { api.getPairingStatus(session.invitationId) }) { result ->
+        runRequest("Checking for Mac confirmation…", { api.getPairingStatus(session.invitation) }) { result ->
             pairingStatus = result
             when (result) {
                 PairingStatus.Pending -> schedulePairingPoll(PAIRING_POLL_INTERVAL_MS)
@@ -1158,10 +1207,8 @@ class AdvancedActivity : Activity() {
                     pairingPollHandler.removeCallbacks(pairingPollRunnable)
                     runRequest("Mac confirmed this device. Claiming its expiring token…", {
                         api.claimPairing(
-                            session.invitationId,
+                            session.invitation,
                             result.claimChallenge,
-                            invitation?.serverPublicKeyBase64 ?: throw ApiException("Verified server identity is missing."),
-                            invitation?.serverFingerprint ?: throw ApiException("Verified server fingerprint is missing."),
                         )
                     }) {
                         pairingSession = null
@@ -1483,6 +1530,8 @@ class AdvancedActivity : Activity() {
     companion object {
         private const val PAIRING_POLL_INTERVAL_MS = 2_500L
         private const val REQUEST_POST_NOTIFICATIONS = 4201
+        private const val REQUEST_CAMERA = 4202
+        private const val REQUEST_LOCAL_NETWORK = 4203
     }
 }
 

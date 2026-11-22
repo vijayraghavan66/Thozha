@@ -1,71 +1,60 @@
-# Jarvis Companion
+# Thozha Android
 
-Native Android client for the Mac-side Jarvis supervisor. It displays tasks and exact-operation approval requests. Pairing uses a signed QR invitation and requires confirmation in the Mac's local pending-device UI before the phone can claim an expiring token.
+Native Kotlin and Jetpack Compose companion for the Mac-side OpenJarvis supervisor. Thozha is local-first: the raw Mac API stays on loopback, and the phone connects through a narrow HTTPS gateway on the same private network. The existing USB/ADB-reverse route remains a recovery path. Telegram is optional remote access.
 
-**Current status:** QR pairing and task/approval screens compile. The Android client does not expose a server, send a permanent API key, or enable a public relay. Firebase push and local approval notifications are not implemented.
+**Current state:** The signed local-Wi-Fi invitation parser, TLS pin validation, local pairing client and four-destination UI are implemented on the Android branch. The matching Mac gateway v2 implementation is isolated for review and has not yet been integrated into the canonical OpenJarvis checkout or enabled in production. Do not claim first-pair Wi-Fi is end-to-end until those server changes are integrated and a disposable pairing test passes.
 
 ## Build and install
 
 Build the debug APK:
 
-    ./scripts/build_debug.sh
+    ./gradlew :app:assembleDebug
 
 APK output:
 
     app/build/outputs/apk/debug/app-debug.apk
 
-Install with an Android device connected by USB:
+Install in place only after checking package identity and signer:
 
     adb install -r app/build/outputs/apk/debug/app-debug.apk
-    adb shell monkey -p com.jarvis.companion.debug 1
 
-Do not clear app data during an in-place update. Pairing has not been exercised against the live Mac API in this build.
+Do not clear app data or uninstall the app to update it. The package remains `com.jarvis.companion.debug` with the existing signing identity.
 
-## Screens
+## Main destinations
 
-- **Tasks:** active task list and current step.
-- **Approvals:** pending operations that require a user decision.
-- **Activity:** recent task events and task timelines.
-- **Done:** completed tasks.
-- **Device:** scan a signed Mac invitation QR, inspect server and phone-key fingerprints, request enrollment, and watch for Mac confirmation.
-- **Details:** task event timeline or approval review with exact operation, target, canonical arguments, expiry, server risk label, and full operation digest.
+- **Home:** assistant overview, real connection state, active task/progress summaries, and request composer.
+- **Chat:** persistent assistant conversation with actual task results.
+- **Tasks:** Activity and exact-operation approval review.
+- **Devices:** paired Mac status, local Wi-Fi state, and optional Telegram remote access.
+- **Settings:** appearance, accessibility, notifications, local model, privacy, and advanced setup.
 
-## QR pairing API contract
+Progress is rendered only from persisted task events. The app does not synthesize token streaming or percentages.
 
-The Mac's local UI creates the invitation. Android never calls the invitation-creation endpoint and never receives the Mac master API key.
+## Pairing protocol
 
-- The Mac local UI calls POST /v1/jarvis/pair/invitations over loopback with its local authorization.
-- The QR JSON contains protocol, server_url, server_fingerprint, server_public_key, invitation_id, challenge, expires_at, and server_signature.
-- server_public_key is Base64 DER P-256 SubjectPublicKeyInfo. server_fingerprint is sha256 plus the lowercase SHA-256 hex digest of those DER bytes.
-- server_signature is ECDSA P-256/SHA-256 over compact UTF-8 JSON with lexicographically sorted keys, including protocol and server_public_key and excluding server_signature. The app verifies the signature and fingerprint before showing the invitation.
-- POST /v1/jarvis/pair/complete sends invitation_id, device_name, public_key, and an ECDSA/SHA-256 signature over the raw UTF-8 invitation challenge. It returns pending confirmation, not a token.
-- GET /v1/jarvis/pair/status/{invitation_id} returns pending, rejected, expired, or approved with a fresh claim_challenge. It never returns the token.
-- Only after the user confirms the device in the Mac's local pending-device UI, Android signs claim_challenge and sends POST /v1/jarvis/pair/claim with invitation_id and signature. The one-time expiring device token is encrypted with Android Keystore.
+The Mac creates invitations through its loopback owner UI. The QR contains no persistent device token or Mac API key. The phone signs the short-lived challenge with a device key held in Android Keystore. Scanning alone never grants access: the Mac's local pending-device screen must confirm the exact device name and public-key fingerprint before the phone can claim its one-time expiring credential.
 
-The Mac pending-device screen should show the Android device name and key fingerprint and require a local Confirm or Reject action. No invitation, status, decision, or claim endpoint should be exposed on a LAN or public interface by this client.
+- **v1 — USB compatibility:** signed URL must be loopback (`127.0.0.1`/`localhost`) and uses the existing USB reverse path. The app and server retain v1 compatibility.
+- **v2 — direct local Wi-Fi:** the Mac signs `server_url=https://<mac-name>.local:8443`, the private gateway address, port, exact TLS certificate SHA-256 pin, server P-256 identity, invitation challenge and expiry. The app validates all signed fields and the private address before connecting. It pins the HTTPS certificate and exact DNS SAN before sending the phone's signed pairing proof. mDNS is an optimization; the invitation's signed private IP supports initial connection when DNS-SD is unavailable.
+- The opt-in Wi-Fi gateway exposes only invitation-ID-scoped completion, status and claim routes before pairing. It does not expose invitation creation, pending-device enumeration, Mac decisions, raw API routes, documentation or arbitrary proxy paths.
+- The Mac retains the final local Confirm/Reject step. Only the approved one-time claim can return a device token; token and pins are encrypted with Android Keystore.
 
-## Future pinned Tailscale migration
+The v2 backend is not yet live or enabled. See the current checkpoint in `~/Documents/Jarvis-Lab/PROGRESS.md` before testing new-device pairing.
 
-The current saved USB URL is not changed automatically. On Device, the user can first bootstrap the Mac identity over the existing loopback connection. The app authenticates that request with its already stored device bearer; it verifies the nonce, device ID, P-256 public-key fingerprint, and HMAC-SHA256 proof before encrypting the server pin with Android Keystore.
+## Local and optional remote operation
 
-For a user-requested host switch, Android accepts only an HTTPS *.ts.net URL that resolves entirely to Tailscale's assigned 100.64.0.0/10 or fd7a:115c:a1e0::/48 addresses. It contacts the candidate without the device bearer, verifies standard TLS and the nonce-bound P-256 identity signature against the stored pin, then changes the saved URL while preserving the encrypted token. Any mismatch, TLS failure, public/LAN DNS answer, or rejected challenge leaves the current URL and token untouched.
+- **Local mode:** the device-to-Mac connection does not require an internet relay, paid service, Telegram, port forwarding, router credentials, USB debugging, or manual IP entry. Both devices must be reachable on the same local network and the Mac gateway must be explicitly enabled for the selected interface/SSID. The configured AI engine may itself need internet access to generate answers.
+- The Mac raw API remains `127.0.0.1:8000`. The restricted companion gateway binds only to a configured private interface address and serves HTTPS; it is never Tailscale Funnel or a public listener.
+- Android targeting API 37+ requests `ACCESS_LOCAL_NETWORK` only when the user chooses a Wi-Fi operation. Camera permission is requested only when the user taps Scan. The QR decoder runs on-device; camera frames are not saved or uploaded. If local-network access is denied, USB remains available.
+- **Telegram:** optional remote access. A fresh install defaults to local-only; an existing authenticated Telegram session is preserved as the prior opt-in until the user disables it. Turning it off stops the transport without deleting TDLib sign-in data or its database. Telegram bots are not Secret Chats; privileged actions still require native approval.
+- The existing Tailscale identity-migration code remains a separate, manually requested option. It is not required for local mode and does not configure VPN or relay services.
 
-This client does not install or configure Tailscale. The phone and Mac must already have authorized Tailscale connectivity. No migration attempt has been run as part of this build.
+## Verification
 
-## USB-only network path
+Focused Android protocol and identity checks:
 
-- Pairing invitations accept only loopback URLs. The current paired URL stays on USB loopback until the user explicitly performs the pinned Tailscale migration above.
-- For a USB-connected phone, the Mac operator runs the port-forward command shown in the scanned invitation preview, for example: adb reverse tcp:8000 tcp:8000.
-- The QR server URL should use http://127.0.0.1:PORT for that USB reverse path. The Mac service remains bound to loopback.
-- The app uses Google Play services Code Scanner, configured for QR codes. It does not declare CAMERA permission; Google Play services runs the scanner UI and returns QR text only. The first scan may require Google Play services to download its scanner module.
-- The manifest requests Internet access only. No Accessibility, camera, SMS, contacts, location, Firebase, or notification permission is requested.
-- No FCM project is configured. Local Android notifications are not implemented.
+    ./gradlew :app:verifyPairingInvitationProtocol :app:verifyMigrationIdentity :app:verifyLocalGatewayRouting
 
-## Other API routes
+Other checks include `:app:verifyPresentation`, `:app:verifyLinkProtocol`, `:app:testDebugUnitTest`, and `:app:assembleDebug`. The current project has JVM assertion harnesses; the Gradle JUnit task may report zero discovered JUnit cases. See `PROGRESS.md` for actual test counts and device evidence.
 
-- GET /v1/jarvis/tasks?state=active|completed returns { "tasks": [...] }.
-- GET /v1/jarvis/tasks/{id} returns task details and events.
-- GET /v1/jarvis/approvals/pending returns { "approvals": [...] }.
-- POST /v1/jarvis/approvals/{id}/decision sends decision, expected_operation_digest, and idempotency_key.
-
-The Mac server remains authoritative for device authentication, approval expiry, replay prevention, digest matching, and authorization at the privileged tool boundary.
+The Mac supervisor remains authoritative for pairing expiry, replay protection, device revocation, task ownership, approval digest matching and privileged tool authorization.

@@ -56,13 +56,15 @@ android {
 }
 
 dependencies {
+    testImplementation("org.json:json:20250517")
     // Firebase is optional: its artifacts and FCM service are compiled only when google-services.json exists.
     // Firebase artifacts are not in the offline Gradle cache, so they must not be required for other builds.
     if (hasFirebaseConfig) {
         implementation(platform("com.google.firebase:firebase-bom:35.2.0"))
         implementation("com.google.firebase:firebase-messaging")
     }
-    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
+    // QR decoding happens on-device with ZXing; first pairing does not depend on a Play services model download.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     // Pinned to 0.16.1: official LiteRT-LM docs confirm this metadata is compatible with Kotlin 2.2.x.
     // We ship no model weights; users must explicitly import an eligible local model.
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
@@ -113,6 +115,17 @@ tasks.register<JavaExec>("verifyMigrationIdentity") {
         layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
     ) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.data.ServerMigrationIdentityTest")
+}
+
+tasks.register<JavaExec>("verifyPairingInvitationProtocol") {
+    group = "verification"
+    description = "Verifies strict signed v1 USB and v2 local-Wi-Fi QR invitation parsing."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.data.PairingInvitationProtocolChecks")
 }
 
 tasks.register<JavaExec>("verifyLocalWifiPresentation") {

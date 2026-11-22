@@ -260,7 +260,9 @@ fun SettingsScreen(
             item { SectionLabel("Setup") }
             item {
                 TextAction("Mac pairing and advanced setup", filled = false, modifier = Modifier.fillMaxWidth()) {
-                    context.startActivity(Intent(context, AdvancedActivity::class.java))
+                    context.startActivity(
+                        Intent(context, AdvancedActivity::class.java).putExtra("open_device_pairing", true),
+                    )
                 }
             }
             item {

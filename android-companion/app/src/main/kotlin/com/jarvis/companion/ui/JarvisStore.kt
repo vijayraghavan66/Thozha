@@ -28,6 +28,7 @@ import com.jarvis.companion.model.Approval
 import com.jarvis.companion.data.JarvisApi
 import com.jarvis.companion.data.SecureStore
 import com.jarvis.companion.telegram.TelegramSession
+import com.jarvis.companion.telegram.TelegramBootstrap
 import com.jarvis.companion.telegram.TelegramSnapshot
 import com.jarvis.link.ApprovalReview
 import com.jarvis.link.FastCommandRequest
@@ -91,6 +92,7 @@ class JarvisStore(private val app: Context) {
     var localWifiSetupMessage by mutableStateOf("")
     var assistantName by mutableStateOf(LinkSettings(app).assistantName)
     var telegram by mutableStateOf<TelegramSnapshot?>(null)
+    var telegramRemoteEnabled by mutableStateOf(TelegramBootstrap.isRemoteEnabled(app))
     var session by mutableStateOf(sessions.active())
     var sessionList by mutableStateOf(sessions.all())
     var draft by mutableStateOf("")
@@ -349,6 +351,18 @@ class JarvisStore(private val app: Context) {
 
     /** Telegram reports every change through the session listener; this keeps the latest snapshot. */
     fun onTelegramSnapshot(snapshot: TelegramSnapshot) = ui { telegram = snapshot }
+
+    /** User-controlled remote transport. Disabling it preserves the authenticated TDLib session and local tasks. */
+    fun updateTelegramRemoteEnabled(enabled: Boolean) = ui {
+        TelegramBootstrap.setRemoteEnabled(app, enabled)
+        telegramRemoteEnabled = TelegramBootstrap.isRemoteEnabled(app)
+        notice = if (telegramRemoteEnabled) {
+            if (telegram == null) "Telegram remote access enabled. Open Telegram setup to sign in if needed."
+            else "Telegram remote access enabled."
+        } else {
+            "Telegram remote access disabled. Local Mac Wi-Fi and USB remain available; Telegram sign-in data was kept."
+        }
+    }
 
     /** Retries queued sends and polls the Mac for updates. Safe to call repeatedly; only one sync runs at a time. */
     fun loadTaskArtifacts(taskId: String) = ui {

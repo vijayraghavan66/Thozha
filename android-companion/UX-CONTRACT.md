@@ -2,8 +2,8 @@
 
 ## Product context
 
-- **Audience:** Owner pairing one Android phone with one Mac Jarvis instance.
-- **Primary jobs:** Send a free-text assistant request, see the Mac's genuine result, track tasks, and make informed decisions on exact-operation approvals.
+- **Audience:** A person pairing one or more Android devices with their Thozha Mac installation.
+- **Primary jobs:** Pair locally, send a free-text assistant request, see the Mac's genuine result, track tasks, and make informed decisions on exact-operation approvals.
 - **Locale:** English UI with Android system fonts, date formatting, and scalable text.
 - **Accessibility:** Native Android controls, accessible names for icon-only navigation, visible focus, touch targets of at least 48 dp for primary actions, and reduced-motion support.
 
@@ -15,7 +15,7 @@
 | Free-text request and reply | Home conversation in `MainActivity`; `LinkRuntime` local record | This contract and the authenticated Mac task API | Android build, Mac tests, real-device task |
 | Task status/result | Activity task list and task detail | OpenJarvis supervisor result | API result plus phone display |
 | Link approval review | Activity/detail in `MainActivity` | Encrypted Link approval event and Mac supervisor | Exact digest and device decision test |
-| Pairing invitation scan | Google Play services Code Scanner | Signed QR contract | Phone scan and Mac confirmation |
+| Pairing invitation scan | On-device ZXing QR scanner | Signed QR contract v1/v2 | Phone scan, pin validation and Mac confirmation |
 | Device credential | Android Keystore and encrypted `SecureStore` | Pairing API | Restart and authenticated request |
 | Connection status | Devices destination in `JarvisApp` | Link pairing state, last sync, and Telegram session | Fresh unpaired, paired, reachable, stale, and error states |
 
@@ -58,23 +58,25 @@ Do not queue a privileged approval decision offline. After interruption, refresh
 
 ## Fresh device and connection status
 
-- A fresh, unpaired installation says that pairing is required and offers the existing signed-invitation setup flow. It does not imply that a Mac is connected because a relay URL exists, the phone is online, or Telegram is installed.
+- A fresh, unpaired installation says that pairing is required and offers a signed local invitation scan. The QR scanner decodes on-device; pairing does not require a cloud scanner, Telegram or an account with a relay provider.
 - Connection status separates device pairing, last successful Mac sync, Telegram sign-in/transport, and AI evidence. Unknown and stale values remain unknown/stale; no green status is inferred from a local network indicator.
 - The primary Connection screen shows user-facing status and a clear setup action. Raw loopback relay URLs and detailed hardware/runtime facts stay in Advanced details.
-- Pairing remains Mac-confirmed through the existing signed QR and local pending-device confirmation path. UI polish must not create credentials, approve a device, or alter the development allowlist by itself.
+- Pairing is Mac-confirmed through the signed QR and local pending-device confirmation path. Scanning or submitting the phone's public-key proof never grants a bearer token. UI polish must not approve a device or alter the development allowlist by itself.
 - Product branding is Thozha (தோழா). The personal assistant name is optional, stored locally as a presentation preference, and independent of the signed pairing identity.
 - The Home empty state provides a first-use welcome and directs a fresh user into the existing signed Mac-pairing flow; it does not create a second pairing flow.
 
 ## Connection and trust boundaries
 
-- The raw OpenJarvis API stays loopback-only. USB/ADB reverse is the fallback path.
-- The optional Wi-Fi gateway is a separate allowlisted HTTPS service; it proxies only paired-device task, approval, and registration routes to the loopback backend. It binds only to one configured private interface address and only advertises on a configured SSID.
-- Initial local-gateway TLS certificate pinning uses a nonce-bound signature from the already-paired Mac key over the current USB/ADB-reverse route. The app discovers the pinned `.local` service automatically and retries discovery on later requests. It never sends the bearer token before the pinned TLS handshake succeeds.
-- The Connection screen separates “Mac identity pinned” from actual Wi-Fi reachability. Only a successful authenticated request records Wi-Fi as the last confirmed route. A user-triggered pin refresh follows the paired route and does not enroll a device or replace the device token.
+- The raw OpenJarvis API stays loopback-only. Direct local Wi-Fi is the primary route; USB/ADB reverse remains a recovery path.
+- The optional Wi-Fi gateway is a separate allowlisted HTTPS service. It binds only to the validated private address of the selected interface and starts only under an explicit Wi-Fi opt-in for the configured SSID. The gateway proxies only the companion task/status/approval API plus invitation-ID-scoped v2 pairing completion/status/claim routes. It never exposes invitation creation, device listing/decisions, docs, or arbitrary routes.
+- The Mac v2 invitation is short-lived and signed by its stable P-256 identity. It includes the direct private address, `.local` TLS hostname, port, exact TLS certificate SHA-256 pin, invitation challenge, and expiry. Android verifies the signed fields and certificate pin/SAN before sending any pairing proof. The QR contains no bearer token or persistent credential. Existing USB v1 invitations remain loopback-only and compatible.
+- A scanned v2 invitation can reach the Mac directly by its signed private address; DNS-SD/mDNS is only a later discovery optimization. Once paired, the device token and connection pins are encrypted with Android Keystore. The bearer is sent only after TLS certificate pin and exact DNS-SAN validation.
+- The Devices screen separates “Mac identity pinned” from actual Wi-Fi reachability. Only a successful authenticated request records Wi-Fi as the last confirmed route. A user-triggered Mac identity refresh follows an authenticated paired route and does not enroll a device or replace the device token. If DHCP changes the signed address while DNS-SD is unavailable, the user must scan a fresh signed local connection QR; the app must not guess or scan arbitrary LAN hosts.
 - Wi-Fi gateway startup is disabled unless an explicit enable flag, Wi-Fi interface, private bind IP, and SSID allowlist are configured. It must stay disabled until the device/network policy permits it; do not bind the raw Mac API to a LAN interface.
-- Android 17's `ACCESS_LOCAL_NETWORK` runtime permission is requested from Settings > Mac connection when the user asks to enable Wi-Fi access. If denied, the paired USB path remains available.
+- For Android 17+ targets, `ACCESS_LOCAL_NETWORK` is requested only when the user chooses a local Wi-Fi pairing/request. If denied, no Wi-Fi request is sent and USB remains available. Camera permission is requested only when the user taps Scan; camera frames are not saved or uploaded.
 - Tailscale, public tunnels, and Funnel are not part of this client configuration.
 - The permanent Mac API key never enters the APK. Pairing tokens remain encrypted in Android app storage; signing keys stay in Android Keystore.
+- Telegram is optional remote access. A new install starts local-only. Existing authenticated Telegram sessions are preserved as their existing opt-in unless the user turns remote access off. Turning it off stops the client transport without deleting TDLib credentials or its database. No bot/chat identity or token is hardcoded.
 
 ## Approval and notification boundaries
 

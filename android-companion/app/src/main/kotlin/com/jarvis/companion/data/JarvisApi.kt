@@ -220,69 +220,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         )
     }
 
-    fun parseInvitationPayload(rawPayload: String): PairingInvitation {
-        if (rawPayload.length > 8192) throw ApiException("This QR is too large to be a Jarvis pairing invitation.")
-        val json = try { JSONObject(rawPayload) } catch (_: Exception) {
-            throw ApiException("This QR is not a Jarvis pairing invitation.")
-        }
-        val requiredKeys = setOf(
-            "protocol",
-            "server_url",
-            "server_fingerprint",
-            "server_public_key",
-            "invitation_id",
-            "challenge",
-            "expires_at",
-            "server_signature",
-        )
-        val actualKeys = mutableSetOf<String>()
-        val iterator = json.keys()
-        while (iterator.hasNext()) actualKeys.add(iterator.next())
-        if (actualKeys != requiredKeys) {
-            throw ApiException("The invitation QR has unexpected or missing fields. Scan a fresh Jarvis QR.")
-        }
-        if (json.requiredString("protocol") != "openjarvis-pairing-v1") {
-            throw ApiException("This QR uses an unsupported Jarvis pairing protocol.")
-        }
-        verifyInvitationSignature(json)
-        val expiry = json.requiredString("expires_at")
-        val expiryInstant = runCatching { OffsetDateTime.parse(expiry).toInstant() }
-            .getOrElse { throw ApiException("The invitation expiry time is invalid.") }
-        if (!expiryInstant.isAfter(Instant.now())) throw ApiException("This pairing invitation has expired. Create a new QR on the Mac.")
-        return PairingInvitation(
-            invitationId = json.requiredString("invitation_id"),
-            challenge = json.requiredString("challenge"),
-            expiresAt = expiry,
-            serverUrl = validateBaseUrl(json.requiredString("server_url")),
-            serverFingerprint = json.requiredString("server_fingerprint"),
-            serverPublicKeyBase64 = json.requiredString("server_public_key"),
-            verifiedServerKeyFingerprint = fingerprint(Base64.getDecoder().decode(json.requiredString("server_public_key"))),
-        )
-    }
-
-    private fun verifyInvitationSignature(json: JSONObject) {
-        val fields = linkedMapOf<String, String>()
-        listOf("challenge", "expires_at", "invitation_id", "protocol", "server_fingerprint", "server_url", "server_public_key")
-            .forEach { key -> fields[key] = json.requiredString(key) }
-        when (PairingInvitationSignature.verify(
-            fields,
-            json.requiredString("server_public_key"),
-            json.requiredString("server_fingerprint"),
-            json.requiredString("server_signature"),
-        )) {
-            null -> Unit
-            PairingInvitationSignature.Failure.INVALID_KEY -> throw ApiException("The Mac invitation contains an invalid public key.")
-            PairingInvitationSignature.Failure.FINGERPRINT_MISMATCH -> throw ApiException("The Mac public-key fingerprint does not match the invitation.")
-            PairingInvitationSignature.Failure.INVALID_SIGNATURE -> throw ApiException("The Mac invitation signature is malformed.")
-            PairingInvitationSignature.Failure.SIGNATURE_MISMATCH -> throw ApiException("The Mac invitation signature does not verify.")
-        }
-    }
-
-    private fun fingerprint(encodedPublicKey: ByteArray): String =
-        MessageDigest.getInstance("SHA-256")
-            .digest(encodedPublicKey)
-            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
-            .let { "sha256:$it" }
+    fun parseInvitationPayload(rawPayload: String): PairingInvitation = PairingInvitationParser.parse(rawPayload)
 
     fun deviceName(): String {
         val manufacturer = Build.MANUFACTURER?.trim().orEmpty()
@@ -292,24 +230,28 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
     }
 
     fun completePairing(invitation: PairingInvitation): PairingSession {
-        val base = validateBaseUrl(invitation.serverUrl)
-        secureStore.setBaseUrl(base)
+        val base = pairingBase(invitation)
         val body = JSONObject()
-            .put("invitation_id", invitation.invitationId)
             .put("device_name", deviceName())
             .put("public_key", secureStore.publicSigningKey())
             .put("signature", secureStore.signChallenge(invitation.challenge))
-        val json = request(base, "/v1/jarvis/pair/complete", "POST", body, token = null)
+        if (invitation.gatewayAddress == null) body.put("invitation_id", invitation.invitationId)
+        val path = if (invitation.gatewayAddress == null) "/v1/jarvis/pair/complete"
+        else "/v1/jarvis/pair/${invitation.invitationId}/complete"
+        val json = request(base, path, "POST", body, token = null, localGatewayPin = pairingGatewayPin(invitation))
         if (json.has("access_token")) throw ApiException("The Mac returned a token before local confirmation. Pairing stopped.")
         val status = json.requiredString("status").uppercase()
         if (status != "PENDING_CONFIRMATION") throw ApiException("The Mac did not place this device in pending confirmation.")
         val id = json.optString("invitation_id", json.optString("pairing_id", invitation.invitationId))
-        return PairingSession(id)
+        if (id != invitation.invitationId) throw ApiException("The Mac returned a different invitation ID.")
+        return PairingSession(invitation)
     }
 
-    fun getPairingStatus(invitationId: String): PairingStatus {
-        val base = requireBaseUrl()
-        val json = request(base, "/v1/jarvis/pair/status/" + pathSegment(invitationId), "GET", null, token = null)
+    fun getPairingStatus(invitation: PairingInvitation): PairingStatus {
+        val base = pairingBase(invitation)
+        val path = if (invitation.gatewayAddress == null) "/v1/jarvis/pair/status/${pathSegment(invitation.invitationId)}"
+        else "/v1/jarvis/pair/${invitation.invitationId}/status"
+        val json = request(base, path, "GET", null, token = null, localGatewayPin = pairingGatewayPin(invitation))
         val status = json.requiredString("status").uppercase()
         if (json.has("access_token")) throw ApiException("The Mac returned a token before the claim step. Pairing stopped.")
         return when (status) {
@@ -321,21 +263,59 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         }
     }
 
-    fun claimPairing(invitationId: String, claimChallenge: String, serverPublicKeyBase64: String, serverFingerprint: String): PairedDevice {
+    fun claimPairing(invitation: PairingInvitation, claimChallenge: String): PairedDevice {
         val body = JSONObject()
-            .put("invitation_id", invitationId)
             .put("signature", secureStore.signChallenge(claimChallenge))
-        val json = request(requireBaseUrl(), "/v1/jarvis/pair/claim", "POST", body, token = null)
+        if (invitation.gatewayAddress == null) body.put("invitation_id", invitation.invitationId)
+        val path = if (invitation.gatewayAddress == null) "/v1/jarvis/pair/claim"
+        else "/v1/jarvis/pair/${invitation.invitationId}/claim"
+        val json = request(
+            pairingBase(invitation), path, "POST", body, token = null,
+            localGatewayPin = pairingGatewayPin(invitation),
+        )
         val token = json.requiredString("access_token")
-        val deviceId = json.optString("device_id", invitationId)
+        val deviceId = json.optString("device_id", invitation.invitationId)
         val expiresAt = json.optString("expires_at", "")
+        val wifiPin = invitation.gatewayAddress?.let { address ->
+            LocalGatewayPin(
+                hostname = runCatching { URI(invitation.serverUrl).host.orEmpty() }.getOrDefault(""),
+                port = invitation.gatewayPort ?: 0,
+                certificateSha256 = invitation.gatewayCertificateSha256.orEmpty(),
+                address = address,
+            )
+        }
         secureStore.savePairingWithServerIdentity(
             deviceId = deviceId,
             token = token,
-            serverPublicKeyDer = Base64.getDecoder().decode(serverPublicKeyBase64),
-            serverFingerprint = serverFingerprint,
+            serverPublicKeyDer = Base64.getDecoder().decode(invitation.serverPublicKeyBase64),
+            serverFingerprint = invitation.serverFingerprint,
+            // Keep the established loopback base as the USB recovery route. The signed Wi-Fi pin
+            // separately selects HTTPS when reverse is absent; it never replaces the credential.
+            baseUrl = if (wifiPin != null) "http://127.0.0.1:8000" else invitation.serverUrl,
+            localGatewayPin = wifiPin,
         )
         return PairedDevice(deviceId, token, expiresAt)
+    }
+
+    private fun pairingBase(invitation: PairingInvitation): String = if (invitation.gatewayAddress == null) {
+        validateBaseUrl(invitation.serverUrl)
+    } else {
+        PairingInvitationParser.validateLocalWifi(
+            invitation.serverUrl,
+            invitation.gatewayAddress,
+            invitation.gatewayPort.toString(),
+            invitation.gatewayCertificateSha256.orEmpty(),
+        )
+        invitation.serverUrl
+    }
+
+    private fun pairingGatewayPin(invitation: PairingInvitation): LocalGatewayPin? = invitation.gatewayAddress?.let {
+        LocalGatewayPin(
+            hostname = runCatching { URI(invitation.serverUrl).host.orEmpty() }.getOrDefault(""),
+            port = invitation.gatewayPort ?: 0,
+            certificateSha256 = invitation.gatewayCertificateSha256.orEmpty(),
+            address = it,
+        )
     }
 
     /** Authenticate the server pin once over the current USB/loopback device-token route. */
@@ -694,6 +674,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             throw ApiException("The saved Jarvis server URL is invalid.")
         }
         if (isLoopbackHost(uri.host.orEmpty())) return validateBaseUrl(value)
+        if (isPinnedLocalGatewayBase(uri, secureStore.localGatewayPin())) return uri.toString().trimEnd('/')
         if (secureStore.pinnedServerIdentity() == null) {
             throw ApiException("This server URL has no pinned Mac identity. Reconnect over USB and verify it first.")
         }
@@ -707,7 +688,16 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
     private fun requireLoopbackBaseUrl(): String {
         val value = secureStore.baseUrl()
         if (value.isBlank()) throw ApiException("Pair this phone with the Mac before sending a request.")
-        return validateBaseUrl(value)
+        return requireBaseUrl()
+    }
+
+    private fun isPinnedLocalGatewayBase(uri: URI, pin: LocalGatewayPin?): Boolean {
+        if (pin == null || pin.address.isNullOrBlank()) return false
+        val host = uri.host?.lowercase().orEmpty()
+        val port = uri.port.takeIf { it in 1..65535 } ?: if (uri.scheme.equals("https", true)) 443 else 80
+        return uri.scheme.equals("https", true) && host == pin.hostname && port == pin.port &&
+            uri.userInfo == null && uri.query == null && uri.fragment == null &&
+            (uri.path.isNullOrBlank() || uri.path == "/")
     }
 
     private fun validateBaseUrl(value: String): String {
@@ -753,19 +743,30 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         connectTimeoutMs: Int = 10_000,
         readTimeoutMs: Int = 25_000,
         allowLocalWifi: Boolean = false,
+        localGatewayPin: LocalGatewayPin? = null,
         traceId: String? = null,
     ): JSONObject {
         val requestStartedNs = System.nanoTime()
-        val wifiPin = if (allowLocalWifi && !token.isNullOrBlank()) {
+        val wifiPin = localGatewayPin ?: if (allowLocalWifi && !token.isNullOrBlank()) {
             runCatching { secureStore.localGatewayPin() }.getOrNull()
         } else null
+        if (wifiPin != null && !LocalGatewayDiscovery.localNetworkPermissionGranted(context)) {
+            throw ApiException("Allow local network access for Thozha, then scan the Mac QR again.")
+        }
         val discoveryStartedNs = System.nanoTime()
         val loopbackReady = wifiPin != null && loopbackEndpointReachable(base)
         val wifiCandidate = wifiPin?.let { pin ->
-            if (loopbackReady) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
+            if (localGatewayPin != null) endpointFromSignedAddress(pin)
+            else if (loopbackReady) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
             else LocalGatewayDiscovery.discoverOrWait(context, pin)
         }
         val wifiEndpoint = selectLocalGatewayEndpoint(loopbackReady, wifiCandidate)
+        val parsedBase = runCatching { URI(base) }.getOrNull()
+        if (parsedBase != null && wifiPin != null && parsedBase.host.equals(wifiPin.hostname, ignoreCase = true) &&
+            wifiEndpoint == null
+        ) {
+            throw ApiException("The signed local Mac address is unavailable. Scan a fresh QR while both devices are on the same Wi-Fi.")
+        }
         if (traceId != null) {
             PerformanceTrace.mark(
                 traceId,

@@ -10,6 +10,12 @@ private fun check(condition: Boolean, message: String) {
 private const val HASH = "0123456789abcdef0123456789abcdef"
 
 fun main() {
+    // --- explicit remote transport preference ---------------------------------
+    check(!TelegramRemoteModePolicy.resolve(null, previouslyConfigured = false), "fresh install defaults to local-only")
+    check(TelegramRemoteModePolicy.resolve(null, previouslyConfigured = true), "existing Telegram sign-in is preserved as prior opt-in")
+    check(!TelegramRemoteModePolicy.resolve(false, previouslyConfigured = true), "explicit local-only choice overrides saved account")
+    check(TelegramRemoteModePolicy.resolve(true, previouslyConfigured = false), "explicit remote enable is preserved while account setup is pending")
+
     // --- credentials ---------------------------------------------------------
     val creds = ApiCredentials.parse("12345678", HASH)
     check(creds != null, "valid id and hash are accepted")
