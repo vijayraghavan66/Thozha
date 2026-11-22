@@ -20,6 +20,8 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.jarvis.companion.voice.*
+import com.jarvis.companion.link.LinkService
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -58,10 +60,27 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
                 if (city.isNullOrBlank()) { response = "Which city should I check?"; pending = false; controller?.speakNeural(response, sid, voiceName); return }
                 response = "Checking weather in $city…"
                 scope.launch {
+                    val taskId = UUID.randomUUID().toString().replace("-", "")
                     val t = SystemClock.elapsedRealtime()
-                    val result = runCatching { withContext(Dispatchers.IO) { LocalWeatherClient().current(city).response() } }
+                    val result = runCatching {
+                        withContext(Dispatchers.IO) {
+                            val runtime = LinkService.runtime(context)
+                            runtime.recordLocalTaskRequest(taskId, text, transport = "api", lookupLinkStatus = false, executionTarget = "PHONE")
+                            runtime.recordTaskLifecycle(taskId, "", "RUNNING", "Fetching current weather on this phone", "PHONE", "$taskId:weather-running")
+                            val answer = LocalWeatherClient().current(city).response()
+                            runtime.recordTaskLifecycle(taskId, "", "COMPLETED", answer.take(400), "PHONE", "$taskId:weather-completed")
+                            answer
+                        }
+                    }
                     android.util.Log.i("JarvisCall", "event=weather_complete duration_ms=${SystemClock.elapsedRealtime()-t} success=${result.isSuccess}")
+                    store.refreshLocal()
                     response = result.getOrElse { "Weather unavailable: ${it.message ?: "check connection"}" }
+                    if (result.isFailure) {
+                        withContext(Dispatchers.IO) {
+                            runCatching { LinkService.runtime(context).recordTaskLifecycle(taskId, "", "FAILED", response.take(300), "PHONE", "$taskId:weather-failed") }
+                        }
+                        store.refreshLocal()
+                    }
                     pending = false
                     if (result.isSuccess && active) controller?.speakNeural(response, sid, voiceName)
                 }
