@@ -1,6 +1,6 @@
 # Thozha macOS setup prototype
 
-This is a native SwiftUI setup-assistant prototype with a local staging package. It is intentionally **not a consumer installer** yet: it packages only the setup app and does not install OpenJarvis, create a LaunchAgent, download a VM image, or enroll a device. That boundary prevents this prototype from replacing the working development environment.
+This is a native SwiftUI setup-assistant prototype with a local staging package. It is intentionally **not a consumer installer** yet: it does not install/replace OpenJarvis, provision a VM image, or enroll a device. It can create a signed pairing QR from an existing loopback service and, only after the owner reviews a per-user plan and confirms, enable or remove a separate restricted local Wi-Fi gateway LaunchAgent. Nothing starts on app launch.
 
 ## Build and test
 
@@ -19,11 +19,14 @@ The staging app:
 
 - checks macOS 14+, Apple silicon, memory, free disk, `uv`, and QEMU ARM64 availability;
 - treats missing QEMU as a hard stop for the isolated-worker path;
-- probes only `http://127.0.0.1:8000/health` after the user presses the read-only health-check button, and never starts/restarts a service;
+- probes only `http://127.0.0.1:8000/health` after the user presses the read-only health-check button; it never starts or restarts the OpenJarvis API/Link/Telegram/VM services;
+- creates v1 loopback or opt-in v2 local-Wi-Fi QR invitations only after a user action, validates the Mac signature before displaying a QR, and requires an explicit local confirmation for every enrolled phone;
+- requests macOS Location Services only after an explicit user tap when CoreWLAN withholds the current SSID. If SSID or the private interface address cannot be verified, gateway setup remains blocked;
+- can generate a mode-0600 per-user gateway LaunchAgent plan and display its exact plist before a separate confirmation. Enabling affects only that gateway job; disabling boots out and removes only its own plist. The live LaunchAgent was not installed or started in development;
 - creates a new random staging installation ID only after a deliberate button press, under `~/Library/Application Support/Thozha/Installer-Staging`, with a private directory/file mode;
-- does not read, copy, or change existing Jarvis credentials, pairing, task state, LaunchAgents, or VM files.
+- does not read, copy, or change existing Jarvis credentials, pairing, task state, OpenJarvis/Link/Telegram LaunchAgents, or VM files. Any new gateway job is separately named, user-scoped and explicitly opt-in.
 
-No internet download, package-manager invocation, privileged operation, firewall change, TCC request, or network listener is performed.
+No internet download, package-manager invocation, privileged operation, firewall change, TCC request, or network listener was performed during these tests.
 
 `Tests/test-package-staging-safety.sh` verifies that existing output directories and symlink targets are left untouched. A package-payload check also refuses AppleDouble paths; the current Mac's `pkgbuild` emits such paths from OS-managed provenance xattrs, which remains a packaging blocker.
 
