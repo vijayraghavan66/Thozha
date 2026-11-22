@@ -78,6 +78,7 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
 
 tasks.register<JavaExec>("verifyLocalAi") {
@@ -100,6 +101,28 @@ tasks.register<JavaExec>("verifyVoicePolicy") {
         layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
     ) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.voice.VoicePolicyChecks")
+}
+
+tasks.register<JavaExec>("verifyVoicePcmProtocol") {
+    group = "verification"
+    description = "Checks the realtime PCM header, sequence fields, sample encoding and malformed-frame rejection."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.voice.VoicePcmProtocolChecks")
+}
+
+tasks.register<JavaExec>("verifyMacVoiceRequestRouting") {
+    group = "verification"
+    description = "Checks voice requests requiring remote actions use the existing supervised task submit path."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.voice.MacVoiceRequestRoutingChecks")
 }
 
 if (!hasFirebaseConfig) {
