@@ -127,8 +127,8 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
                     phoneFallback = true
                     macStatus = "Mac voice unavailable · phone-local recognition"
                     state = VoiceControllerState.IDLE
-                    if (reconnectAttempts < 5) {
-                        val waitMs = (1_000L shl reconnectAttempts.coerceAtMost(4)).coerceAtMost(16_000L)
+                    if (reconnectAttempts < VoiceReconnectPolicy.maxAttempts) {
+                        val waitMs = VoiceReconnectPolicy.delayMs(reconnectAttempts)
                         macRetryJob?.cancel()
                         macRetryJob = scope.launch {
                             delay(waitMs)

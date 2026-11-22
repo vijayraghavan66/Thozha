@@ -64,6 +64,13 @@ internal object VoiceRecognitionRetryPolicy {
     fun delayMs(failedAttempts: Int): Long = (750L shl (failedAttempts.coerceAtLeast(1) - 1).coerceAtMost(3)).coerceAtMost(6_000L)
 }
 
+internal object VoiceReconnectPolicy {
+    const val maxAttempts = 5
+
+    /** 1, 2, 4, 8, 16 seconds; zero means the bounded retry budget is exhausted. */
+    fun delayMs(attempt: Int): Long = if (attempt in 0 until maxAttempts) 1_000L shl attempt else 0L
+}
+
 internal object VoiceFocusPolicy {
     /** Android reports all focus-loss variants as negative changes, including permanent loss (-1). */
     fun shouldStop(change: Int): Boolean = change < 0

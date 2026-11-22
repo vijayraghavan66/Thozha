@@ -30,6 +30,9 @@ object VoicePolicyChecks {
         check(VoiceRecognitionRetryPolicy.isRecoverable(VoiceControllerError.NO_MATCH) && VoiceRecognitionRetryPolicy.isRecoverable(VoiceControllerError.SPEECH_TIMEOUT)) { "no-match and silence timeout must recover" }
         check(!VoiceRecognitionRetryPolicy.isRecoverable(VoiceControllerError.PERMISSION_REQUIRED) && !VoiceRecognitionRetryPolicy.isRecoverable(VoiceControllerError.MICROPHONE_UNAVAILABLE)) { "permission/device failures must not enter retry loop" }
         check((1..5).map(VoiceRecognitionRetryPolicy::delayMs) == listOf(750L, 1500L, 3000L, 6000L, 6000L)) { "recognition retries must use bounded exponential backoff" }
+        check((0..VoiceReconnectPolicy.maxAttempts).map(VoiceReconnectPolicy::delayMs) == listOf(1000L, 2000L, 4000L, 8000L, 16000L, 0L)) {
+            "Mac reconnect delays must be bounded and stop at the attempt budget"
+        }
         val turn = VoiceSessionGeneration()
         val first = turn.begin()
         check(turn.isCurrent(first)) { "new voice session should accept callbacks" }
@@ -50,6 +53,6 @@ object VoicePolicyChecks {
         check(!bargeIn.onSpeechStarted()) { "cancellation or TTS completion must disarm barge-in" }
         bargeIn.arm()
         check(bargeIn.onSpeechStarted()) { "a new listening turn must be recoverable after interruption" }
-        println("Voice policy checks passed: 17 assertions")
+        println("Voice policy checks passed: 18 assertions")
     }
 }
