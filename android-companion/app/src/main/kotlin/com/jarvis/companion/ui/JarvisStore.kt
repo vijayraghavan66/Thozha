@@ -13,6 +13,7 @@ import com.jarvis.companion.presentation.shouldReconcileApiTask
 import com.jarvis.companion.link.LinkBackgroundSync
 import com.jarvis.companion.link.LinkService
 import com.jarvis.companion.link.LinkSettings
+import com.jarvis.companion.link.AssistantNamePolicy
 import com.jarvis.companion.fastpath.FastCommand
 import com.jarvis.companion.fastpath.FastCommandClassifier
 import com.jarvis.companion.fastpath.DevelopmentIntentClassifier
@@ -84,6 +85,11 @@ class JarvisStore(private val app: Context) {
     var macApiSyncing by mutableStateOf(false)
     var macApiLastSyncMs by mutableStateOf(0L)
     var macApiSyncError by mutableStateOf("")
+    var localWifiPin by mutableStateOf(runCatching { secureStore.localGatewayPin() }.getOrNull())
+    var lastMacApiTransport by mutableStateOf(secureStore.lastMacConnection().second)
+    var localWifiSetupRunning by mutableStateOf(false)
+    var localWifiSetupMessage by mutableStateOf("")
+    var assistantName by mutableStateOf(LinkSettings(app).assistantName)
     var telegram by mutableStateOf<TelegramSnapshot?>(null)
     var session by mutableStateOf(sessions.active())
     var sessionList by mutableStateOf(sessions.all())
@@ -117,6 +123,50 @@ class JarvisStore(private val app: Context) {
     fun updateAiRequestMode(mode: LocalAiRequestMode) = ui {
         app.getSharedPreferences("jarvis_ai_routing", Context.MODE_PRIVATE).edit().putString("mode", mode.name).apply()
         aiRequestMode = mode
+    }
+
+    fun updateAssistantName(value: String): Boolean {
+        val normalized = AssistantNamePolicy.normalize(value) ?: return false
+        return runCatching {
+            LinkSettings(app).assistantName = normalized
+            ui { assistantName = normalized }
+        }.isSuccess
+    }
+
+    /**
+     * Authenticates and stores the Mac's local HTTPS gateway pin over the existing paired route.
+     * It does not enroll a device or alter the existing device token. Initial verification normally
+     * requires the current USB reverse connection so the Mac can prove its identity out of band.
+     */
+    fun verifyLocalWifiGateway() = ui {
+        if (localWifiSetupRunning) return@ui
+        if (!hasMacApiPairing()) {
+            localWifiSetupMessage = "Pair this phone with the Mac before setting up Wi-Fi."
+            return@ui
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 37 &&
+            app.checkSelfPermission("android.permission.ACCESS_LOCAL_NETWORK") != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            permissionRequester?.invoke("android.permission.ACCESS_LOCAL_NETWORK")
+            localWifiSetupMessage = "Allow local network access, then verify again. The USB connection is unchanged."
+            return@ui
+        }
+        localWifiSetupRunning = true
+        localWifiSetupMessage = "Verifying the paired Mac's Wi-Fi identity over the current USB/loopback route…"
+        background(lanes.local) {
+            val result = runCatching { jarvisApi.pinLocalGatewayIdentity() }
+            ui {
+                localWifiSetupRunning = false
+                localWifiPin = result.getOrNull() ?: runCatching { secureStore.localGatewayPin() }.getOrNull()
+                localWifiSetupMessage = result.fold(
+                    onSuccess = { "Mac identity verified. Wi-Fi requests use the pinned gateway when it is reachable." },
+                    onFailure = { failure ->
+                        failure.message?.takeIf { it.isNotBlank() }
+                            ?: "The Mac Wi-Fi identity could not be verified. Check the paired connection and try again."
+                    },
+                )
+            }
+        }
     }
 
     fun importLocalModel(uri: android.net.Uri, licenseAccepted: Boolean) = ui {
@@ -200,6 +250,7 @@ class JarvisStore(private val app: Context) {
     }
 
     fun refreshLocal() = background {
+        val currentWifiPin = runCatching { secureStore.localGatewayPin() }.getOrNull()
         val runtime = LinkService.runtime(app)
         var conversation = runtime.conversation()
         val pairedToMac = hasMacApiPairing()
@@ -248,7 +299,6 @@ class JarvisStore(private val app: Context) {
                     .onSuccess {
                         reachableAt = System.currentTimeMillis()
                         apiError = ""
-                        secureStore.recordMacConnection("usb")
                     }
                     .onFailure { failure ->
                         apiError = when (failure) {
@@ -274,7 +324,10 @@ class JarvisStore(private val app: Context) {
         val status = runtime.status()
         val (syncAt, syncError) = runtime.lastSync()
         val snapshot = TelegramSession.controller?.snapshot()
+        val currentApiTransport = secureStore.lastMacConnection().second
         ui {
+            localWifiPin = currentWifiPin
+            lastMacApiTransport = currentApiTransport
             entries = mergeEntries(conversation, localHistory.all())
             taskUpdates = updatesSnapshot
             localAiSnapshot = localAi.status()
@@ -633,7 +686,6 @@ class JarvisStore(private val app: Context) {
                             java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - apiStartedNs),
                             "state=$state",
                         )
-                        secureStore.recordMacConnection("usb")
                         val resultPersistStartedNs = System.nanoTime()
                         runtime.recordLocalTaskResult(requestId, taskId, state, summary)
                         PerformanceTrace.mark(

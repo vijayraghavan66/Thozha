@@ -48,6 +48,16 @@ class LinkSettings(context: Context) {
         get() = prefs.getString("relay_url", DEFAULT_TEST_RELAY_URL) ?: DEFAULT_TEST_RELAY_URL
         set(value) { prefs.edit().putString("relay_url", value.trim()).apply() }
 
+    /** Personal assistant name, independent of the Thozha product name and the Mac identity. */
+    var assistantName: String
+        get() = prefs.getString("assistant_name", AssistantNamePolicy.DEFAULT_NAME)
+            ?.let(AssistantNamePolicy::normalize)
+            ?: AssistantNamePolicy.DEFAULT_NAME
+        set(value) {
+            val normalized = AssistantNamePolicy.normalize(value) ?: return
+            prefs.edit().putString("assistant_name", normalized).apply()
+        }
+
     /** The FCM token last accepted by the relay. Only a hash is needed to avoid re-registering the same value. */
     var lastRegisteredPushToken: String
         get() = prefs.getString("last_push_token_sha256", "") ?: ""

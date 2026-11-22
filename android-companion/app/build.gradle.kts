@@ -10,6 +10,15 @@ if (hasFirebaseConfig) {
     pluginManager.apply("com.google.gms.google-services")
 }
 
+// The companion shares protocol sources from Jarvis-Lab. Resolve from either the canonical
+// android-companion checkout or an isolated Git worktree nested under Jarvis-Lab/worktrees/.
+val jarvisLabRoot = generateSequence(rootProject.projectDir) { it.parentFile }
+    .take(5)
+    .firstOrNull { it.resolve("jarvis-link/companion/src/main/kotlin").isDirectory }
+    ?: error("Could not locate Jarvis-Lab/jarvis-link companion sources.")
+val jarvisLinkRoot = jarvisLabRoot.resolve("jarvis-link")
+val connectivityPocRoot = jarvisLabRoot.resolve("connectivity-poc")
+
 android {
     namespace = "com.jarvis.companion"
     compileSdk = 37
@@ -106,6 +115,17 @@ tasks.register<JavaExec>("verifyMigrationIdentity") {
     mainClass.set("com.jarvis.companion.data.ServerMigrationIdentityTest")
 }
 
+tasks.register<JavaExec>("verifyLocalWifiPresentation") {
+    group = "verification"
+    description = "Checks that local identity pinning is never presented as Wi-Fi reachability and validates assistant-name input."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.presentation.LocalWifiPresentationChecks")
+}
+
 tasks.register<JavaExec>("verifyAssistantFormatting") {
     group = "verification"
     description = "Runs dependency-free assistant-text formatting and escaping regression vectors."
@@ -170,14 +190,14 @@ tasks.register<JavaExec>("verifyTelegramTunnel") {
         layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
     ) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.telegram.TelegramTunnelChecksKt")
-    args(rootProject.file("../connectivity-poc/telegram_adapter/tunnel-v1.fixture.json").absolutePath)
+    args(connectivityPocRoot.resolve("telegram_adapter/tunnel-v1.fixture.json").absolutePath)
 }
 
 // ---- Jarvis Link transport (shared source with jarvis-link/companion; the Android app compiles it too) ----
 // Protocol, HTTP relay client, durable stores and the CLI live in the Jarvis Link workspace so the relay,
 // host and companion are tested from one copy of the code. This module builds them with its working toolchain.
-android.sourceSets.getByName("main").java.srcDir("../../jarvis-link/companion/src/main/kotlin")
-android.sourceSets.getByName("test").java.srcDir("../../jarvis-link/companion/src/test/kotlin")
+android.sourceSets.getByName("main").java.srcDir(jarvisLinkRoot.resolve("companion/src/main/kotlin"))
+android.sourceSets.getByName("test").java.srcDir(jarvisLinkRoot.resolve("companion/src/test/kotlin"))
 
 val linkCompanionCliJar by tasks.registering(Jar::class) {
     group = "verification"
@@ -205,7 +225,7 @@ tasks.register<JavaExec>("verifyLinkProtocol") {
         layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
     ) + configurations.getByName("debugRuntimeClasspath")
     mainClass.set("com.jarvis.link.CompanionProtocolTest")
-    args(rootProject.file("../jarvis-link/fixtures/envelope-v1.test.json").absolutePath)
+    args(jarvisLinkRoot.resolve("fixtures/envelope-v1.test.json").absolutePath)
 }
 
 

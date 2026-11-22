@@ -1,6 +1,6 @@
 ---
 version: "1.0"
-name: "Jarvis Companion"
+name: "Thozha"
 description: "A quiet Android companion centered on honest Mac conversations, task status, and exact approvals."
 colors:
   primary: "#9CB99A"
@@ -38,14 +38,15 @@ components:
   approval: {}
 ---
 
-# Jarvis Companion Design System
+# Thozha Android Design System
 
 ## Product direction
 
-- **Audience:** The owner using Jarvis on a phone alongside their Mac.
+- **Audience:** A person using Thozha on Android alongside their Mac.
 - **Primary job:** Ask Jarvis, see the Mac's real response and progress, and review exact-operation approvals.
 - **Register:** A calm personal instrument, with conversation at its center and setup details available when needed.
 - **Signature:** A three-stroke sage current mark reflects real activity. It stays still when idle and uses restrained spring motion only while a task is genuinely active; it never implies fabricated progress.
+- **Product and personal identity:** Thozha (தோழா) is the product. The user may choose a separate personal assistant name in Settings; changing it does not change pairing, Mac identity, or the product label.
 - **Locale:** English UI; dates and times use Android's locale-aware formatters.
 - **Anti-references:** Public remote-control dashboard, fake progress percentages, and decorative analytics.
 

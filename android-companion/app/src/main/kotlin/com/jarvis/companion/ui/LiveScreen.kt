@@ -40,9 +40,11 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.jarvis.companion.link.LinkMode
 import com.jarvis.companion.link.LinkSettings
+import com.jarvis.companion.data.LocalGatewayDiscovery
 import com.jarvis.companion.AdvancedActivity
 import com.jarvis.companion.localai.AndroidDeviceProfileReader
 import com.jarvis.companion.presentation.MacLinkPresentation
+import com.jarvis.companion.presentation.LocalWifiPresentation
 import com.jarvis.companion.presentation.TaskTone
 import com.jarvis.companion.voice.JarvisVoiceController
 import com.jarvis.companion.voice.VoiceControllerError
@@ -60,6 +62,13 @@ fun LiveScreen(store: JarvisStore) {
     val telegram = store.telegram
     val settings = remember(context) { LinkSettings(context) }
     val phone = remember(context) { AndroidDeviceProfileReader.read(context) }
+    val localWifiPermission = LocalGatewayDiscovery.localNetworkPermissionGranted(context)
+    val localWifi = LocalWifiPresentation.state(
+        paired = store.macApiPaired,
+        localNetworkPermission = localWifiPermission,
+        gatewayIdentityPinned = store.localWifiPin != null,
+        lastSuccessfulRoute = store.lastMacApiTransport,
+    )
     val connection = MacLinkPresentation.state(
         paired = store.macApiPaired || status?.certificatesVerified == true,
         enrollmentPending = status?.enrollmentPending == true,
@@ -141,6 +150,41 @@ fun LiveScreen(store: JarvisStore) {
                     modifier = Modifier.fillMaxWidth(),
                     onClick = { store.syncNow() },
                 )
+            }
+
+            item { SectionLabel("Local Wi-Fi") }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FactCard(
+                        listOf(
+                            "Identity" to localWifi.identityLabel,
+                            "Last route" to localWifi.latestRouteLabel,
+                        ),
+                    )
+                    TextAction(
+                        label = when {
+                            store.localWifiSetupRunning -> "Verifying Mac identity…"
+                            android.os.Build.VERSION.SDK_INT >= 37 && !localWifiPermission -> "Allow local network access"
+                            store.localWifiPin == null -> "Set up secure Wi-Fi"
+                            else -> "Refresh Mac Wi-Fi identity"
+                        },
+                        filled = store.localWifiPin == null,
+                        enabled = !store.localWifiSetupRunning && store.macApiPaired,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (android.os.Build.VERSION.SDK_INT >= 37 && !localWifiPermission) {
+                            store.permissionRequester?.invoke(Manifest.permission.ACCESS_LOCAL_NETWORK)
+                        } else {
+                            store.verifyLocalWifiGateway()
+                        }
+                    }
+                    BasicText(
+                        store.localWifiSetupMessage.ifBlank {
+                            "Initial certificate pinning needs the existing USB/ADB-reverse connection. Afterward, the app can discover the pinned Mac on Wi-Fi. A saved pin alone does not prove Wi-Fi is reachable."
+                        },
+                        style = JarvisType.Caption.copy(color = JarvisColor.TextMuted),
+                    )
+                }
             }
 
             item { SectionLabel("This phone") }

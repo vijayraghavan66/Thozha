@@ -147,7 +147,7 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit, onOpenConnection:
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                BasicText("JARVIS", style = JarvisType.Label.copy(color = JarvisColor.Sage, letterSpacing = 1.2.sp))
+                BasicText("THOZHA · தோழா", style = JarvisType.Label.copy(color = JarvisColor.Sage, letterSpacing = 0.8.sp))
                 Spacer(Modifier.height(2.dp))
                 BasicText(
                     store.session.title.ifBlank { "Your assistant" },
@@ -198,12 +198,20 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit, onOpenConnection:
                                 }
                                 Spacer(Modifier.width(12.dp))
                                 Column {
-                                    SectionLabel(if (connection.pendingEnrollment) "Pairing" else "Mac connection")
+                                    SectionLabel(
+                                        when {
+                                            connection.pendingEnrollment -> "Pairing"
+                                            !connection.paired -> "Welcome to Thozha"
+                                            else -> "Mac connection"
+                                        },
+                                    )
                                     BasicText(connection.label, style = JarvisType.Section.copy(color = JarvisColor.Text))
                                 }
                             }
                             BasicText(
-                                connection.detail,
+                                if (!connection.paired) {
+                                    "Pair your Mac with its signed invitation to start. You can choose a personal assistant name in Settings."
+                                } else connection.detail,
                                 style = JarvisType.Body.copy(color = JarvisColor.TextMuted),
                             )
                             TextAction(
@@ -219,7 +227,7 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit, onOpenConnection:
                 } else {
                     EmptyNote(
                         "Ready when you are",
-                        "Ask Jarvis a question. The Mac's real response and task state will appear here.",
+                        "Ask ${store.assistantName} a question. The Mac's real response and task state will appear here.",
                     )
                 }
             }

@@ -54,6 +54,14 @@ class JarvisMessagingService : FirebaseMessagingService() {
 
 /** Registers the device's FCM token once per distinct value. Failures are retried on the next app open. */
 object PushRegistration {
+    fun requestTokenAndRegister(context: android.content.Context) {
+        val messaging = FirebaseMessaging.getInstance()
+        messaging.isAutoInitEnabled = true
+        messaging.token.addOnSuccessListener { token ->
+            if (!LinkSettings(context).pushTokenAlreadyRegistered(token)) register(context, token)
+        }
+    }
+
     fun register(context: android.content.Context, token: String) {
         val settings = LinkSettings(context)
         if (token.isBlank()) return

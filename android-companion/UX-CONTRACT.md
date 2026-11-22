@@ -62,12 +62,15 @@ Do not queue a privileged approval decision offline. After interruption, refresh
 - Connection status separates device pairing, last successful Mac sync, Telegram sign-in/transport, and AI evidence. Unknown and stale values remain unknown/stale; no green status is inferred from a local network indicator.
 - The primary Connection screen shows user-facing status and a clear setup action. Raw loopback relay URLs and detailed hardware/runtime facts stay in Advanced details.
 - Pairing remains Mac-confirmed through the existing signed QR and local pending-device confirmation path. UI polish must not create credentials, approve a device, or alter the development allowlist by itself.
+- Product branding is Thozha (தோழா). The personal assistant name is optional, stored locally as a presentation preference, and independent of the signed pairing identity.
+- The Home empty state provides a first-use welcome and directs a fresh user into the existing signed Mac-pairing flow; it does not create a second pairing flow.
 
 ## Connection and trust boundaries
 
 - The raw OpenJarvis API stays loopback-only. USB/ADB reverse is the fallback path.
 - The optional Wi-Fi gateway is a separate allowlisted HTTPS service; it proxies only paired-device task, approval, and registration routes to the loopback backend. It binds only to one configured private interface address and only advertises on a configured SSID.
-- The Android client pins the gateway's TLS certificate through a nonce-bound signature from the already-paired Mac key over USB. It discovers the pinned `.local` service automatically and retries discovery on later requests. It never sends the bearer token before the pinned TLS handshake succeeds.
+- Initial local-gateway TLS certificate pinning uses a nonce-bound signature from the already-paired Mac key over the current USB/ADB-reverse route. The app discovers the pinned `.local` service automatically and retries discovery on later requests. It never sends the bearer token before the pinned TLS handshake succeeds.
+- The Connection screen separates “Mac identity pinned” from actual Wi-Fi reachability. Only a successful authenticated request records Wi-Fi as the last confirmed route. A user-triggered pin refresh follows the paired route and does not enroll a device or replace the device token.
 - Wi-Fi gateway startup is disabled unless an explicit enable flag, Wi-Fi interface, private bind IP, and SSID allowlist are configured. It must stay disabled until the device/network policy permits it; do not bind the raw Mac API to a LAN interface.
 - Android 17's `ACCESS_LOCAL_NETWORK` runtime permission is requested from Settings > Mac connection when the user asks to enable Wi-Fi access. If denied, the paired USB path remains available.
 - Tailscale, public tunnels, and Funnel are not part of this client configuration.

@@ -30,7 +30,6 @@ import com.jarvis.companion.data.SecureStore
 import com.jarvis.companion.link.LinkAlerts
 import com.jarvis.companion.link.LinkBackgroundSync
 import com.jarvis.companion.link.LinkSyncJob
-import com.jarvis.companion.notifications.PushRegistration
 import com.jarvis.companion.link.LinkKeyUnavailableException
 import com.jarvis.companion.link.LinkKeystoreKeys
 import com.jarvis.companion.link.LinkMode
@@ -116,14 +115,16 @@ class AdvancedActivity : Activity() {
 
     /** Fetches the FCM token once alerts are allowed, and registers it only when it has changed. */
     private fun registerPushIfNeeded() {
-        if (!LinkAlerts.canPost(this)) return
+        if (!BuildConfig.FCM_CONFIGURED || !LinkAlerts.canPost(this)) return
         runCatching {
-            val messaging = com.google.firebase.messaging.FirebaseMessaging.getInstance()
-            messaging.isAutoInitEnabled = true
-            messaging.token.addOnSuccessListener { token ->
-                if (BuildConfig.DEBUG) android.util.Log.i("JarvisFcm", "registration token available (debug build only): $token")
-                if (!LinkSettings(this).pushTokenAlreadyRegistered(token)) PushRegistration.register(this, token)
-            }
+            // Firebase classes are only shipped when a local google-services.json is configured.
+            // Use a guarded reflective boundary so credential-free source worktrees remain buildable.
+            val registrarClass = Class.forName("com.jarvis.companion.notifications.PushRegistration")
+            val registrar = registrarClass.getField("INSTANCE").get(null)
+            registrarClass.getMethod("requestTokenAndRegister", android.content.Context::class.java)
+                .invoke(registrar, applicationContext)
+        }.onFailure { failure ->
+            if (BuildConfig.DEBUG) android.util.Log.w("JarvisFcm", "push registration unavailable: ${failure.javaClass.simpleName}")
         }
     }
 

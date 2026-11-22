@@ -29,6 +29,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -50,6 +53,7 @@ import com.jarvis.companion.localai.AndroidDeviceProfileReader
 import com.jarvis.companion.localai.LocalModelCatalog
 import com.jarvis.companion.link.LinkAlerts
 import com.jarvis.companion.link.LinkSettings
+import com.jarvis.companion.link.AssistantNamePolicy
 import com.jarvis.companion.telegram.TelegramActivity
 
 /** Settings: real connection diagnostics, a real sync action, real preferences, and the existing setup screens. */
@@ -98,6 +102,11 @@ fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
                     enabled = !store.syncing,
                     modifier = Modifier.fillMaxWidth(),
                 ) { store.syncNow() }
+            }
+
+            item { SectionLabel("Your assistant") }
+            item {
+                AssistantNameCard(store)
             }
 
             item { SectionLabel("AI routing") }
@@ -249,6 +258,44 @@ fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
                 }
             }
             item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun AssistantNameCard(store: JarvisStore) {
+    var draft by remember(store.assistantName) { mutableStateOf(store.assistantName) }
+    val normalized = AssistantNamePolicy.normalize(draft)
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SurfaceCard {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                BasicText("What should your assistant be called?", style = JarvisType.Section.copy(color = JarvisColor.Text))
+                BasicText("This personal name is separate from the Thozha app and product identity.", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+                BasicTextField(
+                    value = draft,
+                    onValueChange = { draft = it.take(64) },
+                    singleLine = true,
+                    textStyle = JarvisType.Body.copy(color = JarvisColor.Text),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    decorationBox = { inner ->
+                        Box(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+                            if (draft.isEmpty()) BasicText("Assistant", style = JarvisType.Body.copy(color = JarvisColor.TextMuted))
+                            inner()
+                        }
+                    },
+                )
+                if (draft.isNotBlank() && normalized == null) {
+                    BasicText("Use 1–24 characters without control characters.", style = JarvisType.Caption.copy(color = JarvisColor.Waiting))
+                }
+            }
+        }
+        TextAction(
+            label = "Save assistant name",
+            filled = true,
+            enabled = normalized != null && normalized != store.assistantName,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            normalized?.let { if (store.updateAssistantName(it)) store.notice = "Assistant name saved." }
         }
     }
 }
