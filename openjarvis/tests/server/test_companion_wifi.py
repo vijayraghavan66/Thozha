@@ -99,6 +99,17 @@ def test_dns_sd_advertisement_uses_pinned_hostname_and_private_interface_ip():
     assert "tls-host=thozha-mac.local" in args
 
 
+def test_tls_proxy_child_does_not_inherit_credentials():
+    child = companion_wifi_gateway._tls_frontend_child_environment({
+        "PATH": "/usr/bin",
+        "HOME": "/tmp/user",
+        "OPENJARVIS_API_KEY": "test-only-secret",
+        "JARVIS_DEV_WORKER_CONFIG": "/private/config.json",
+        "GOOGLE_APPLICATION_CREDENTIALS": "/private/firebase.json",
+    })
+    assert child == {"PATH": "/usr/bin", "HOME": "/tmp/user"}
+
+
 def test_gateway_tls_pin_is_signed_over_loopback_and_requires_auth(tmp_path, monkeypatch):
     store = SupervisorStore(str(tmp_path / "supervisor.db"))
     monkeypatch.setattr(supervisor, "_STORE_INSTANCE", store)

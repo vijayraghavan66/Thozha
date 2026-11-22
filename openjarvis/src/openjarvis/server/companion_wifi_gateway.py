@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -29,6 +30,8 @@ from openjarvis.server.companion_wifi import (
 )
 
 _MANUAL_SSID_CONFIRMATION_MAX_SECONDS = 600
+_LOOPBACK_GATEWAY_HOST = "127.0.0.1"
+_LOOPBACK_GATEWAY_PORT = 8001
 
 
 def _wifi_address(interface: str) -> str:
@@ -120,6 +123,33 @@ def _dns_sd_registration_args(executable: str, hostname: str, bind_host: str, po
     ]
 
 
+def _tls_frontend_python() -> str:
+    configured = os.environ.get("JARVIS_COMPANION_TLS_PROXY_PYTHON", "").strip()
+    candidates = [configured] if configured else [shutil.which("python3.14"), "/opt/homebrew/bin/python3.14"]
+    for candidate in candidates:
+        if not candidate or not Path(candidate).is_file():
+            continue
+        result = subprocess.run(
+            [candidate, "-c", "import ssl,sys; print(f'{sys.version_info.major}.{sys.version_info.minor} {ssl.OPENSSL_VERSION_INFO[0]}.{ssl.OPENSSL_VERSION_INFO[1]}')"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            continue
+        match = re.fullmatch(r"(\d+)\.(\d+) (\d+)\.(\d+)", result.stdout.strip())
+        if match and (int(match[1]), int(match[2])) >= (3, 14) and (int(match[3]), int(match[4])) >= (3, 6):
+            return str(Path(candidate).resolve())
+    raise RuntimeError("A Python 3.14/OpenSSL 3.6 TLS frontend is required for Android local Wi-Fi")
+
+
+def _tls_frontend_child_environment(source: dict[str, str] | None = None) -> dict[str, str]:
+    """Pass runtime-only values to the stdlib TLS proxy, never OpenJarvis credentials."""
+    source = source or os.environ
+    return {key: source[key] for key in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL") if source.get(key)}
+
+
 def serve() -> None:
     if not wifi_gateway_enabled():
         raise RuntimeError("Local Wi-Fi gateway is disabled")
@@ -136,54 +166,106 @@ def serve() -> None:
         raise RuntimeError("Current Wi-Fi network does not match the configured allowlist")
 
     port = int(os.environ.get("JARVIS_COMPANION_WIFI_PORT", "8443"))
-    if not 1024 <= port <= 65535:
-        raise RuntimeError("Local Wi-Fi gateway port must be between 1024 and 65535")
+    if port != 8443:
+        raise RuntimeError("Local Wi-Fi gateway uses fixed port 8443")
     hostname = local_gateway_hostname()
     tls_identity = ensure_local_gateway_tls_identity(
         get_config_dir() / "companion-wifi", hostname, port=port,
     )
 
-    dns_sd = shutil.which("dns-sd") or "/usr/bin/dns-sd"
-    if not Path(dns_sd).is_file():
-        raise RuntimeError("macOS dns-sd is unavailable; gateway was not started")
-    advertiser = subprocess.Popen(
-        _dns_sd_registration_args(dns_sd, hostname, bind_host, port),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    debug_logging = os.environ.get("JARVIS_COMPANION_WIFI_DEBUG", "").strip() == "1"
-    server = uvicorn.Server(uvicorn.Config(
+    # Keep the normal gateway and its device authorization on Python 3.13, but
+    # terminate LAN TLS with the tested system Python 3.14/OpenSSL 3.6 runtime.
+    # The proxy forwards only to this fixed loopback gateway, never to the raw API.
+    try:
+        with socket.create_connection((_LOOPBACK_GATEWAY_HOST, _LOOPBACK_GATEWAY_PORT), timeout=0.2):
+            raise RuntimeError("Loopback companion gateway port is already in use")
+    except (ConnectionRefusedError, TimeoutError, OSError):
+        pass
+    loopback_server = uvicorn.Server(uvicorn.Config(
         create_gateway_app(),
-        host=bind_host,
-        port=port,
-        ssl_certfile=str(tls_identity.certificate_path),
-        ssl_keyfile=str(tls_identity.private_key_path),
-        log_level="info" if debug_logging else "warning",
-        access_log=debug_logging,
+        host=_LOOPBACK_GATEWAY_HOST,
+        port=_LOOPBACK_GATEWAY_PORT,
+        log_level="warning",
+        access_log=False,
         proxy_headers=False,
     ))
+    loopback_thread = threading.Thread(target=loopback_server.run, name="jarvis-companion-loopback", daemon=True)
+    loopback_thread.start()
     stop = threading.Event()
-
-    def stop_if_network_changes() -> None:
-        while not stop.wait(10):
-            if not _network_matches_allowlist(interface, allowed_ssid, manual_expiry) or _wifi_address(interface) != bind_host:
-                server.should_exit = True
-                return
-
-    monitor = threading.Thread(target=stop_if_network_changes, name="jarvis-wifi-policy", daemon=True)
-    monitor.start()
+    tls_proxy: subprocess.Popen | None = None
+    advertiser: subprocess.Popen | None = None
     try:
-        server.run()
+        deadline = time.monotonic() + 5
+        while not loopback_server.started and loopback_thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if not loopback_server.started:
+            raise RuntimeError("Loopback companion gateway did not start")
+
+        tls_frontend_python = _tls_frontend_python()
+        tls_frontend_script = Path(__file__).with_name("companion_wifi_tls_proxy.py")
+        if not tls_frontend_script.is_file():
+            raise RuntimeError("Local TLS frontend script is unavailable")
+        proxy_args = [
+            tls_frontend_python,
+            str(tls_frontend_script),
+            "--host", bind_host,
+            "--port", str(port),
+            "--certificate", str(tls_identity.certificate_path),
+            "--private-key", str(tls_identity.private_key_path),
+        ]
+        if os.environ.get("JARVIS_COMPANION_WIFI_DEBUG", "").strip() == "1":
+            proxy_args.append("--debug")
+        tls_proxy = subprocess.Popen(
+            proxy_args,
+            stdin=subprocess.DEVNULL,
+            env=_tls_frontend_child_environment(),
+            start_new_session=True,
+        )
+        time.sleep(0.2)
+        if tls_proxy.poll() is not None:
+            raise RuntimeError("Local TLS frontend failed to start")
+
+        dns_sd = shutil.which("dns-sd") or "/usr/bin/dns-sd"
+        if not Path(dns_sd).is_file():
+            raise RuntimeError("macOS dns-sd is unavailable; gateway was not started")
+        advertiser = subprocess.Popen(
+            _dns_sd_registration_args(dns_sd, hostname, bind_host, port),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        def stop_if_network_changes() -> None:
+            while not stop.wait(10):
+                if not _network_matches_allowlist(interface, allowed_ssid, manual_expiry) or _wifi_address(interface) != bind_host:
+                    if tls_proxy is not None:
+                        tls_proxy.terminate()
+                    loopback_server.should_exit = True
+                    return
+
+        monitor = threading.Thread(target=stop_if_network_changes, name="jarvis-wifi-policy", daemon=True)
+        monitor.start()
+        while tls_proxy.poll() is None and loopback_thread.is_alive():
+            time.sleep(0.2)
     finally:
         stop.set()
-        advertiser.terminate()
-        try:
-            advertiser.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            advertiser.kill()
-            advertiser.wait(timeout=2)
+        if tls_proxy is not None and tls_proxy.poll() is None:
+            tls_proxy.terminate()
+            try:
+                tls_proxy.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                tls_proxy.kill()
+                tls_proxy.wait(timeout=2)
+        loopback_server.should_exit = True
+        loopback_thread.join(timeout=5)
+        if advertiser is not None:
+            advertiser.terminate()
+            try:
+                advertiser.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                advertiser.kill()
+                advertiser.wait(timeout=2)
 
 
 def main() -> int:
