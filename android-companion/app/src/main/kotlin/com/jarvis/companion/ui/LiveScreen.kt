@@ -30,6 +30,8 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import android.os.SystemClock
+import android.util.Log
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -55,6 +57,7 @@ import com.jarvis.companion.voice.VoiceControllerState
 import com.jarvis.companion.voice.VoiceRecognitionProvider
 import com.jarvis.companion.voice.LocalWeatherClient
 import com.jarvis.companion.voice.WeatherIntentRouter
+import com.jarvis.companion.voice.WeatherRequestEpoch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
@@ -298,13 +301,17 @@ private fun LiveVoiceControls(store: JarvisStore) {
     var weatherReply by remember { mutableStateOf("") }
     var weatherBusy by remember { mutableStateOf(false) }
     var weatherJob by remember { mutableStateOf<Job?>(null) }
+    val weatherEpoch = remember { WeatherRequestEpoch() }
     val voiceState = remember { mutableStateOf(VoiceControllerState.IDLE) }
     val providerLabel = remember { mutableStateOf("Not used in this session") }
     val outputLabel = remember { mutableStateOf("Installed platform voice") }
     var voiceRef by remember { mutableStateOf<JarvisVoiceController?>(null) }
     val voice = remember(context, store) {
         JarvisVoiceController(context, object : JarvisVoiceController.Listener {
-            override fun onStateChanged(state: VoiceControllerState) { voiceState.value = state }
+            override fun onStateChanged(state: VoiceControllerState) {
+                voiceState.value = state
+                if (state == VoiceControllerState.SPEAKING) Log.i("JarvisVoice", "event=tts_playback_started elapsed_ms=${SystemClock.elapsedRealtime()}")
+            }
             override fun onRecognitionProvider(provider: VoiceRecognitionProvider) {
                 providerLabel.value = if (provider == VoiceRecognitionProvider.ON_DEVICE) {
                     "On-device recognition"
@@ -316,10 +323,14 @@ private fun LiveVoiceControls(store: JarvisStore) {
                 outputLabel.value = "${profile.name} · ${profile.localeTag}" + if (profile.offline) " · offline" else " · system"
             }
             override fun onFinalText(text: String) {
+                val speechEnd = SystemClock.elapsedRealtime()
+                Log.i("JarvisVoice", "event=recognition_final elapsed_ms=$speechEnd chars=${text.length}")
                 if (WeatherIntentRouter.isWeatherRequest(text)) {
+                    Log.i("JarvisWeather", "event=local_route_selected elapsed_ms=${SystemClock.elapsedRealtime()}")
                     val city = Regex("(?i)\\b(?:in|for)\\s+([\\p{L} .'-]+?)(?:\\s+(?:today|now|currently|should)\\b|[?.!,]|$)")
                         .find(text)?.groupValues?.get(1)?.trim()
                     weatherJob?.cancel()
+                    val requestToken = weatherEpoch.begin()
                     if (city.isNullOrBlank()) {
                         weatherReply = "Choose a city in your request (for example, ‘weather in Chennai’). I won’t guess your location."
                         store.notice = weatherReply
@@ -328,8 +339,11 @@ private fun LiveVoiceControls(store: JarvisStore) {
                     weatherBusy = true
                     weatherReply = "Checking current weather for $city…"
                     weatherJob = scope.launch {
+                        val fetchStart = SystemClock.elapsedRealtime()
+                        Log.i("JarvisWeather", "event=fetch_started elapsed_ms=$fetchStart")
                         val result = runCatching { withContext(Dispatchers.IO) { LocalWeatherClient().current(city).response() } }
-                        if (!isActive) return@launch
+                        if (!isActive || !weatherEpoch.isCurrent(requestToken)) return@launch
+                        Log.i("JarvisWeather", "event=fetch_finished elapsed_ms=${SystemClock.elapsedRealtime()} duration_ms=${SystemClock.elapsedRealtime() - fetchStart} success=${result.isSuccess}")
                         weatherBusy = false
                         weatherReply = result.getOrElse { "Weather unavailable: ${it.message ?: "check your connection and retry."}" }
                         store.notice = weatherReply
@@ -368,6 +382,7 @@ private fun LiveVoiceControls(store: JarvisStore) {
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             weatherJob?.cancel()
+            weatherEpoch.cancel()
             voice.close()
         }
     }

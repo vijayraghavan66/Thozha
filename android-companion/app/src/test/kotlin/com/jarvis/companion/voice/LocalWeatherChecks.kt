@@ -24,5 +24,11 @@ fun main() {
     WeatherIntentRouter.route("Should I carry an umbrella?", { local++ }, { mac++ })
     checkWeather(local == 1 && mac == 0, "weather must stay local")
     checkWeather(wet.isStale(Instant.parse("2026-11-22T13:00:00Z")), "stale data recognized")
-    println("Local weather fixture/routing checks passed: 8 assertions")
+    val epoch = WeatherRequestEpoch()
+    val old = epoch.begin()
+    epoch.cancel()
+    checkWeather(!epoch.isCurrent(old), "cancelled lifecycle cannot publish stale weather or speak")
+    val fresh = epoch.begin()
+    checkWeather(epoch.isCurrent(fresh), "new LiveScreen request remains current")
+    println("Local weather fixture/routing/lifecycle checks passed: 10 assertions")
 }

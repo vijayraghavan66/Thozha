@@ -6,6 +6,7 @@ import java.net.URLEncoder
 import java.net.URL
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.concurrent.atomic.AtomicLong
 
 /** Credential-free Open-Meteo client. Calls are synchronous by design; invoke from an IO dispatcher. */
 data class WeatherSnapshot(val city: String, val temperatureC: Double, val precipitationProbability: Int, val fetchedAt: Instant) {
@@ -40,6 +41,14 @@ class LocalWeatherClient(
         return try { if (connection.responseCode !in 200..299) error("Weather service unavailable (${connection.responseCode}). Retry when online."); connection.inputStream.bufferedReader().use { it.readText() } } finally { connection.disconnect() }
     }
     }
+}
+
+/** Invalidates results from cancelled turns or a disposed LiveScreen. */
+class WeatherRequestEpoch {
+    private val epoch = AtomicLong(0)
+    fun begin(): Long = epoch.incrementAndGet()
+    fun cancel() { epoch.incrementAndGet() }
+    fun isCurrent(token: Long): Boolean = epoch.get() == token
 }
 
 object WeatherIntentRouter {
