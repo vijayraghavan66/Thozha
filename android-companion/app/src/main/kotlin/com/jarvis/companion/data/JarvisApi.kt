@@ -1,6 +1,8 @@
 package com.jarvis.companion.data
 
 import android.content.Context
+import android.util.Log
+import com.jarvis.companion.BuildConfig
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
@@ -835,6 +837,12 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         } catch (e: ApiException) {
             throw e
         } catch (e: Exception) {
+            if (BuildConfig.DEBUG && wifiEndpoint != null) {
+                val causes = generateSequence(e as Throwable?) { it.cause }
+                    .take(5)
+                    .joinToString(">") { it.javaClass.simpleName.take(40) }
+                Log.w("JarvisWifi", "request_failed route=signed_private_ip causes=$causes")
+            }
             throw ApiException(e.message ?: "Could not reach Jarvis on the private network")
         } finally {
             connection.disconnect()
