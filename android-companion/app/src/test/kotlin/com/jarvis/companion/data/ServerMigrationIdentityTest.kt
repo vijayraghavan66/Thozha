@@ -29,6 +29,7 @@ object ServerMigrationIdentityTest {
         verifiesSignedCandidateChallenge()
         rejectsCandidateNonceOriginAndSignatureChanges()
         verifiesPinnedLocalGatewayIdentity()
+        verifiesSignedLocalGatewayAddressFallback()
         println("ServerMigrationIdentity fixed-vector checks passed.")
     }
 
@@ -199,6 +200,58 @@ object ServerMigrationIdentityTest {
                 ServerMigrationIdentity.verifyLocalGatewayIdentity(
                     pin, nonce, fields.getValue("protocol"), nonce, "jarvis-mac.local", "8443",
                     "sha256:bad", PUBLIC_KEY_B64, SERVER_FINGERPRINT, signature,
+                )
+            }.reason,
+        )
+    }
+
+    private fun verifiesSignedLocalGatewayAddressFallback() {
+        val pinned = PinnedServerIdentity(Base64.getDecoder().decode(PUBLIC_KEY_B64), SERVER_FINGERPRINT)
+        val pin = LocalGatewayPin("jarvis-mac.local", 8443, "sha256:" + "d".repeat(64))
+        val nonce = "wifi-address-nonce-20261122"
+        val fields = linkedMapOf(
+            "protocol" to "openjarvis-local-gateway-address-v1",
+            "nonce" to nonce,
+            "hostname" to pin.hostname,
+            "port" to pin.port.toString(),
+            "address" to "192.168.1.8",
+            "certificate_sha256" to pin.certificateSha256,
+            "server_public_key" to PUBLIC_KEY_B64,
+            "server_fingerprint" to SERVER_FINGERPRINT,
+        )
+        val signature = signWithFixtureKey(fields)
+        assertEquals(
+            "192.168.1.8",
+            ServerMigrationIdentity.verifyLocalGatewayAddress(
+                pinned, pin, nonce, fields.getValue("protocol"), nonce, pin.hostname, "8443",
+                "192.168.1.8", pin.certificateSha256, PUBLIC_KEY_B64, SERVER_FINGERPRINT, signature,
+            ),
+        )
+        assertEquals(
+            ServerMigrationIdentity.Failure.GATEWAY_ADDRESS_INVALID,
+            expectFailure {
+                ServerMigrationIdentity.verifyLocalGatewayAddress(
+                    pinned, pin, nonce, fields.getValue("protocol"), nonce, pin.hostname, "8443",
+                    "8.8.8.8", pin.certificateSha256, PUBLIC_KEY_B64, SERVER_FINGERPRINT, signature,
+                )
+            }.reason,
+        )
+        assertEquals(
+            ServerMigrationIdentity.Failure.NONCE_MISMATCH,
+            expectFailure {
+                ServerMigrationIdentity.verifyLocalGatewayAddress(
+                    pinned, pin, nonce, fields.getValue("protocol"), "replayed", pin.hostname, "8443",
+                    "192.168.1.8", pin.certificateSha256, PUBLIC_KEY_B64, SERVER_FINGERPRINT, signature,
+                )
+            }.reason,
+        )
+        assertEquals(
+            ServerMigrationIdentity.Failure.SIGNATURE_MISMATCH,
+            expectFailure {
+                ServerMigrationIdentity.verifyLocalGatewayAddress(
+                    pinned, pin, nonce, fields.getValue("protocol"), nonce, pin.hostname, "8443",
+                    "192.168.1.99", pin.certificateSha256, PUBLIC_KEY_B64, SERVER_FINGERPRINT,
+                    signature,
                 )
             }.reason,
         )

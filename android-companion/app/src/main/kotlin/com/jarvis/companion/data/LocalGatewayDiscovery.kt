@@ -41,6 +41,12 @@ internal fun isAllowedPrivateGatewayAddress(address: InetAddress): Boolean {
     }
 }
 
+internal fun endpointFromSignedAddress(pin: LocalGatewayPin): LocalGatewayEndpoint? = pin.address?.let { literal ->
+    runCatching { InetAddress.getByName(literal) }.getOrNull()
+        ?.takeIf(::isAllowedPrivateGatewayAddress)
+        ?.let { LocalGatewayEndpoint(pin.hostname, pin.port, it) }
+}
+
 /** Discovers only the previously paired Mac's pinned DNS-SD identity. */
 object LocalGatewayDiscovery {
     const val SERVICE_TYPE = "_jarvis-companion._tcp."
@@ -206,7 +212,7 @@ object LocalGatewayDiscovery {
             }
         }
 
-        val endpoint = try {
+        val discoveredEndpoint = try {
             manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
             latch.await(DISCOVERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             resolved[0]
@@ -218,8 +224,15 @@ object LocalGatewayDiscovery {
         } finally {
             runCatching { manager.stopServiceDiscovery(listener) }
         }
+        val signedAddressFallback = if (discoveredEndpoint == null) endpointFromSignedAddress(pin) else null
+        val endpoint = discoveredEndpoint ?: signedAddressFallback
+        if (discoveredEndpoint == null && signedAddressFallback != null) diagnostic("discovery_signed_address_fallback")
         if (endpoint == null) diagnostic("discovery_no_endpoint")
         else diagnostic("discovery_endpoint_accepted")
+        endpoint?.let {
+            cached = it
+            cachedAtMs = SystemClock.elapsedRealtime()
+        }
         if (endpoint == null) {
             failedHostname = pin.hostname
             failedPort = pin.port

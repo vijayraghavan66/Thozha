@@ -30,6 +30,7 @@ internal object ServerMigrationIdentity {
         SIGNATURE_MISMATCH,
         GATEWAY_HOST_MISMATCH,
         GATEWAY_CERT_PIN_INVALID,
+        GATEWAY_ADDRESS_INVALID,
     }
 
     class VerificationException(val reason: Failure) : IllegalArgumentException(reason.name)
@@ -231,6 +232,82 @@ internal object ServerMigrationIdentity {
             PairingInvitationSignature.Failure.SIGNATURE_MISMATCH -> throw VerificationException(Failure.SIGNATURE_MISMATCH)
         }
         return LocalGatewayIdentity(hostname, port, certificateSha256)
+    }
+
+    /** Verifies a nonce-bound private gateway IP signed by the already-pinned Mac identity. */
+    fun verifyLocalGatewayAddress(
+        pinned: PinnedServerIdentity,
+        pin: LocalGatewayPin,
+        expectedNonce: String,
+        protocol: String,
+        responseNonce: String,
+        hostname: String,
+        portText: String,
+        addressText: String,
+        certificateSha256: String,
+        serverPublicKeyBase64: String,
+        serverFingerprint: String,
+        signatureBase64: String,
+    ): String {
+        if (protocol != "openjarvis-local-gateway-address-v1") {
+            throw VerificationException(Failure.PROTOCOL_MISMATCH)
+        }
+        if (!constantStringEquals(expectedNonce, responseNonce)) {
+            throw VerificationException(Failure.NONCE_MISMATCH)
+        }
+        if (hostname != pin.hostname || portText != pin.port.toString() || certificateSha256 != pin.certificateSha256) {
+            throw VerificationException(Failure.GATEWAY_HOST_MISMATCH)
+        }
+        val address = parsePrivateAddress(addressText)
+            ?: throw VerificationException(Failure.GATEWAY_ADDRESS_INVALID)
+        val presentedDer = decodePublicKey(serverPublicKeyBase64)
+        requireP256(presentedDer)
+        if (!MessageDigest.isEqual(pinned.publicKeyDer, presentedDer)) {
+            throw VerificationException(Failure.PIN_MISMATCH)
+        }
+        if (!constantStringEquals(pinned.fingerprint, fingerprint(presentedDer)) ||
+            !constantStringEquals(pinned.fingerprint, serverFingerprint)
+        ) {
+            throw VerificationException(Failure.FINGERPRINT_MISMATCH)
+        }
+        val fields = linkedMapOf(
+            "protocol" to protocol,
+            "nonce" to responseNonce,
+            "hostname" to hostname,
+            "port" to portText,
+            "address" to addressText,
+            "certificate_sha256" to certificateSha256,
+            "server_public_key" to serverPublicKeyBase64,
+            "server_fingerprint" to serverFingerprint,
+        )
+        when (PairingInvitationSignature.verify(fields, serverPublicKeyBase64, serverFingerprint, signatureBase64)) {
+            null -> Unit
+            PairingInvitationSignature.Failure.INVALID_KEY -> throw VerificationException(Failure.INVALID_PUBLIC_KEY)
+            PairingInvitationSignature.Failure.FINGERPRINT_MISMATCH -> throw VerificationException(Failure.FINGERPRINT_MISMATCH)
+            PairingInvitationSignature.Failure.INVALID_SIGNATURE -> throw VerificationException(Failure.INVALID_SIGNATURE)
+            PairingInvitationSignature.Failure.SIGNATURE_MISMATCH -> throw VerificationException(Failure.SIGNATURE_MISMATCH)
+        }
+        return address.hostAddress ?: throw VerificationException(Failure.GATEWAY_ADDRESS_INVALID)
+    }
+
+    private fun parsePrivateAddress(value: String): InetAddress? {
+        val ipv4 = value.matches(Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"))
+        val ipv6 = value.contains(':') && value.matches(Regex("[0-9a-fA-F:.]+"))
+        if (!ipv4 && !ipv6) return null
+        val address = runCatching { InetAddress.getByName(value) }.getOrNull() ?: return null
+        return address.takeIf(::isAllowedPrivateGatewayAddress)
+    }
+
+    private fun isAllowedPrivateGatewayAddress(address: InetAddress): Boolean {
+        if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress || address.isMulticastAddress) return false
+        return when (address) {
+            is Inet4Address -> {
+                val bytes = address.address.map { it.toInt() and 0xff }
+                bytes[0] == 10 || (bytes[0] == 172 && bytes[1] in 16..31) || (bytes[0] == 192 && bytes[1] == 168)
+            }
+            is Inet6Address -> (address.address[0].toInt() and 0xfe) == 0xfc
+            else -> false
+        }
     }
 
     fun fingerprint(publicKeyDer: ByteArray): String =

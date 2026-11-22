@@ -93,7 +93,7 @@ class MainActivity : ComponentActivity() {
     /** Verifies the Mac's Wi-Fi identity once over the already paired route. Failures stay silent, as before. */
     private fun pinLocalGatewayIfNeeded() {
         val secure = SecureStore(this)
-        if (pinning || secure.token().isNullOrBlank() || secure.localGatewayPin() != null) return
+        if (pinning || secure.token().isNullOrBlank() || secure.localGatewayPin()?.address != null) return
         pinning = true
         Thread {
             val verified = runCatching { JarvisApi(applicationContext, secure).pinLocalGatewayIdentity() }.isSuccess

@@ -11,6 +11,14 @@ object LocalGatewayRoutingChecks {
 
         val endpoint = LocalGatewayEndpoint("thozha-mac.local", 8443, InetAddress.getByName("192.168.1.8"))
         check(endpoint.httpsBaseUrl() == "https://192.168.1.8:8443", "Wi-Fi must connect to the DNS-SD resolved private IP")
+        val signedFallback = endpointFromSignedAddress(
+            LocalGatewayPin("thozha-mac.local", 8443, "sha256:" + "a".repeat(64), "192.168.1.8"),
+        )
+        check(signedFallback?.httpsBaseUrl() == "https://192.168.1.8:8443", "Signed loopback-provided IP should be usable when mDNS is blocked")
+        check(
+            endpointFromSignedAddress(LocalGatewayPin("thozha-mac.local", 8443, "sha256:" + "a".repeat(64), "8.8.8.8")) == null,
+            "A public address must never be used as the local gateway fallback",
+        )
         check(isAllowedPrivateGatewayAddress(InetAddress.getByName("192.168.1.8")), "RFC1918 gateway address should be accepted")
         check(isAllowedPrivateGatewayAddress(InetAddress.getByName("fd12::1")), "ULA gateway address should be accepted")
         listOf("127.0.0.1", "8.8.8.8", "169.254.1.1", "100.64.0.1", "224.0.0.1", "::1", "fe80::1").forEach { host ->

@@ -169,12 +169,41 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             throw ApiException("The Wi-Fi gateway is not the paired Mac.")
         }
         val pin = LocalGatewayPin(identity.hostname, identity.port, identity.certificateSha256)
+        val addressNonce = newMigrationNonce()
+        val addressResponse = request(
+            loopback,
+            "/v1/jarvis/local-gateway/address",
+            "POST",
+            JSONObject().put("nonce", addressNonce),
+            bearer,
+        )
+        val addressKey = addressResponse.requiredString("server_public_key")
+        val addressFingerprint = addressResponse.requiredString("server_fingerprint")
+        val address = try {
+            ServerMigrationIdentity.verifyLocalGatewayAddress(
+                pinned = pinned,
+                pin = pin,
+                expectedNonce = addressNonce,
+                protocol = addressResponse.requiredString("protocol"),
+                responseNonce = addressResponse.requiredString("nonce"),
+                hostname = addressResponse.requiredString("hostname"),
+                portText = addressResponse.requiredString("port"),
+                addressText = addressResponse.requiredString("address"),
+                certificateSha256 = addressResponse.requiredString("certificate_sha256"),
+                serverPublicKeyBase64 = addressKey,
+                serverFingerprint = addressFingerprint,
+                signatureBase64 = addressResponse.requiredString("signature"),
+            )
+        } catch (failure: ServerMigrationIdentity.VerificationException) {
+            throw ApiException("The Mac Wi-Fi address failed verification (${failure.reason.name}).")
+        }
+        val addressPin = pin.copy(address = address)
         try {
-            secureStore.saveLocalGatewayPin(pin)
+            secureStore.saveLocalGatewayPin(addressPin)
         } catch (failure: SecurityException) {
             throw ApiException(failure.message ?: "The Mac Wi-Fi certificate changed.")
         }
-        return pin
+        return addressPin
     }
 
     private fun parseLinkTaskResult(json: JSONObject): LinkTaskResult {

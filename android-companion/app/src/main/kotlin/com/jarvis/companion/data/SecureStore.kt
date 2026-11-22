@@ -9,6 +9,7 @@ import java.security.KeyStore
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 import java.security.MessageDigest
+import java.net.InetAddress
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -112,8 +113,8 @@ class SecureStore(context: Context) {
             throw SecurityException("Local gateway pin failed integrity validation.")
         }
         val fields = value.split('\n')
-        if (fields.size != 3) throw SecurityException("Local gateway pin record is malformed.")
-        val pin = LocalGatewayPin(fields[0], fields[1].toIntOrNull() ?: 0, fields[2])
+        if (fields.size !in 3..4) throw SecurityException("Local gateway pin record is malformed.")
+        val pin = LocalGatewayPin(fields[0], fields[1].toIntOrNull() ?: 0, fields[2], fields.getOrNull(3)?.takeIf { it.isNotBlank() })
         validateLocalGatewayPin(pin)
         return pin
     }
@@ -128,7 +129,8 @@ class SecureStore(context: Context) {
         if (old != pin) {
             // This method is internal and is called only after pinLocalGatewayIdentity verifies
             // the new certificate fingerprint with the already-paired Mac signing key over USB.
-            val (iv, ciphertext) = encrypt("${pin.hostname}\n${pin.port}\n${pin.certificateSha256}")
+            val record = listOfNotNull(pin.hostname, pin.port.toString(), pin.certificateSha256, pin.address).joinToString("\n")
+            val (iv, ciphertext) = encrypt(record)
             prefs.edit().putString(KEY_WIFI_PIN_IV, encode(iv)).putString(KEY_WIFI_PIN_CIPHER, encode(ciphertext)).apply()
         }
     }
@@ -310,6 +312,19 @@ class SecureStore(context: Context) {
         require(pin.certificateSha256.matches(Regex("sha256:[0-9a-f]{64}"))) {
             "Local gateway certificate pin is invalid."
         }
+        pin.address?.let { value ->
+            val ipv4 = value.matches(Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"))
+            val ipv6 = value.contains(':') && value.matches(Regex("[0-9a-fA-F:.]+"))
+            require(ipv4 || ipv6) { "Local gateway address must be an IP literal." }
+            val address = if (ipv4) {
+                val bytes = value.split('.').map { it.toIntOrNull()?.takeIf { octet -> octet in 0..255 }?.toByte() }
+                require(bytes.size == 4 && bytes.all { it != null }) { "Local gateway IPv4 address is invalid." }
+                InetAddress.getByAddress(ByteArray(4) { bytes[it]!!.toByte() })
+            } else {
+                InetAddress.getByName(value)
+            }
+            require(isAllowedPrivateGatewayAddress(address)) { "Local gateway address is not private." }
+        }
     }
 
     private fun sameServerIdentity(a: PinnedServerIdentity, b: PinnedServerIdentity): Boolean =
@@ -350,4 +365,9 @@ class SecureStore(context: Context) {
 }
 
 data class PinnedServerIdentity(val publicKeyDer: ByteArray, val fingerprint: String)
-data class LocalGatewayPin(val hostname: String, val port: Int, val certificateSha256: String)
+data class LocalGatewayPin(
+    val hostname: String,
+    val port: Int,
+    val certificateSha256: String,
+    val address: String? = null,
+)
