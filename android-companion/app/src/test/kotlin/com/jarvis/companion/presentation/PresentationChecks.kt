@@ -33,6 +33,9 @@ fun main() {
     check(TaskStates.toneFor("REFUSED") == TaskTone.FAILED, "refused counts as failed")
     check(TaskStates.toneFor("SOMETHING_NEW") == TaskTone.UNKNOWN && TaskStates.toneFor(null) == TaskTone.UNKNOWN, "unknown states are never success")
     check(TaskStates.label(TaskTone.UNKNOWN) == "Status unknown", "unknown label is honest")
+    check(TaskStates.statusLabel("CREATED") == "Created" && TaskStates.statusLabel("QUEUED") == "Queued", "created and queued remain distinct")
+    check(TaskStates.statusLabel("WAITING_CONNECTION") == "Waiting for connection", "connection wait is not mislabeled as approval")
+    check(TaskStates.statusLabel("WAITING_APPROVAL") == "Waiting for approval", "approval wait remains distinct")
 
     // --- conversation: no fabricated answers ----------------------------------------------------------------------
     val items = ConversationPresentation.items(listOf(
@@ -110,7 +113,7 @@ fun main() {
         ),
         formatTime = fmt,
     )
-    check(progress.map { it.label } == listOf("In progress", "In progress"), "only the task's authenticated progress events are shown in sequence")
+    check(progress.map { it.label } == listOf("Running", "Running"), "only the task's authenticated progress events are shown in sequence")
     check(progress.last().detail == "Worker started" && progress.last().timeLabel == "t13", "duplicate progress events are discarded in favor of the original event")
     check(TaskProgressPresentation.eventsFor("missing", emptyList(), fmt).isEmpty(), "no progress is fabricated when the Mac has sent no event")
 

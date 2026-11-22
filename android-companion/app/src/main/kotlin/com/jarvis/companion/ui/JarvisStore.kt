@@ -45,7 +45,7 @@ enum class Tab(val label: String) { HOME("Home"), ACTIVITY("Activity"), APPROVAL
 enum class Overlay { SETTINGS, HISTORY }
 
 /** States the Mac reports while work is still open. Used for polling and for the presence signal. */
-val ActiveStates = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "SENT", "QUEUED", "UNCONFIRMED")
+val ActiveStates = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "WAITING_CONNECTION", "PAUSED", "SENT", "QUEUED", "UNCONFIRMED")
 
 /**
  * Holds everything the Compose screens show. All values come from LinkRuntime, the Telegram session, and the
@@ -69,6 +69,8 @@ class JarvisStore(private val app: Context) {
     var entries by mutableStateOf<List<Map<String, Any>>>(emptyList())
     /** Authenticated task-update envelopes persisted by LinkRuntime; rendered as real activity only. */
     var taskUpdates by mutableStateOf<List<Map<String, Any>>>(emptyList())
+    var taskRegistry by mutableStateOf<List<Map<String, Any>>>(emptyList())
+    var taskEventHistory by mutableStateOf<List<Map<String, Any>>>(emptyList())
     var approvals by mutableStateOf<List<ApprovalReview>>(emptyList())
     var taskArtifacts by mutableStateOf<Map<String, List<TaskArtifact>>>(emptyMap())
     var artifactLoadingTasks by mutableStateOf<Set<String>>(emptySet())
@@ -318,6 +320,8 @@ class JarvisStore(private val app: Context) {
         apiApprovalPairs.forEach { (_, review) -> combinedApprovals[review.approvalId] = review }
         val directApprovalMap = apiApprovalPairs.associate { (approval, _) -> approval.id to approval }
         val updatesSnapshot = runtime.recentUpdates()
+        val taskRegistrySnapshot = runtime.taskRegistry()
+        val taskEventSnapshot = runtime.taskEventHistory()
         val decisionIds = (approvalDecisions.keys + combinedApprovals.keys).distinct()
         val runtimeDecisionStates = decisionIds.mapNotNull { id ->
             runtime.approvalDecisionState(id)?.let { id to it }
@@ -332,6 +336,8 @@ class JarvisStore(private val app: Context) {
             lastMacApiTransport = currentApiTransport
             entries = mergeEntries(conversation, localHistory.all())
             taskUpdates = updatesSnapshot
+            taskRegistry = taskRegistrySnapshot
+            taskEventHistory = taskEventSnapshot
             localAiSnapshot = localAi.status()
             approvals = combinedApprovals.values.toList()
             supervisorApprovals = directApprovalMap
@@ -542,7 +548,11 @@ class JarvisStore(private val app: Context) {
         notice = ""
         background(if (route is RequestRoute.Local) lanes.local else lanes.send) {
             if (route is RequestRoute.Local) {
-                val requestStored = runCatching { localHistory.recordRequest(requestId, text, System.currentTimeMillis()) }
+                val requestStored = runCatching {
+                    localHistory.recordRequest(requestId, text, System.currentTimeMillis())
+                    LinkService.runtime(app).recordLocalTaskRequest(requestId, text, transport = "api", executionTarget = "PHONE")
+                    LinkService.runtime(app).recordTaskLifecycle(requestId, "", "RUNNING", "Running on this phone", "PHONE", "$requestId:phone-running")
+                }
                 if (requestStored.isFailure) {
                     ui {
                         submitting = false
@@ -624,6 +634,7 @@ class JarvisStore(private val app: Context) {
                 val persisted = outcome.fold(
                     onSuccess = { answer ->
                         runCatching { localHistory.recordResult(requestId, "COMPLETED", answer, answer.take(400), System.currentTimeMillis()) }
+                        runCatching { LinkService.runtime(app).recordTaskLifecycle(requestId, "", "COMPLETED", answer.take(400), "PHONE", "$requestId:phone-completed") }
                         ui { notice = "Answered on this phone using the loaded local model." }
                         "COMPLETED"
                     },
@@ -638,6 +649,7 @@ class JarvisStore(private val app: Context) {
                                 System.currentTimeMillis(),
                             )
                         }
+                        runCatching { LinkService.runtime(app).recordTaskLifecycle(requestId, "", if (cancelled) "CANCELLED" else "FAILED", if (cancelled) "Cancelled on this phone." else localModelError(failure), "PHONE", "$requestId:phone-${if (cancelled) "cancelled" else "failed"}") }
                         if (!cancelled) ui { notice = localModelError(failure) }
                         if (cancelled) "CANCELLED" else "FAILED"
                     },

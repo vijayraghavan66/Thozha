@@ -12,7 +12,7 @@ enum class TaskTone { RUNNING, WAITING, COMPLETED, FAILED, CANCELLED, UNKNOWN }
 
 object TaskStates {
     private val running = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "QUEUED", "SENT")
-    private val waiting = setOf("WAITING_APPROVAL", "PAUSED")
+    private val waiting = setOf("WAITING_APPROVAL", "WAITING_CONNECTION", "PAUSED")
     private val completed = setOf("COMPLETED")
     private val failed = setOf("FAILED", "REFUSED", "EXPIRED")
     private val cancelled = setOf("CANCELLED")
@@ -27,6 +27,18 @@ object TaskStates {
             in cancelled -> TaskTone.CANCELLED
             else -> TaskTone.UNKNOWN
         }
+    }
+
+    fun statusLabel(state: String?): String = when (state?.trim()?.uppercase()) {
+        "CREATED" -> "Created"
+        "QUEUED", "SENT" -> "Queued"
+        "RUNNING", "PLANNING", "VERIFYING" -> "Running"
+        "WAITING_APPROVAL" -> "Waiting for approval"
+        "WAITING_CONNECTION", "PAUSED" -> "Waiting for connection"
+        "COMPLETED" -> "Completed"
+        "FAILED", "REJECTED", "EXPIRED" -> "Failed"
+        "CANCELLED" -> "Cancelled"
+        else -> "Status unknown"
     }
 
     /** Short, sentence-case label. Unknown states are shown as "Status unknown", never as success. */

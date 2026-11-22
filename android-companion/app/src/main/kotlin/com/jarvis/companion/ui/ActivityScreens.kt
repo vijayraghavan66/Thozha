@@ -176,6 +176,25 @@ private fun TaskRow(row: TimelineRow, progress: List<TaskProgressEvent>, store: 
                     }
                 }
             }
+            val lifecycle = store.taskEventHistory.filter { it["task_id"] == row.requestId || (row.taskId.isNotBlank() && it["supervisor_task_id"] == row.taskId) }.takeLast(6)
+            if (lifecycle.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                SectionLabel("Task timeline")
+                Spacer(Modifier.height(6.dp))
+                lifecycle.forEach { event ->
+                    val at = (event["timestamp_unix_ms"] as? Number)?.toLong() ?: 0L
+                    val label = event["event"] as? String ?: (event["status"] as? String ?: "Task event")
+                    val detail = event["summary"] as? String ?: ""
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+                        BasicText(clockTime(at), style = JarvisType.Caption.copy(color = JarvisColor.TextMuted), modifier = Modifier.width(58.dp))
+                        Column(Modifier.weight(1f)) {
+                            BasicText(label, style = JarvisType.Caption.copy(color = JarvisColor.Text))
+                            if (detail.isNotBlank()) BasicText(detail, style = JarvisType.Caption.copy(color = JarvisColor.TextMuted), maxLines = 3)
+                        }
+                    }
+                    Spacer(Modifier.height(5.dp))
+                }
+            }
             if (progress.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
                 SectionLabel("Mac updates")

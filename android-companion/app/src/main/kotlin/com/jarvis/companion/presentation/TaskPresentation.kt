@@ -49,7 +49,7 @@ object TaskProgressPresentation {
             TaskProgressEvent(
                 id = (event["event_seq"] as? Number)?.toLong()?.let { "seq:$it" }
                     ?: "event:$index:${event["received_at_unix_ms"]}",
-                label = if (state.isNullOrBlank()) "Mac updated the task" else TaskStates.label(tone),
+                label = if (state.isNullOrBlank()) "Task updated" else TaskStates.statusLabel(state),
                 detail = (event["summary"] as? String).orEmpty().trim().ifBlank { "The Mac reported a status update." }.take(240),
                 timeLabel = timestamp?.let(formatTime).orEmpty(),
                 tone = tone,
@@ -93,7 +93,7 @@ object TimelinePresentation {
             taskId = taskId,
             title = request.ifBlank { "Request" }.take(120),
             tone = tone,
-            statusLabel = TaskStates.label(tone),
+            statusLabel = TaskStates.statusLabel(state),
             detail = summary.take(400),
             timeLabel = updated?.let(formatTime).orEmpty(),
             canCancel = canCancel,
