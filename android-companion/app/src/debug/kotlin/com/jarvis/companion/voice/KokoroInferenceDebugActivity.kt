@@ -31,7 +31,7 @@ class KokoroInferenceDebugActivity : Activity() {
                 for ((sid, name) in listOf(5 to "am_adam", 1 to "af_bella")) {
                     val start = SystemClock.elapsedRealtime()
                     val elapsed = engine.speak("Good evening. I'm Jarvis. Your assistant is ready. What would you like to do today?", sid)
-                    Log.i(tag, "event=debug_voice_complete name=$name sid=$sid model_load_ms=$loadMs synthesis_and_play_ms=$elapsed turn_ms=${SystemClock.elapsedRealtime()-start}")
+                    Log.i(tag, "event=debug_voice_complete name=$name sid=$sid model_load_ms=$loadMs first_pcm_ms=${elapsed.firstPcmMs} playback_start_ms=${elapsed.playbackStartMs} generation_ms=${elapsed.generationMs} audio_duration_ms=${elapsed.audioDurationMs} samples=${elapsed.samples} turn_ms=${SystemClock.elapsedRealtime()-start}")
                     val info = Debug.MemoryInfo(); Debug.getMemoryInfo(info)
                     Log.i(tag, "event=memory pss_kb=${info.totalPss} private_dirty_kb=${info.totalPrivateDirty}")
                 }

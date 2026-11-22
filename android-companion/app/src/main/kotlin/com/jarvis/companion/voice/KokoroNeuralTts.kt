@@ -32,27 +32,58 @@ class KokoroNeuralTts(private val dir: File, private val defaultSpeakerId: Int =
         Log.i("JarvisNeuralTts", "event=native_model_initialized path=${model.absolutePath} bytes=${model.length()} speakers=${tts?.numSpeakers()} load_ms=$elapsed")
         return elapsed
     }
-    fun speak(text: String, speakerId: Int = defaultSpeakerId, cancelled: () -> Boolean = { false }): Long {
-        val start = SystemClock.elapsedRealtime()
-        val audio = (tts ?: error("Kokoro model is not loaded")).generate(text, sid = speakerId)
-        check(audio.samples.isNotEmpty()) { "Kokoro generated no audio" }
-        Log.i("JarvisNeuralTts", "event=pcm_generated sid=$speakerId samples=${audio.samples.size} sample_rate=${audio.sampleRate} duration_ms=${audio.samples.size * 1000L / audio.sampleRate}")
-        if (cancelled()) return (System.nanoTime() - start) / 1_000_000
-        val track = AudioTrack.Builder().setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()).setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_FLOAT).setSampleRate(audio.sampleRate).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build()).setBufferSizeInBytes(audio.samples.size * 4).setTransferMode(AudioTrack.MODE_STATIC).build()
+    data class StreamingResult(val generationMs: Long, val firstPcmMs: Long, val playbackStartMs: Long, val audioDurationMs: Long, val samples: Int)
+
+    fun speak(text: String, speakerId: Int = defaultSpeakerId, cancelled: () -> Boolean = { false }, speechEndElapsedMs: Long? = null, onFirstPlayback: (Long) -> Unit = {}): StreamingResult {
+        val started = SystemClock.elapsedRealtime()
+        val engine = tts ?: error("Kokoro model is not loaded")
+        val rate = engine.sampleRate()
+        require(rate > 0) { "Kokoro returned invalid sample rate $rate" }
+        val minBuffer = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
+        check(minBuffer > 0) { "AudioTrack cannot support Kokoro PCM: minBuffer=$minBuffer rate=$rate" }
+        val track = AudioTrack.Builder()
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_FLOAT).setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+            .setBufferSizeInBytes(maxOf(minBuffer * 2, rate * 4 / 4))
+            .setTransferMode(AudioTrack.MODE_STREAM).build()
+        var sampleCount = 0
+        var firstPcmMs = -1L
+        var playbackStartMs = -1L
+        var generated = false
         try {
-            val written = track.write(audio.samples, 0, audio.samples.size, AudioTrack.WRITE_BLOCKING)
-            check(written > 0) { "AudioTrack PCM write failed: $written" }
-            var first = false
-            track.setPositionNotificationPeriod((audio.sampleRate / 20).coerceAtLeast(1))
-            track.setPlaybackPositionUpdateListener(object : AudioTrack.OnPlaybackPositionUpdateListener {
-                override fun onMarkerReached(track: AudioTrack) { Log.i("JarvisNeuralTts", "event=audio_marker_completed sid=$speakerId frames=${track.playbackHeadPosition}") }
-                override fun onPeriodicNotification(track: AudioTrack) { if (!first && track.playbackHeadPosition > 0) { first = true; Log.i("JarvisNeuralTts", "event=first_playback_frames sid=$speakerId frames=${track.playbackHeadPosition} elapsed_ms=${SystemClock.elapsedRealtime()}") } }
-            })
-            if (!cancelled()) { track.play(); Log.i("JarvisNeuralTts", "event=audio_track_play sid=$speakerId written=$written encoding=PCM_FLOAT sample_rate=${audio.sampleRate}") }
-            while (!cancelled() && track.playState == AudioTrack.PLAYSTATE_PLAYING && track.playbackHeadPosition < audio.samples.size) Thread.sleep(20)
+            val callback = KokoroPcmChunkCallback { chunk ->
+                if (cancelled()) 0 else {
+                    if (chunk.isNotEmpty()) {
+                        if (firstPcmMs < 0) {
+                            firstPcmMs = SystemClock.elapsedRealtime() - started
+                            Log.i("JarvisNeuralTts", "event=first_pcm sid=$speakerId synth_ms=$firstPcmMs end_to_first_pcm_ms=${speechEndElapsedMs?.let { SystemClock.elapsedRealtime()-it } ?: -1}")
+                        }
+                        val written = track.write(chunk, 0, chunk.size, AudioTrack.WRITE_BLOCKING)
+                        check(written > 0) { "AudioTrack chunk write failed: $written" }
+                        sampleCount += written
+                        if (playbackStartMs < 0) {
+                            track.play()
+                            playbackStartMs = SystemClock.elapsedRealtime() - started
+                            Log.i("JarvisNeuralTts", "event=stream_playback_started sid=$speakerId first_pcm_ms=$firstPcmMs playback_start_ms=$playbackStartMs rate=$rate")
+                            onFirstPlayback(playbackStartMs)
+                        }
+                    }
+                    1
+                }
+            }
+            val audio = engine.generateWithCallback(text, sid = speakerId, callback = callback)
+            generated = audio.samples.isNotEmpty()
+            check(generated && sampleCount > 0) { "Kokoro generated no PCM chunks" }
+            while (!cancelled() && track.playbackHeadPosition < sampleCount) Thread.sleep(10)
             check(cancelled() || track.playbackHeadPosition > 0) { "AudioTrack ended without playing frames" }
-        } finally { if (track.playState != AudioTrack.PLAYSTATE_STOPPED) track.stop(); track.release() }
-        return SystemClock.elapsedRealtime() - start
+            val generationMs = (firstPcmMs.takeIf { it >= 0 } ?: (SystemClock.elapsedRealtime() - started))
+            val duration = sampleCount * 1000L / rate
+            Log.i("JarvisNeuralTts", "event=stream_complete sid=$speakerId chunks_samples=$sampleCount generated_samples=${audio.samples.size} rate=$rate duration_ms=$duration generation_to_first_pcm_ms=$generationMs playback_head=${track.playbackHeadPosition} cancelled=${cancelled()}")
+            return StreamingResult(generationMs, firstPcmMs, playbackStartMs, duration, sampleCount)
+        } finally {
+            if (track.playState != AudioTrack.PLAYSTATE_STOPPED) track.stop()
+            track.release()
+        }
     }
     override fun close() { tts?.release(); tts = null }
 }

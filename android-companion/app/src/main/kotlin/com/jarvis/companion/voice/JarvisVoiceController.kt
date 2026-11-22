@@ -82,6 +82,7 @@ class JarvisVoiceController(
     private val bargeInGate = VoiceBargeInGate()
     private var captureMode: CaptureMode? = null
     private var activeUtteranceId: String? = null
+    @Volatile private var speechEndElapsedMs: Long? = null
     private var focusRequest: AudioFocusRequest? = null
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         if (VoiceFocusPolicy.shouldStop(change)) {
@@ -224,6 +225,7 @@ class JarvisVoiceController(
     fun speakNeural(text: String, sid: Int, voiceName: String) {
         checkMainThread()
         if (closed || text.isBlank()) return
+        android.util.Log.i("JarvisVoiceLatency", "event=tts_request engine=KOKORO_NEURAL elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
         neuralCancelled.set(false)
         neuralSpeaking = true
         try { textToSpeech?.stop() } catch (_: RuntimeException) { }
@@ -238,8 +240,9 @@ class JarvisVoiceController(
                     val privateModel = KokoroAssets.provision(appContext)
                     KokoroNeuralTts(privateModel).also { val loadMs = it.load(); neuralTts = it; android.util.Log.i("JarvisNeuralTts", "event=model_loaded model=kokoro-en-v0_19 load_ms=$loadMs speakers=${it.speakerCount()}") }
                 }
-                val synthMs = engine.speak(text, sid) { neuralCancelled.get() || closed }
-                android.util.Log.i("JarvisNeuralTts", "event=pcm_playback_finished voice=$voiceName sid=$sid synth_play_ms=$synthMs cancelled=${neuralCancelled.get()} elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
+                val stream = engine.speak(text, sid, { neuralCancelled.get() || closed }, speechEndElapsedMs)
+                val synthMs = stream.generationMs
+                android.util.Log.i("JarvisNeuralTts", "event=neural_stream_finished voice=$voiceName sid=$sid first_pcm_ms=${stream.firstPcmMs} playback_start_ms=${stream.playbackStartMs} duration_ms=${stream.audioDurationMs} synth_and_play_ms=$synthMs cancelled=${neuralCancelled.get()} elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
                 main.post { neuralSpeaking = false; if (!closed && !neuralCancelled.get()) { abandonFocus(); setState(VoiceControllerState.IDLE) } }
             } catch (failure: Throwable) {
                 android.util.Log.e("JarvisNeuralTts", "event=neural_failed voice=$voiceName sid=$sid elapsed_ms=${android.os.SystemClock.elapsedRealtime() - started} type=${failure.javaClass.simpleName} detail=${failure.message?.take(300)}")
@@ -304,7 +307,13 @@ class JarvisVoiceController(
         }
         override fun onRmsChanged(rmsdB: Float) { }
         override fun onBufferReceived(buffer: ByteArray?) { }
-        override fun onEndOfSpeech() { if (current()) setState(VoiceControllerState.PROCESSING, generation) }
+        override fun onEndOfSpeech() {
+            if (current()) {
+                speechEndElapsedMs = android.os.SystemClock.elapsedRealtime()
+                android.util.Log.i("JarvisVoiceLatency", "event=speech_end elapsed_ms=$speechEndElapsedMs")
+                setState(VoiceControllerState.PROCESSING, generation)
+            }
+        }
         override fun onEvent(eventType: Int, params: Bundle?) { }
 
         override fun onPartialResults(partialResults: Bundle?) {
@@ -325,6 +334,7 @@ class JarvisVoiceController(
             if (text.isNullOrEmpty()) {
                 fail(VoiceControllerError.NO_MATCH, completedGeneration)
             } else {
+                android.util.Log.i("JarvisVoiceLatency", "event=recognition_final elapsed_ms=${android.os.SystemClock.elapsedRealtime()} chars=${text.length}")
                 setState(VoiceControllerState.IDLE, completedGeneration)
                 postIfCurrent(completedGeneration) { listener.onFinalText(text) }
             }
