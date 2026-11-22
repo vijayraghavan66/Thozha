@@ -61,12 +61,19 @@ def gateway(tmp_path):
 
 def test_gateway_allows_only_companion_paths_and_methods(gateway):
     client, _, token, _, _, upstream = gateway
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}", "X-Jarvis-Trace-ID": "a1b2c3d4e5f6"}
 
     response = client.get("/v1/jarvis/tasks?state=active", headers=headers)
     assert response.status_code == 200
     assert response.json()["path"] == "/v1/jarvis/tasks"
     assert upstream[-1].headers["authorization"] == f"Bearer {token}"
+    assert upstream[-1].headers["x-jarvis-trace-id"] == "a1b2c3d4e5f6"
+
+    client.get(
+        "/v1/jarvis/tasks?state=active",
+        headers={"Authorization": f"Bearer {token}", "X-Jarvis-Trace-ID": "not-a-trace"},
+    )
+    assert "x-jarvis-trace-id" not in upstream[-1].headers
 
     status = client.get("/v1/jarvis/system/info", headers=headers)
     assert status.status_code == 200

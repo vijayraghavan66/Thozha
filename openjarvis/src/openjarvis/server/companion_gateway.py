@@ -120,6 +120,10 @@ async def _proxy(
     """Forward one prevalidated companion request to the fixed local server."""
     _device_id_for_request(request, request.app.state.supervisor_store)
     headers = {"Authorization": request.headers["authorization"], "Accept": "application/json"}
+    # Preserve only the content-free trace token used for end-to-end timing.
+    trace_id = request.headers.get("x-jarvis-trace-id", "")
+    if re.fullmatch(r"[0-9a-f]{12}", trace_id):
+        headers["X-Jarvis-Trace-ID"] = trace_id
     if body is not None:
         headers["Content-Type"] = "application/json"
     try:
