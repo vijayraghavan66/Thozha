@@ -68,6 +68,8 @@ dependencies {
     // Pinned to 0.16.1: official LiteRT-LM docs confirm this metadata is compatible with Kotlin 2.2.x.
     // We ship no model weights; users must explicitly import an eligible local model.
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
+    // Sherpa-ONNX native Android runtime for genuinely local neural TTS (Piper/Kokoro model assets are user-managed).
+    implementation(files("libs/sherpa-onnx-2.0.1.aar"))
     // Native Compose UI (Jarvis 3.0). BOM pins the Compose library versions together.
     implementation(platform("androidx.compose:compose-bom:2026.06.01"))
     implementation("androidx.compose.ui:ui")

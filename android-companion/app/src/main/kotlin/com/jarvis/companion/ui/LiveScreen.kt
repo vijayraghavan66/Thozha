@@ -303,6 +303,9 @@ private fun LiveVoiceControls(store: JarvisStore) {
     var weatherJob by remember { mutableStateOf<Job?>(null) }
     val weatherEpoch = remember { WeatherRequestEpoch() }
     val voiceState = remember { mutableStateOf(VoiceControllerState.IDLE) }
+    val savedVoice = remember(context) { context.getSharedPreferences("jarvis_voice", android.content.Context.MODE_PRIVATE).getInt("kokoro_sid", 5) }
+    val selectedSpeaker = remember { mutableStateOf(if (savedVoice in setOf(1, 5, 6, 9, 10)) savedVoice else 5) }
+    val selectedSpeakerName = when (selectedSpeaker.value) { 1 -> "af_bella"; 6 -> "am_michael"; 9 -> "bm_george"; 10 -> "bm_lewis"; else -> "am_adam" }
     val providerLabel = remember { mutableStateOf("Not used in this session") }
     val outputLabel = remember { mutableStateOf("Installed platform voice") }
     var voiceRef by remember { mutableStateOf<JarvisVoiceController?>(null) }
@@ -347,7 +350,7 @@ private fun LiveVoiceControls(store: JarvisStore) {
                         weatherBusy = false
                         weatherReply = result.getOrElse { "Weather unavailable: ${it.message ?: "check your connection and retry."}" }
                         store.notice = weatherReply
-                        if (result.isSuccess) voiceRef?.speak(weatherReply)
+                        if (result.isSuccess) voiceRef?.speakNeural(weatherReply, selectedSpeaker.value, selectedSpeakerName)
                     }
                 } else {
                     store.draft = text
@@ -367,7 +370,8 @@ private fun LiveVoiceControls(store: JarvisStore) {
                     VoiceControllerError.NETWORK_OR_SERVICE -> "The system speech service couldn't complete recognition."
                     VoiceControllerError.RECOGNIZER_BUSY -> "Speech recognition is busy. Try again shortly."
                     VoiceControllerError.LANGUAGE_UNAVAILABLE -> "Speech recognition doesn't support the current language."
-                    VoiceControllerError.SYNTHESIS_UNAVAILABLE, VoiceControllerError.SYNTHESIS_FAILED -> "The installed speech voice is unavailable."
+                    VoiceControllerError.SYNTHESIS_UNAVAILABLE -> "System speech voice unavailable."
+                    VoiceControllerError.SYNTHESIS_FAILED -> "Kokoro neural voice failed; system TTS fallback is being used."
                     VoiceControllerError.MICROPHONE_UNAVAILABLE -> "The microphone could not start. Check whether another app is using it."
                     VoiceControllerError.UNKNOWN -> "Voice turn failed. Use the typed composer."
                 }
@@ -411,7 +415,7 @@ private fun LiveVoiceControls(store: JarvisStore) {
             )
             BasicText("Recognition · ${providerLabel.value}", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
             BasicText("Speech output · ${outputLabel.value}", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted), maxLines = 2)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 VoiceControlButton(
                     label = when (state) {
                         VoiceControllerState.LISTENING, VoiceControllerState.PROCESSING -> "Cancel voice turn"
@@ -440,9 +444,19 @@ private fun LiveVoiceControls(store: JarvisStore) {
                         }
                     }
                 }
+                VoiceControlButton(label = if (selectedSpeaker.value == 1 || selectedSpeaker.value == 9 || selectedSpeaker.value == 10) "Voice: Female · $selectedSpeakerName" else "Voice: Male · $selectedSpeakerName", enabled = true) {
+                    val next = if (selectedSpeaker.value in setOf(1, 9, 10)) 5 else 1
+                    selectedSpeaker.value = next
+                    context.getSharedPreferences("jarvis_voice", android.content.Context.MODE_PRIVATE).edit().putInt("kokoro_sid", next).apply()
+                    store.notice = "Selected ${if (next == 5) "male am_adam" else "female af_bella"} neural voice."
+                }
+                VoiceControlButton(label = "Test neural ${if (selectedSpeaker.value in setOf(1, 9, 10)) "female" else "male"} voice", enabled = true) {
+                    voice.speakNeural("Good evening. I'm Jarvis. Your assistant is ready. What would you like to do today?", selectedSpeaker.value, selectedSpeakerName)
+                }
+                VoiceControlButton(label = "Test speaker", enabled = true) { voice.speak("Jarvis speaker test. If you hear this, audio output is working.") }
                 VoiceControlButton(label = "Speak latest reply", enabled = answer.isNotBlank()) {
                     if (state == VoiceControllerState.LISTENING || state == VoiceControllerState.PROCESSING) voice.cancel()
-                    voice.speak(answer)
+                    voice.speakNeural(answer, selectedSpeaker.value, selectedSpeakerName)
                 }
             }
         }
@@ -453,6 +467,7 @@ private fun LiveVoiceControls(store: JarvisStore) {
 private fun VoiceControlButton(label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
+            .fillMaxWidth()
             .clip(RoundedCornerShape(18.dp))
             .background(if (enabled) JarvisColor.SurfaceRaised else JarvisColor.Surface)
             .semantics { contentDescription = label; role = Role.Button }

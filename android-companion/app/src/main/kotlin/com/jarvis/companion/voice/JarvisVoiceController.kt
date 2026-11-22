@@ -18,6 +18,8 @@ import android.speech.tts.UtteranceProgressListener
 import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.UUID
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 private enum class CaptureMode { PUSH_TO_TALK, AUTOMATIC_ENDPOINTER, BARGE_IN }
 
@@ -67,6 +69,8 @@ class JarvisVoiceController(
     private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var recognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
+    private var neuralTts: KokoroNeuralTts? = null
+    private val neuralCancelled = AtomicBoolean(false)
     private var ttsInitialized = false
     private var ttsReady = false
     private var pendingSpeech: String? = null
@@ -192,6 +196,7 @@ class JarvisVoiceController(
         checkMainThread()
         if (closed) return
         cancelRecognition()
+        neuralCancelled.set(true)
         try { textToSpeech?.stop() } catch (_: RuntimeException) { }
         activeUtteranceId = null
         pendingSpeech = null
@@ -213,6 +218,34 @@ class JarvisVoiceController(
         speakNow(safeText)
     }
 
+    fun speakNeuralMale(text: String) = speakNeural(text, 5, "am_adam")
+
+    fun speakNeural(text: String, sid: Int, voiceName: String) {
+        checkMainThread()
+        if (closed || text.isBlank()) return
+        neuralCancelled.set(false)
+        try { textToSpeech?.stop() } catch (_: RuntimeException) { }
+        activeUtteranceId = null
+        if (!requestFocus()) { fail(VoiceControllerError.SYNTHESIS_FAILED); return }
+        android.util.Log.i("JarvisNeuralTts", "event=button_callback_enter voice=$voiceName sid=$sid")
+        setState(VoiceControllerState.SPEAKING)
+        Thread {
+            val started = android.os.SystemClock.elapsedRealtime()
+            try {
+                val engine = neuralTts ?: run {
+                    val privateModel = KokoroAssets.provision(appContext)
+                    KokoroNeuralTts(privateModel).also { val loadMs = it.load(); neuralTts = it; android.util.Log.i("JarvisNeuralTts", "event=model_loaded model=kokoro-en-v0_19 load_ms=$loadMs speakers=${it.speakerCount()}") }
+                }
+                val synthMs = engine.speak(text, sid) { neuralCancelled.get() || closed }
+                android.util.Log.i("JarvisNeuralTts", "event=pcm_playback_finished voice=$voiceName sid=$sid synth_play_ms=$synthMs cancelled=${neuralCancelled.get()} elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
+                main.post { if (!closed && !neuralCancelled.get()) { abandonFocus(); setState(VoiceControllerState.IDLE) } }
+            } catch (failure: Throwable) {
+                android.util.Log.e("JarvisNeuralTts", "event=neural_failed voice=$voiceName sid=$sid elapsed_ms=${android.os.SystemClock.elapsedRealtime() - started} type=${failure.javaClass.simpleName} detail=${failure.message?.take(300)}")
+                main.post { if (!closed && !neuralCancelled.get()) { listener.onError(VoiceControllerError.SYNTHESIS_FAILED); abandonFocus(); speak(text) } }
+            }
+        }.start()
+    }
+
     fun stopSpeaking() {
         checkMainThread()
         if (closed) return
@@ -229,6 +262,9 @@ class JarvisVoiceController(
         recognizer = null
         captureMode = null
         bargeInGate.disarm()
+        neuralCancelled.set(true)
+        try { neuralTts?.close() } catch (_: RuntimeException) { }
+        neuralTts = null
         try { textToSpeech?.stop(); textToSpeech?.shutdown() } catch (_: RuntimeException) { }
         textToSpeech = null
         activeUtteranceId = null
@@ -325,7 +361,7 @@ class JarvisVoiceController(
         post { if (!closed) listener.onOutputVoiceSelected(profile) }
         engine.setAudioAttributes(
             AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                .setUsage(AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build(),
         )
@@ -393,7 +429,7 @@ class JarvisVoiceController(
     private fun requestFocus(): Boolean {
         val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
             .setAudioAttributes(
-                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT)
+                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build(),
             )
             .setAcceptsDelayedFocusGain(false)
