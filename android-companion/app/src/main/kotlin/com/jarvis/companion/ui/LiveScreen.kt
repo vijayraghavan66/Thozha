@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,6 +53,13 @@ import com.jarvis.companion.voice.JarvisVoiceController
 import com.jarvis.companion.voice.VoiceControllerError
 import com.jarvis.companion.voice.VoiceControllerState
 import com.jarvis.companion.voice.VoiceRecognitionProvider
+import com.jarvis.companion.voice.LocalWeatherClient
+import com.jarvis.companion.voice.WeatherIntentRouter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Connection facts from the authenticated Link state, the latest sync, and the optional Telegram transport.
@@ -286,9 +294,14 @@ fun LiveScreen(
 @Composable
 private fun LiveVoiceControls(store: JarvisStore) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var weatherReply by remember { mutableStateOf("") }
+    var weatherBusy by remember { mutableStateOf(false) }
+    var weatherJob by remember { mutableStateOf<Job?>(null) }
     val voiceState = remember { mutableStateOf(VoiceControllerState.IDLE) }
     val providerLabel = remember { mutableStateOf("Not used in this session") }
     val outputLabel = remember { mutableStateOf("Installed platform voice") }
+    var voiceRef by remember { mutableStateOf<JarvisVoiceController?>(null) }
     val voice = remember(context, store) {
         JarvisVoiceController(context, object : JarvisVoiceController.Listener {
             override fun onStateChanged(state: VoiceControllerState) { voiceState.value = state }
@@ -303,9 +316,30 @@ private fun LiveVoiceControls(store: JarvisStore) {
                 outputLabel.value = "${profile.name} · ${profile.localeTag}" + if (profile.offline) " · offline" else " · system"
             }
             override fun onFinalText(text: String) {
-                store.draft = text
-                store.notice = "Voice captured. Review the transcript, then tap Send."
-                store.selectTab(Tab.HOME)
+                if (WeatherIntentRouter.isWeatherRequest(text)) {
+                    val city = Regex("(?i)\\b(?:in|for)\\s+([\\p{L} .'-]+?)(?:\\s+(?:today|now|currently|should)\\b|[?.!,]|$)")
+                        .find(text)?.groupValues?.get(1)?.trim()
+                    weatherJob?.cancel()
+                    if (city.isNullOrBlank()) {
+                        weatherReply = "Choose a city in your request (for example, ‘weather in Chennai’). I won’t guess your location."
+                        store.notice = weatherReply
+                        return
+                    }
+                    weatherBusy = true
+                    weatherReply = "Checking current weather for $city…"
+                    weatherJob = scope.launch {
+                        val result = runCatching { withContext(Dispatchers.IO) { LocalWeatherClient().current(city).response() } }
+                        if (!isActive) return@launch
+                        weatherBusy = false
+                        weatherReply = result.getOrElse { "Weather unavailable: ${it.message ?: "check your connection and retry."}" }
+                        store.notice = weatherReply
+                        if (result.isSuccess) voiceRef?.speak(weatherReply)
+                    }
+                } else {
+                    store.draft = text
+                    store.notice = "Voice captured. Review the transcript, then tap Send."
+                    store.selectTab(Tab.HOME)
+                }
             }
             override fun onBargeInDetected() {
                 store.notice = "I heard your interruption. Playback stopped; review the transcript before sending."
@@ -326,12 +360,14 @@ private fun LiveVoiceControls(store: JarvisStore) {
             }
         })
     }
+    voiceRef = voice
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(voice, lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_STOP) voice.cancel() }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+            weatherJob?.cancel()
             voice.close()
         }
     }
@@ -346,6 +382,8 @@ private fun LiveVoiceControls(store: JarvisStore) {
     }
     SurfaceCard {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (weatherReply.isNotBlank()) BasicText(weatherReply, style = JarvisType.Body.copy(color = JarvisColor.Text))
+            if (weatherBusy) BasicText("Using local weather routing · no Mac request", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
             BasicText(
                 when (state) {
                     VoiceControllerState.LISTENING -> "Listening; Android will finish after a pause."

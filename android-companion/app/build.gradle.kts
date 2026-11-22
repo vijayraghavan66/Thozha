@@ -300,3 +300,11 @@ tasks.register<JavaExec>("verifyTaskResultSummary") {
     ) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.data.TaskSummaryChecksKt")
 }
+
+tasks.register<JavaExec>("verifyLocalWeather") {
+    group = "verification"
+    description = "Runs Open-Meteo fixture, local-routing, malformed-data and cancellation checks."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.voice.LocalWeatherChecksKt")
+}
