@@ -64,7 +64,30 @@ fun ActivityScreen(store: JarvisStore, showHeader: Boolean = true) {
         pendingArtifact = null
         if (uri != null && artifact != null) store.saveTaskArtifact(artifact, uri)
     }
-    val sections = remember(store.entries, store.now) { TimelinePresentation.sections(store.entries) { clockTime(it) } }
+    val sections = remember(store.entries, store.taskRegistry, store.now) {
+        val entriesById = store.entries.associateBy { it["message_id"] as? String ?: "" }
+        val merged = store.entries.toMutableList()
+        store.taskRegistry.forEach { task ->
+            val requestId = task["request_id"] as? String ?: return@forEach
+            val existing = entriesById[requestId]
+            val row = LinkedHashMap<String, Any?>().apply {
+                if (existing != null) putAll(existing)
+                put("message_id", requestId)
+                if (existing == null) put("text", if (task["execution_target"] == "PHONE") "On-device task" else "Request")
+                put("state", task["status"] as? String ?: existing?.get("state") ?: "UNKNOWN")
+                put("summary", task["summary"] as? String ?: existing?.get("summary") ?: "")
+                put("created_at_unix_ms", task["created_at_unix_ms"] ?: existing?.get("created_at_unix_ms") ?: 0L)
+                put("updated_at_unix_ms", task["updated_at_unix_ms"] ?: existing?.get("updated_at_unix_ms") ?: 0L)
+                put("transport", if (task["execution_target"] == "PHONE") "local" else existing?.get("transport") ?: "link")
+                val supervisorId = task["supervisor_task_id"] as? String
+                if (!supervisorId.isNullOrBlank()) put("task_id", supervisorId)
+            }
+            merged.removeAll { (it["message_id"] as? String) == requestId }
+            @Suppress("UNCHECKED_CAST")
+            merged.add(row as Map<String, Any>)
+        }
+        TimelinePresentation.sections(merged) { clockTime(it) }
+    }
     Column(Modifier.fillMaxSize()) {
         if (showHeader) ScreenHeader("Activity", "Tasks as the Mac has reported them. Unconfirmed requests stay marked as such.")
         if (sections.isEmpty()) {

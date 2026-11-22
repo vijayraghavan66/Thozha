@@ -310,3 +310,11 @@ tasks.register<JavaExec>("verifyLocalWeather") {
     classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.voice.LocalWeatherChecksKt")
 }
+
+tasks.register<JavaExec>("verifyLocalTasks") {
+    group = "verification"
+    description = "Checks deterministic phone calculation and conversion task routing/execution."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.localtask.LocalTaskChecksKt")
+}

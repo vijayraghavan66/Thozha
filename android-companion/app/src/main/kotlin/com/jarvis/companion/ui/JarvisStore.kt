@@ -17,6 +17,7 @@ import com.jarvis.companion.link.AssistantNamePolicy
 import com.jarvis.companion.fastpath.FastCommand
 import com.jarvis.companion.fastpath.FastCommandClassifier
 import com.jarvis.companion.fastpath.DevelopmentIntentClassifier
+import com.jarvis.companion.localtask.LocalTaskExecutor
 import com.jarvis.companion.localai.LocalAiManager
 import com.jarvis.companion.localai.LocalAiPhase
 import com.jarvis.companion.localai.LocalAiRequestMode
@@ -503,6 +504,39 @@ class JarvisStore(private val app: Context) {
         }
     }
 
+    private fun submitPhoneTask(requestId: String, text: String, intent: com.jarvis.companion.localtask.LocalTaskIntent) {
+        val conversation = session
+        sessions.assign(requestId, conversation.id)
+        sessions.setTitleIfBlank(conversation.id, text)
+        sessionList = sessions.all()
+        submitting = true
+        draft = ""
+        notice = "Running locally on this phone."
+        background(lanes.local) {
+            val runtime = LinkService.runtime(app)
+            try {
+                localHistory.recordRequest(requestId, text, System.currentTimeMillis())
+                runtime.recordLocalTaskRequest(requestId, text, transport = "api", executionTarget = "PHONE")
+                runtime.recordTaskLifecycle(requestId, "", "RUNNING", "Executing deterministic phone capability", "PHONE", "$requestId:phone-running")
+                ui { entries = mergeEntries(entries, localHistory.all()); refreshTaskRegistry(runtime) }
+                val result = LocalTaskExecutor.execute(intent)
+                localHistory.recordResult(requestId, "COMPLETED", result.response, result.response, System.currentTimeMillis())
+                runtime.recordTaskLifecycle(requestId, "", "COMPLETED", result.response, "PHONE", "$requestId:phone-completed")
+                ui { entries = mergeEntries(entries, localHistory.all()); refreshTaskRegistry(runtime); notice = "Completed locally on this phone."; submitting = false }
+            } catch (failure: Throwable) {
+                val message = failure.message ?: "Local operation failed."
+                runCatching { localHistory.recordResult(requestId, "FAILED", "", message, System.currentTimeMillis()) }
+                runCatching { runtime.recordTaskLifecycle(requestId, "", "FAILED", message, "PHONE", "$requestId:phone-failed") }
+                ui { entries = mergeEntries(entries, localHistory.all()); refreshTaskRegistry(runtime); notice = message; submitting = false }
+            }
+        }
+    }
+
+    private fun refreshTaskRegistry(runtime: com.jarvis.link.LinkRuntime) {
+        taskRegistry = runtime.taskRegistry()
+        taskEventHistory = runtime.taskEventHistory()
+    }
+
     /** Sends the composer text through the same signed Link path that Telegram carries when connected. */
     fun submit() = ui {
         val text = draft.trim()
@@ -512,6 +546,11 @@ class JarvisStore(private val app: Context) {
             return@ui
         }
         val requestId = UUID.randomUUID().toString().replace("-", "")
+        val localIntent = LocalTaskExecutor.classify(text)
+        if (localIntent != null) {
+            submitPhoneTask(requestId, text, localIntent)
+            return@ui
+        }
         val fastCommand = FastCommandClassifier.classify(text)
         val selectedAiMode = aiRequestMode
         val route = RequestRoutingPolicy.route(
