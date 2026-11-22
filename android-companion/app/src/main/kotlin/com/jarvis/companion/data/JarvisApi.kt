@@ -593,10 +593,12 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             ?: throw ApiException("This phone is not paired with the Mac.", 401)
         val base = requireBaseUrl()
         val wifiPin = runCatching { secureStore.localGatewayPin() }.getOrNull()
-        val wifiEndpoint = wifiPin?.let { pin ->
-            if (loopbackEndpointReachable(base)) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
+        val loopbackReady = wifiPin != null && loopbackEndpointReachable(base)
+        val wifiCandidate = wifiPin?.let { pin ->
+            if (loopbackReady) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
             else LocalGatewayDiscovery.discoverOrWait(context, pin)
         }
+        val wifiEndpoint = selectLocalGatewayEndpoint(loopbackReady, wifiCandidate)
         val effectiveBase = wifiEndpoint?.httpsBaseUrl() ?: base
         val connection = (URL(effectiveBase + artifact.downloadPath).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -759,10 +761,11 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         } else null
         val discoveryStartedNs = System.nanoTime()
         val loopbackReady = wifiPin != null && loopbackEndpointReachable(base)
-        val wifiEndpoint = wifiPin?.let { pin ->
+        val wifiCandidate = wifiPin?.let { pin ->
             if (loopbackReady) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
             else LocalGatewayDiscovery.discoverOrWait(context, pin)
         }
+        val wifiEndpoint = selectLocalGatewayEndpoint(loopbackReady, wifiCandidate)
         if (traceId != null) {
             PerformanceTrace.mark(
                 traceId,
@@ -772,6 +775,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             )
         }
         val effectiveBase = wifiEndpoint?.httpsBaseUrl() ?: base
+        var wifiPhase = "url"
         val connection = (URL(effectiveBase + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
             instanceFollowRedirects = false
@@ -791,10 +795,16 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         if (wifiPin != null && wifiEndpoint != null) {
             val tls = connection as? javax.net.ssl.HttpsURLConnection
                 ?: throw ApiException("The discovered Mac gateway did not use HTTPS.")
+            wifiPhase = "tls_configure"
             LocalGatewayTls.configure(tls, wifiPin)
+            wifiPhase = "tls_configured"
         }
         try {
-            if (body != null) connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            if (body != null) {
+                wifiPhase = "write_body"
+                connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            }
+            wifiPhase = "response"
             val status = connection.responseCode
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
@@ -841,7 +851,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
                 val causes = generateSequence(e as Throwable?) { it.cause }
                     .take(5)
                     .joinToString(">") { it.javaClass.simpleName.take(40) }
-                Log.w("JarvisWifi", "request_failed route=signed_private_ip causes=$causes")
+                Log.w("JarvisWifi", "request_failed route=signed_private_ip phase=$wifiPhase causes=$causes")
             }
             throw ApiException(e.message ?: "Could not reach Jarvis on the private network")
         } finally {

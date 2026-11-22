@@ -47,6 +47,11 @@ internal fun endpointFromSignedAddress(pin: LocalGatewayPin): LocalGatewayEndpoi
         ?.let { LocalGatewayEndpoint(pin.hostname, pin.port, it) }
 }
 
+internal fun selectLocalGatewayEndpoint(
+    loopbackReachable: Boolean,
+    cachedOrDiscovered: LocalGatewayEndpoint?,
+): LocalGatewayEndpoint? = if (loopbackReachable) null else cachedOrDiscovered
+
 /** Discovers only the previously paired Mac's pinned DNS-SD identity. */
 object LocalGatewayDiscovery {
     const val SERVICE_TYPE = "_jarvis-companion._tcp."

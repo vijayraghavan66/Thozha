@@ -11,6 +11,8 @@ object LocalGatewayRoutingChecks {
 
         val endpoint = LocalGatewayEndpoint("thozha-mac.local", 8443, InetAddress.getByName("192.168.1.8"))
         check(endpoint.httpsBaseUrl() == "https://192.168.1.8:8443", "Wi-Fi must connect to the DNS-SD resolved private IP")
+        check(selectLocalGatewayEndpoint(loopbackReachable = true, cachedOrDiscovered = endpoint) == null, "Reachable USB loopback must keep priority over cached Wi-Fi")
+        check(selectLocalGatewayEndpoint(loopbackReachable = false, cachedOrDiscovered = endpoint) == endpoint, "Pinned Wi-Fi endpoint should be used when USB is unavailable")
         val signedFallback = endpointFromSignedAddress(
             LocalGatewayPin("thozha-mac.local", 8443, "sha256:" + "a".repeat(64), "192.168.1.8"),
         )
