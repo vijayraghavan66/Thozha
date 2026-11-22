@@ -1,0 +1,26 @@
+{
+  "challenge": "synthetic-v2-challenge",
+  "expires_at": "2030-01-02T03:04:05+00:00",
+  "gateway_address": "192.168.1.55",
+  "gateway_certificate_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "gateway_port": "8443",
+  "invitation_id": "test-wifi-invitation",
+  "protocol": "openjarvis-pairing-v2",
+  "qr_payload": {
+    "challenge": "synthetic-v2-challenge",
+    "expires_at": "2030-01-02T03:04:05+00:00",
+    "gateway_address": "192.168.1.55",
+    "gateway_certificate_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "gateway_port": "8443",
+    "invitation_id": "test-wifi-invitation",
+    "protocol": "openjarvis-pairing-v2",
+    "server_fingerprint": "sha256:2d57462405bf47d875c260c7f8ea3c7e3a36c0e397b3e6dcec8c562e5ee6fda6",
+    "server_public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEm2hn4QYp+lAvg+R0sCLfz0G7uAmsU2t49sfD6VSyVmVSOSJaMRemuwSvU9+uOpXptLEEdzC+AgPxiTQhP0bw8w==",
+    "server_signature": "MEYCIQDP3qdlzb+ALZ55AGBLvUOr2/iFD07buB1KIHxtFjibrgIhAPdkgPVwnT0WA/LGrhtN8ovgaA7JsVOCmk7V801VpjYf",
+    "server_url": "https://thozha-mac.local:8443"
+  },
+  "server_fingerprint": "sha256:2d57462405bf47d875c260c7f8ea3c7e3a36c0e397b3e6dcec8c562e5ee6fda6",
+  "server_public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEm2hn4QYp+lAvg+R0sCLfz0G7uAmsU2t49sfD6VSyVmVSOSJaMRemuwSvU9+uOpXptLEEdzC+AgPxiTQhP0bw8w==",
+  "server_signature": "MEYCIQDP3qdlzb+ALZ55AGBLvUOr2/iFD07buB1KIHxtFjibrgIhAPdkgPVwnT0WA/LGrhtN8ovgaA7JsVOCmk7V801VpjYf",
+  "server_url": "https://thozha-mac.local:8443"
+}

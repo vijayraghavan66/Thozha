@@ -1,27 +1,39 @@
 # Mac pairing UI contract
 
-## Existing endpoint used by Connect Phone
+## Local authorization
 
-The screen calls `POST http://127.0.0.1:8000/pair/invitations` only after the user selects **Create signed QR invitation**. Before that mutation, it performs a read-only `GET http://127.0.0.1:8000/health`; it never calls the invitation endpoint from app launch or test code.
+The Connect Phone screen first performs a read-only `GET http://127.0.0.1:8000/health`. Only after the user selects **Create signed Wi-Fi QR** or **Create signed USB QR** does it call `POST http://127.0.0.1:8000/v1/jarvis/pair/invitations`.
 
-The backend handler in `src/openjarvis/server/supervisor_routes.py` uses `_authorize_local_pair_ui(state_changing=True)`. Its existing boundary requires a loopback peer, loopback `Host`, and an allowlisted local UI `Origin`. The Swift client sends `Origin: http://tauri.localhost`, which the backend explicitly accepts. This route does not require `OPENJARVIS_API_KEY`; the client does not read the LaunchAgent environment, config file, `supervisor_api_key`, Keychain, or any pairing identity. The `Authorization` header is intentionally absent. The app does not access or export the backend signing private key.
+The current backend handler uses its loopback-peer, loopback-Host and allowlisted-local-Origin checks. The client sends `Origin: http://tauri.localhost`; the route does not require an API-key bearer. The app never reads the LaunchAgent environment, OpenJarvis config, `supervisor_api_key`, Keychain, or any pairing identity. No credential is included in requests. The invitation signing private key remains in OpenJarvis.
 
-The returned payload is checked locally before QR display:
+Request bodies are explicit and distinct:
 
-- exact v1 field set and matching outer/nested payload;
-- `openjarvis-pairing-v1` protocol;
-- loopback-only server URL;
-- SHA-256 fingerprint over the DER public key;
-- P-256 ECDSA signature over Python-compatible canonical UTF-8 JSON;
-- current expiry, capped at ten minutes;
-- 8 KiB QR size bound.
+- Wi-Fi (default): exact UTF-8 JSON `{"transport":"wifi"}` with `Content-Type: application/json`.
+- USB / ADB fallback: POST with no body and no content type, preserving the legacy v1 invitation.
 
-The QR includes a short-lived challenge. The UI never logs or persists it and warns users not to share the QR. Closing the view hides the QR; there is no local revoke endpoint in this flow. Refreshing before expiry asks the user to confirm because the old invitation remains valid until its original expiry. A failed response is not retried automatically because the server may have created an invite before the response was lost.
+Both use the same loopback endpoint. HTTP 409 for Wi-Fi is shown as “secure Wi-Fi pairing is disabled or not ready”; the UI displays no QR and offers a user-selected USB fallback. Other HTTP errors are not converted into success or retried automatically.
 
-Tests use the shared fixed Python/Android signature vector and a fake transport. They do not contact the live Mac API or create pairing rows.
+## Signed response validation
 
-## Wi-Fi pairing blocker
+Before QR rendering, the Mac client requires the response wrapper and nested `qr_payload` to have exactly matching fields. It checks the exact v1 or v2 field set, verifies the server-key SHA-256 fingerprint, verifies the P-256 ECDSA/SHA-256 signature over Python-compatible canonical UTF-8 JSON, rejects expired or overlong lifetimes, and enforces an 8 KiB QR size limit. The invitation challenge is never logged or persisted.
 
-The current invitation route constructs `server_url` from the loopback request, so the v1 QR advertises `127.0.0.1`/`localhost`. This is usable only when the phone has a corresponding local forward (for example, the existing ADB reverse route); the UI explicitly says it is not a Wi-Fi invitation. No phone or network pairing was run by these tests.
+V1 USB invitations retain `openjarvis-pairing-v1` and the loopback server URL. The screen explains that they require a working USB/ADB reverse route.
 
-The existing `/local-gateway/address` endpoint returns a signed private address and TLS certificate pin, but it requires an already-enrolled device bearer, so it cannot bootstrap an unpaired phone. A Wi-Fi first-pair flow needs the separately reviewed v2 extension: signed `.local` HTTPS gateway URL/address, port and certificate SHA-256 in the invitation, with the correct local authorization rule. The Connect Phone code must not construct or infer these fields. Until the backend exposes that endpoint, this screen will not claim Wi-Fi is ready.
+V2 Wi-Fi invitations require:
+
+- `protocol`: `openjarvis-pairing-v2`;
+- `server_url`: exactly `https://<single-label>.local:8443`;
+- `gateway_address`: RFC1918 private IPv4;
+- `gateway_port`: string `8443`;
+- `gateway_certificate_sha256`: `sha256:` plus 64 lowercase hexadecimal characters;
+- a valid signature and matching server-key fingerprint covering all fields.
+
+The UI displays the signed private IPv4 address, `.local` TLS host, certificate pin and server-key fingerprint. The Android device must connect to that signed IP while validating TLS/SNI against the `.local` hostname and the certificate pin. A malformed or unsigned Wi-Fi payload never produces a QR.
+
+Refresh asks before creating another invitation while the current one is valid, because the older invitation remains valid until expiry. Closing only hides the QR; it does not revoke the invitation. Failed calls are not retried automatically because the Mac may have created an invite before a response was lost.
+
+## Verification boundary
+
+Swift tests use fixed v1 and v2 signed fixtures, plus fake transports; they do not call the production invitation endpoint, enable the gateway, enroll a device, or mutate pairing state. The test-only v2 signer was ephemeral and its private key was not retained.
+
+The real gateway remains disabled until separately authorized/configured and verified. No live phone pairing or Wi-Fi request has been performed by this UI workstream.

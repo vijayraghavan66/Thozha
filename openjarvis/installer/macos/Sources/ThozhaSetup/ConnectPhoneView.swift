@@ -4,8 +4,10 @@ import ThozhaInstallerCore
 struct ConnectPhoneView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var invitation: PairingInvitation?
+    @State private var selectedTransport: PairingTransport = .wifi
     @State private var isLoading = false
     @State private var errorMessage: String?
+    @State private var gatewayDisabled = false
     @State private var showRefreshConfirmation = false
     private let service = PairingInvitationService()
 
@@ -29,11 +31,21 @@ struct ConnectPhoneView: View {
                 }.font(.callout).padding(.vertical, 4)
             }
 
-            GroupBox("Current transport limitation") {
-                Label("This endpoint creates a loopback invitation. It works through the existing USB/ADB reverse route, but a phone on Wi-Fi cannot reach 127.0.0.1 on the Mac.", systemImage: "wifi.slash")
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.vertical, 4)
-                Text("Secure Wi-Fi pairing needs a Mac-signed private gateway address and certificate pin in the invitation. This screen will not claim Wi-Fi is ready.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if invitation == nil {
+                GroupBox("Choose a connection") {
+                    Picker("Transport", selection: $selectedTransport) {
+                        ForEach(PairingTransport.allCases) { transport in
+                            Text(transport.title).tag(transport)
+                        }
+                    }.pickerStyle(.segmented)
+                    if selectedTransport == .wifi {
+                        Text("Wi-Fi mode requests an explicitly signed HTTPS gateway invitation. If the gateway is disabled or unhealthy, no QR is shown; you can switch to USB / ADB.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.top, 6)
+                    } else {
+                        Text("USB mode creates the legacy loopback invitation. The phone needs the existing USB/ADB reverse route to reach this Mac.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.top, 6)
+                    }
+                }
             }
 
             if let invitation {
@@ -51,11 +63,17 @@ struct ConnectPhoneView: View {
             if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange).font(.callout).fixedSize(horizontal: false, vertical: true)
+                if gatewayDisabled {
+                    Button("Use USB / ADB fallback") {
+                        selectedTransport = .usb
+                        createInvitation()
+                    }.buttonStyle(.bordered)
+                }
             }
 
             HStack {
                 if invitation == nil {
-                    Button("Create signed QR invitation") { createInvitation() }
+                    Button(selectedTransport == .wifi ? "Create signed Wi-Fi QR" : "Create signed USB QR") { createInvitation() }
                         .buttonStyle(.borderedProminent).disabled(isLoading)
                 } else {
                     Button("Refresh QR") {
@@ -105,6 +123,20 @@ struct ConnectPhoneView: View {
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }.padding(.vertical, 5)
+            if invitation.supportsWiFi {
+                VStack(alignment: .leading, spacing: 6) {
+                    LabeledContent("Signed gateway address", value: "\(invitation.gatewayAddress ?? ""):\(invitation.gatewayPort ?? 8443)")
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("TLS certificate pin").font(.caption).foregroundStyle(.secondary)
+                        Text(invitation.gatewayCertificateSHA256 ?? "").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                    }
+                    Text("The phone connects to the signed private IPv4 address and validates HTTPS using this certificate pin.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }.padding(.top, 6)
+            } else {
+                Label("This v1 QR uses loopback and needs USB / ADB reverse; it is not a Wi-Fi invitation.", systemImage: "wifi.slash")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.top, 6)
+            }
             Text("Do not share this QR image or screenshot. It contains a one-time pairing challenge. Close only hides it; the invitation remains valid until expiry.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
@@ -119,9 +151,10 @@ struct ConnectPhoneView: View {
         guard !isLoading else { return }
         isLoading = true
         errorMessage = nil
+        gatewayDisabled = false
         Task {
             do {
-                let created = try await service.createInvitation()
+                let created = try await service.createInvitation(transport: selectedTransport)
                 await MainActor.run {
                     invitation = created
                     isLoading = false
@@ -132,6 +165,7 @@ struct ConnectPhoneView: View {
                     if error as? PairingInvitationError == .unavailable {
                         errorMessage! += " If the request timed out, wait for the five-minute invitation window to pass before trying again; the Mac may have created it before the connection failed."
                     }
+                    gatewayDisabled = error as? PairingInvitationError == .gatewayDisabled
                     isLoading = false
                 }
             } catch {
