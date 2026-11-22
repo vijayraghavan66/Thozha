@@ -9,6 +9,7 @@ struct ConnectPhoneView: View {
     @State private var errorMessage: String?
     @State private var gatewayDisabled = false
     @State private var showRefreshConfirmation = false
+    @State private var showPendingDevices = false
     private let service = PairingInvitationService()
 
     var body: some View {
@@ -20,6 +21,7 @@ struct ConnectPhoneView: View {
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("Pending devices") { showPendingDevices = true }
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
             }
 
@@ -93,6 +95,9 @@ struct ConnectPhoneView: View {
         }
         .padding(24)
         .frame(width: 560, height: 690)
+        .sheet(isPresented: $showPendingDevices) {
+            PendingDeviceConfirmationView()
+        }
     }
 
     @ViewBuilder private func invitationCard(_ invitation: PairingInvitation, now: Date) -> some View {

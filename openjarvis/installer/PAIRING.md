@@ -32,6 +32,14 @@ The UI displays the signed private IPv4 address, `.local` TLS host, certificate 
 
 Refresh asks before creating another invitation while the current one is valid, because the older invitation remains valid until expiry. Closing only hides the QR; it does not revoke the invitation. Failed calls are not retried automatically because the Mac may have created an invite before a response was lost.
 
+## Local pending-device confirmation
+
+The **Pending devices** screen performs a read-only GET to `/v1/jarvis/pair/pending` every five seconds while open. It displays only the backend's safe review fields: device name, device public-key fingerprint, request time and expiry. It does not display phone public keys, pairing challenges or credentials.
+
+Only a direct owner tap on **Confirm** or **Reject** begins a decision. After that tap, the UI re-reads the pending row and checks that the ID, name, fingerprint and expiry still match before POSTing exactly `{"decision":"approve"}` or `{"decision":"reject"}` to `/v1/jarvis/pair/{id}/decision`. The backend's loopback Host and local UI Origin guard is used; no bearer key is read or sent. Expired, changed, missing and already-decided rows are reported without treating a UI state as a successful decision. The list refreshes after the result. Confirming the phone only allows it to complete the one-time token claim; it does not grant development allowlist membership or approve any task.
+
+Tests use a fake transport and verify there is no decision POST from listing/polling, exact request method/path/body/Origin, expiry/replay errors, and safe device fields. No production endpoint or device decision was exercised.
+
 ## Verification boundary
 
 Swift tests use fixed v1 and v2 signed fixtures, plus fake transports; they do not call the production invitation endpoint, enable the gateway, enroll a device, or mutate pairing state. The test-only v2 signer was ephemeral and its private key was not retained.
