@@ -318,3 +318,11 @@ tasks.register<JavaExec>("verifyLocalTasks") {
     classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.localtask.LocalTaskChecksKt")
 }
+
+tasks.register<JavaExec>("verifyTaskNotifications") {
+    group = "verification"
+    description = "Checks task milestone notification eligibility and stable event deduplication keys."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.link.TaskNotificationChecksKt")
+}

@@ -98,17 +98,24 @@ object LinkAlerts {
         ensureChannels(context)
         val prefs = context.getSharedPreferences("jarvis_task_notification_events", Context.MODE_PRIVATE)
         val seen = prefs.getStringSet("seen", emptySet())?.toMutableSet() ?: mutableSetOf()
+        if (!prefs.getBoolean("baseline_initialized", false)) {
+            updates.mapNotNullTo(seen) { TaskNotificationPolicy.eventKey(it) }
+            prefs.edit().putStringSet("seen", seen).putBoolean("baseline_initialized", true).apply()
+            return
+        }
         var changed = false
         updates.forEach { event ->
             val taskId = event["task_id"] as? String ?: return@forEach
-            val state = (event["state"] as? String)?.uppercase() ?: return@forEach
-            if (state !in setOf("RUNNING", "WAITING_APPROVAL", "FAILED", "COMPLETED", "CANCELLED")) return@forEach
-            // Do not duplicate approval notifications; those include the exact approval review flow.
-            if (state == "WAITING_APPROVAL") return@forEach
-            val seq = event["event_seq"]?.toString() ?: event["received_at_unix_ms"]?.toString() ?: event["timestamp_unix_ms"]?.toString() ?: event["event_id"]?.toString() ?: return@forEach
-            val fingerprint = "$taskId:$state:$seq"
+            val state = ((event["state"] ?: event["status"]) as? String)?.uppercase() ?: return@forEach
+            val fingerprint = TaskNotificationPolicy.eventKey(event) ?: return@forEach
             if (!seen.add(fingerprint)) return@forEach
             changed = true
+            if (state == "RUNNING") {
+                val now = System.currentTimeMillis()
+                val last = prefs.getLong("progress:$taskId", 0L)
+                if (last > 0L && now - last < 120_000L) return@forEach
+                prefs.edit().putLong("progress:$taskId", now).apply()
+            }
             if (seen.size > 500) { seen.clear(); seen.add(fingerprint) }
             val title = when (state) {
                 "RUNNING" -> "Task in progress"
