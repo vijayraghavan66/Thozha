@@ -11,6 +11,7 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 from fastapi import FastAPI  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
+from openjarvis.core.types import Message, Role  # noqa: E402
 
 from openjarvis.server.api_routes import include_all_routes  # noqa: E402
 
@@ -203,6 +204,38 @@ class TestWebSocketStreaming:
             # The mock stream function was called — we can't easily inspect
             # async-generator call args, but the exchange completed without error
             assert data["content"] == "OK"
+
+    def test_engine_receives_typed_core_messages_and_transient_turn_is_not_traced(self):
+        trace_store = MagicMock()
+        agent = MagicMock()
+        agent._tools = [object()]
+        engine = MagicMock()
+        engine.engine_id = "typed-message-engine"
+
+        async def typed_stream(messages, *, model="test-model", **kwargs):
+            assert len(messages) == 1
+            assert isinstance(messages[0], Message)
+            assert messages[0].role == Role.USER
+            assert messages[0].content == "Hello Thozha"
+            yield "Hello there."
+
+        engine.stream = typed_stream
+        app = _make_app(engine=engine)
+        app.state.agent = agent
+        app.state.trace_store = trace_store
+        client = TestClient(app)
+        with client.websocket_connect("/v1/chat/stream") as ws:
+            ws.send_text(json.dumps({"message": "Hello Thozha", "transient": True, "model": "gpt-6-luna"}))
+            events = []
+            while True:
+                item = ws.receive_json()
+                events.append(item)
+                if item["type"] == "done":
+                    break
+        assert [item["content"] for item in events if item["type"] == "chunk"] == ["Hello there."]
+        assert events[-1]["content"] == "Hello there."
+        trace_store.save.assert_not_called()
+        agent.run.assert_not_called()
 
     def test_engine_error_returns_error_message(self):
         """If the engine raises, the endpoint should send an error frame."""

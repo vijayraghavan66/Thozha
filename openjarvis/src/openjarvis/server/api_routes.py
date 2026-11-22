@@ -816,7 +816,12 @@ async def websocket_chat_stream(websocket: WebSocket):
                 )
                 continue
 
-            messages = [{"role": "user", "content": message}]
+            # Core Engine adapters consume typed core Message objects. Passing
+            # JSON dictionaries worked with permissive mocks but failed for
+            # the configured Codex SDK adapter before it could stream a turn.
+            from openjarvis.core.types import Message, Role
+
+            messages = [Message(role=Role.USER, content=str(message))]
 
             # This WS path streams straight from the engine (no agent /
             # TraceCollector), so record the interaction directly once it
@@ -824,6 +829,7 @@ async def websocket_chat_stream(websocket: WebSocket):
             import time as _time
 
             trace_store = getattr(websocket.app.state, "trace_store", None)
+            transient = bool(data.get("transient", False))
             _ws_started_at = _time.time()
 
             try:
@@ -872,14 +878,15 @@ async def websocket_chat_stream(websocket: WebSocket):
                     await websocket.send_json(
                         {"type": "done", "content": full_content},
                     )
-                    _record_ws_trace(
-                        trace_store,
-                        query=message,
-                        result=full_content,
-                        model=model,
-                        started_at=_ws_started_at,
-                        ended_at=_time.time(),
-                    )
+                    if not transient:
+                        _record_ws_trace(
+                            trace_store,
+                            query=message,
+                            result=full_content,
+                            model=model,
+                            started_at=_ws_started_at,
+                            ended_at=_time.time(),
+                        )
                 else:
                     # No stream method — single-shot generate. Blocking upstream
                     # call, so run in a worker thread to keep the event loop free.
@@ -900,14 +907,15 @@ async def websocket_chat_stream(websocket: WebSocket):
                     await websocket.send_json(
                         {"type": "done", "content": content},
                     )
-                    _record_ws_trace(
-                        trace_store,
-                        query=message,
-                        result=content,
-                        model=model,
-                        started_at=_ws_started_at,
-                        ended_at=_time.time(),
-                    )
+                    if not transient:
+                        _record_ws_trace(
+                            trace_store,
+                            query=message,
+                            result=content,
+                            model=model,
+                            started_at=_ws_started_at,
+                            ended_at=_time.time(),
+                        )
             except WebSocketDisconnect:
                 raise
             except Exception as exc:
