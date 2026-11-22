@@ -12,6 +12,7 @@ struct SetupView: View {
     @State private var identityMessage = "No new installation identity created"
     @State private var isChecking = false
     @State private var showingPhonePairing = false
+    @State private var showingGatewaySetup = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -58,6 +59,17 @@ struct SetupView: View {
                     Button("Connect Phone") { showingPhonePairing = true }
                 }.padding(.vertical, 4)
             }
+            GroupBox("Private Wi-Fi gateway") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Prepare local-network startup").font(.subheadline.weight(.medium))
+                        Text("Detect Wi-Fi, verify the exact SSID and review a per-user LaunchAgent plan.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Review gateway setup") { showingGatewaySetup = true }
+                }.padding(.vertical, 4)
+            }
             HStack {
                 Button(isChecking ? "Checking…" : "Run read-only health check") { Task { await healthCheck() } }.disabled(isChecking)
                 Spacer()
@@ -66,6 +78,7 @@ struct SetupView: View {
         }
         .padding(24).frame(width: 570)
         .sheet(isPresented: $showingPhonePairing) { ConnectPhoneView().frame(minWidth: 530, minHeight: 650) }
+        .sheet(isPresented: $showingGatewaySetup) { GatewaySetupView().frame(minWidth: 620, minHeight: 760) }
     }
 
     private func createIdentity() {

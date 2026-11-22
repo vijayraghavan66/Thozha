@@ -31,11 +31,14 @@ fi
 
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/thozha-installer.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/root/Applications/$APP_NAME/Contents/MacOS"
+mkdir -p "$STAGE/root/Applications/$APP_NAME/Contents/MacOS" "$STAGE/root/Applications/$APP_NAME/Contents/Helpers"
 swift build -c release --package-path "$ROOT"
 BIN="$ROOT/.build/release/ThozhaSetup"
+GATEWAY_SUPERVISOR_BIN="$ROOT/.build/release/ThozhaGatewaySupervisor"
 [[ -x "$BIN" ]] || { echo "Build did not produce the setup app executable." >&2; exit 3; }
+[[ -x "$GATEWAY_SUPERVISOR_BIN" ]] || { echo "Build did not produce the gateway shutdown supervisor." >&2; exit 3; }
 ditto --norsrc --noextattr --noqtn --noacl "$BIN" "$STAGE/root/Applications/$APP_NAME/Contents/MacOS/ThozhaSetup"
+ditto --norsrc --noextattr --noqtn --noacl "$GATEWAY_SUPERVISOR_BIN" "$STAGE/root/Applications/$APP_NAME/Contents/Helpers/ThozhaGatewaySupervisor"
 cat > "$STAGE/root/Applications/$APP_NAME/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,6 +54,7 @@ cat > "$STAGE/root/Applications/$APP_NAME/Contents/Info.plist" <<'PLIST'
 <key>NSAppTransportSecurity</key><dict>
 <key>NSAllowsLocalNetworking</key><true/>
 </dict>
+<key>NSLocationUsageDescription</key><string>Thozha reads the current Wi-Fi network name only to verify the exact private network allowed for the local phone gateway. It does not use GPS location or upload the network name.</string>
 </dict></plist>
 PLIST
 printf 'APPL????' > "$STAGE/root/Applications/$APP_NAME/Contents/PkgInfo"
