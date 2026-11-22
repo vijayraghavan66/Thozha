@@ -2,6 +2,7 @@ package com.jarvis.companion.voice
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -73,6 +74,9 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
     private val outputSequence = VoiceOutputSequence()
     private val outputTurnGate = VoiceOutputTurnGate()
     private var focusRequest: AudioFocusRequest? = null
+    private var previousAudioMode = AudioManager.MODE_NORMAL
+    private var previousCommunicationDevice: AudioDeviceInfo? = null
+    @Volatile private var communicationModeActive = false
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         if (change <= AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) interrupt()
     }
@@ -247,6 +251,7 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
             return false
         }
         return try {
+            configureCommunicationAudioRoute()
             val record = AudioRecord.Builder()
                 .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
                 .setAudioFormat(AudioFormat.Builder().setSampleRate(16_000).setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_IN_MONO).build())
@@ -263,7 +268,7 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
             record.startRecording()
             running = true
             recordThread = Thread({ captureLoop(record) }, "thozha-live-capture").apply { isDaemon = true; start() }
-            Log.i(TAG, "event=capture_started sample_rate=16000 frame_ms=20 aec=${echoCanceler?.enabled == true} ns=${noiseSuppressor?.enabled == true} elapsed_ms=${SystemClock.elapsedRealtime()}")
+            Log.i(TAG, "event=capture_started sample_rate=16000 frame_ms=20 audio_mode=${audioManager.mode} route_type=${audioManager.communicationDevice?.type ?: -1} aec=${echoCanceler?.enabled == true} ns=${noiseSuppressor?.enabled == true} elapsed_ms=${SystemClock.elapsedRealtime()}")
             true
         } catch (t: Throwable) {
             stopCapture()
@@ -290,10 +295,12 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
             var sum = 0.0
             for (i in 0 until read) sum += copy[i].toDouble() * copy[i]
             val rms = sqrt(sum / read)
-            val voiceDetected = rms > 950.0
+            val speakingThreshold = if (assistantAudioActive) 2_000.0 else 950.0
+            val requiredVoiceFrames = if (assistantAudioActive) 5 else 2
+            val voiceDetected = rms > speakingThreshold
             if (!activeVoice) {
                 voicedFrames = if (voiceDetected) voicedFrames + 1 else 0
-                if (voicedFrames >= 2) {
+                if (voicedFrames >= requiredVoiceFrames) {
                     if (awaitingResponse || assistantAudioActive) {
                         awaitingResponse = false
                         currentInputTurnId = -1L
@@ -345,7 +352,7 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
             val min = AudioTrack.getMinBufferSize(frame.sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
             if (min <= 0) return fail("Android cannot play the Mac voice audio format.")
             val builder = AudioTrack.Builder()
-                .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                 .setAudioFormat(AudioFormat.Builder().setSampleRate(frame.sampleRate).setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
                 .setBufferSizeInBytes(maxOf(min * 2, frame.sampleRate * 2 / 2))
                 .setTransferMode(AudioTrack.MODE_STREAM)
@@ -378,7 +385,7 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
     }
 
     private fun requestAudioFocus(): Boolean {
-        val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+        val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
         return if (Build.VERSION.SDK_INT >= 26) {
             val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE).setAudioAttributes(attributes).setOnAudioFocusChangeListener(focusListener).build()
             focusRequest = request
@@ -413,7 +420,49 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
         recordThread = null
         runCatching { echoCanceler?.release() }; echoCanceler = null
         runCatching { noiseSuppressor?.release() }; noiseSuppressor = null
+        restoreCommunicationAudioRoute()
         abandonAudioFocus()
+    }
+
+    private fun configureCommunicationAudioRoute() {
+        if (!communicationModeActive) {
+            previousAudioMode = audioManager.mode
+            if (Build.VERSION.SDK_INT >= 31) previousCommunicationDevice = audioManager.communicationDevice
+            communicationModeActive = true
+        }
+        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        if (Build.VERSION.SDK_INT >= 31) {
+            val candidates = audioManager.availableCommunicationDevices
+            val bluetooth = candidates.firstOrNull {
+                it.type == AudioDeviceInfo.TYPE_BLE_HEADSET || it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+            }
+            val selected = bluetooth ?: candidates.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                ?: candidates.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+            if (selected != null) audioManager.setCommunicationDevice(selected)
+        } else {
+            @Suppress("DEPRECATION")
+            run { audioManager.isSpeakerphoneOn = true }
+        }
+    }
+
+    private fun restoreCommunicationAudioRoute() {
+        if (!communicationModeActive) return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 31) {
+                val prior = previousCommunicationDevice
+                if (prior != null && audioManager.availableCommunicationDevices.any { it.id == prior.id }) {
+                    audioManager.setCommunicationDevice(prior)
+                } else {
+                    audioManager.clearCommunicationDevice()
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                run { audioManager.isSpeakerphoneOn = false }
+            }
+            audioManager.mode = previousAudioMode
+        }
+        communicationModeActive = false
+        previousCommunicationDevice = null
     }
 
     private fun abandonAudioFocus() {
