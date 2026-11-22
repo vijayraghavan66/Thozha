@@ -6,6 +6,8 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.SystemClock
+import android.util.Log
+import com.jarvis.companion.BuildConfig
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -56,6 +58,10 @@ object LocalGatewayDiscovery {
     @Volatile private var failedHostname = ""
     @Volatile private var failedPort = 0
     @Volatile private var failedUntilElapsedMs = 0L
+
+    private fun diagnostic(event: String, detail: String = "") {
+        if (BuildConfig.DEBUG) Log.i("JarvisWifi", "event=$event $detail".trim())
+    }
 
     /**
      * Returns a previously verified endpoint immediately and refreshes DNS-SD in the background.
@@ -150,28 +156,40 @@ object LocalGatewayDiscovery {
         var resolving = false
 
         val listener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(serviceType: String) = Unit
+            override fun onDiscoveryStarted(serviceType: String) { diagnostic("discovery_started") }
             override fun onDiscoveryStopped(serviceType: String) = Unit
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) { latch.countDown() }
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                diagnostic("discovery_start_failed", "code=$errorCode")
+                latch.countDown()
+            }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                diagnostic("service_lost")
                 if (resolved[0]?.hostname == pin.hostname) {
                     resolved[0] = null
                     cached = null
                 }
             }
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                if (resolving || serviceInfo.serviceName != SERVICE_NAME ||
-                    serviceInfo.serviceType.trimEnd('.') + "." != SERVICE_TYPE
-                ) return
+                val nameMatches = serviceInfo.serviceName == SERVICE_NAME
+                val typeMatches = serviceInfo.serviceType.trimEnd('.') + "." == SERVICE_TYPE
+                diagnostic("service_found", "name_matches=$nameMatches type_matches=$typeMatches resolving=$resolving")
+                if (resolving || !nameMatches || !typeMatches) return
                 resolving = true
                 manager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
-                    override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) { resolving = false }
+                    override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                        diagnostic("service_resolve_failed", "code=$errorCode")
+                        resolving = false
+                    }
                     override fun onServiceResolved(info: NsdServiceInfo) {
                         resolving = false
                         val hostAttribute = info.attributes["tls-host"]?.toString(Charsets.UTF_8)
                         val address = info.host
-                        if (hostAttribute == pin.hostname && info.port == pin.port && address != null) {
+                        val hostMatches = hostAttribute == pin.hostname
+                        val portMatches = info.port == pin.port
+                        val privateAddress = address?.let(::isAllowedPrivateGatewayAddress) == true
+                        diagnostic("service_resolved", "host_matches=$hostMatches port_matches=$portMatches private_address=$privateAddress")
+                        if (hostMatches && portMatches && address != null) {
                             // Android's JVM resolver does not resolve .local reliably. The DNS-SD SRV
                             // address is usable only on private LAN ranges; TLS pin + exact DNS SAN
                             // validation below establishes the Mac identity before any token is sent.
@@ -200,6 +218,8 @@ object LocalGatewayDiscovery {
         } finally {
             runCatching { manager.stopServiceDiscovery(listener) }
         }
+        if (endpoint == null) diagnostic("discovery_no_endpoint")
+        else diagnostic("discovery_endpoint_accepted")
         if (endpoint == null) {
             failedHostname = pin.hostname
             failedPort = pin.port
