@@ -108,6 +108,7 @@ class JarvisStore(private val app: Context) {
     )
     private var currentDecisionApprovalId: String? = null
     @Volatile private var lastMacApiProbeAttemptMs = 0L
+    @Volatile private var lastMacTaskEventPollMs = 0L
     @Volatile private var lastSupervisorApprovalPollMs = 0L
     @Volatile private var lastSupervisorDecisionPollMs = 0L
     @Volatile private var cachedSupervisorApprovalPairs = emptyList<Pair<Approval, ApprovalReview>>()
@@ -272,12 +273,24 @@ class JarvisStore(private val app: Context) {
         if (pairedToMac) {
             // Reconcile only requests previously submitted by this phone using their original idempotency keys.
             // A lost HTTP response therefore observes the same task rather than creating a duplicate.
-            conversation.filter { row -> shouldReconcileApiTask(row, System.currentTimeMillis()) }.forEach { row ->
+            val eventPollNow = System.currentTimeMillis()
+            val pollMacEvents = eventPollNow - lastMacTaskEventPollMs >= MAC_TASK_EVENT_POLL_INTERVAL_MS
+            if (pollMacEvents) lastMacTaskEventPollMs = eventPollNow
+            conversation.filter { row -> shouldReconcileApiTask(row, eventPollNow) }.forEach { row ->
                 val id = row["message_id"] as? String ?: return@forEach
                 runCatching { jarvisApi.getLinkTaskStatus(id) }
                     .onSuccess { result ->
                         if (!runtime.reconcileMissingApiTaskResult(id, result.taskId, result.state, result.summary)) {
                             runtime.recordLocalTaskResult(id, result.taskId, result.state, result.summary)
+                        }
+                        if (pollMacEvents && result.taskId.matches(Regex("[0-9a-f]{32}")) && result.state.uppercase() in ActiveStates) {
+                            runCatching { jarvisApi.getTaskDetail(result.taskId) }.onSuccess { detail ->
+                                detail.events.forEach { event ->
+                                    runtime.recordTaskLifecycle(id, result.taskId, event.state, event.message, "MAC", "${result.taskId}:api:${event.id}")
+                                }
+                            }.onFailure { failure ->
+                                android.util.Log.w("JarvisTasks", "event=mac_task_events_unavailable task=${result.taskId.take(8)} type=${failure.javaClass.simpleName}")
+                            }
                         }
                     }
                     .onFailure { failure ->
@@ -331,6 +344,7 @@ class JarvisStore(private val app: Context) {
         LinkAlerts.notifyTaskUpdates(app, updatesSnapshot)
         val taskRegistrySnapshot = runtime.taskRegistry()
         val taskEventSnapshot = runtime.taskEventHistory()
+        LinkAlerts.notifyTaskUpdates(app, taskEventSnapshot)
         val decisionIds = (approvalDecisions.keys + combinedApprovals.keys).distinct()
         val runtimeDecisionStates = decisionIds.mapNotNull { id ->
             runtime.approvalDecisionState(id)?.let { id to it }
@@ -1224,6 +1238,7 @@ class JarvisStore(private val app: Context) {
 
     private companion object {
         const val MAC_API_PROBE_INTERVAL_MS = 15_000L
+        const val MAC_TASK_EVENT_POLL_INTERVAL_MS = 15_000L
         const val SUPERVISOR_APPROVAL_POLL_INTERVAL_MS = 15_000L
         const val SUPERVISOR_DECISION_POLL_INTERVAL_MS = 15_000L
     }
