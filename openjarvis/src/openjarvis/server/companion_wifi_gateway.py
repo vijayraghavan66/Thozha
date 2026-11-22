@@ -1,0 +1,137 @@
+"""Explicitly opt-in local Wi-Fi runner for the restricted companion gateway.
+
+It binds only to one configured RFC1918/ULA interface address, checks the
+configured Wi-Fi SSID before advertising, uses a persistent TLS certificate,
+and serves only the allowlisted routes in ``companion_gateway``. The raw Jarvis
+API remains on 127.0.0.1:8000.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import uvicorn
+
+from openjarvis.core.paths import get_config_dir
+from openjarvis.server.companion_gateway import create_gateway_app
+from openjarvis.server.companion_wifi import (
+    ensure_local_gateway_tls_identity,
+    local_gateway_hostname,
+    validate_wifi_bind_host,
+    wifi_gateway_enabled,
+)
+
+
+def _wifi_address(interface: str) -> str:
+    result = subprocess.run(
+        ["/usr/sbin/ipconfig", "getifaddr", interface],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("configured Wi-Fi interface has no IPv4 address")
+    return validate_wifi_bind_host(result.stdout.strip())
+
+
+def _wifi_ssid(interface: str) -> str:
+    result = subprocess.run(
+        ["/usr/sbin/networksetup", "-getairportnetwork", interface],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    if result.returncode != 0:
+        return ""
+    prefix = "Current Wi-Fi Network:"
+    for line in result.stdout.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):].strip()
+    return ""
+
+
+def serve() -> None:
+    if not wifi_gateway_enabled():
+        raise RuntimeError("Local Wi-Fi gateway is disabled")
+    interface = os.environ.get("JARVIS_COMPANION_WIFI_INTERFACE", "en0").strip()
+    allowed_ssid = os.environ.get("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "").strip()
+    configured_bind = os.environ.get("JARVIS_COMPANION_WIFI_BIND_HOST", "").strip()
+    if not interface or not allowed_ssid or not configured_bind:
+        raise RuntimeError("Local Wi-Fi gateway requires an explicit interface, SSID allowlist, and bind IP")
+    bind_host = validate_wifi_bind_host(configured_bind)
+    if _wifi_address(interface) != bind_host:
+        raise RuntimeError("Configured Wi-Fi bind IP is not assigned to the selected interface")
+    if _wifi_ssid(interface) != allowed_ssid:
+        raise RuntimeError("Current Wi-Fi network does not match the configured allowlist")
+
+    port = int(os.environ.get("JARVIS_COMPANION_WIFI_PORT", "8443"))
+    if not 1024 <= port <= 65535:
+        raise RuntimeError("Local Wi-Fi gateway port must be between 1024 and 65535")
+    hostname = local_gateway_hostname()
+    tls_identity = ensure_local_gateway_tls_identity(
+        get_config_dir() / "companion-wifi", hostname, port=port,
+    )
+
+    dns_sd = shutil.which("dns-sd") or "/usr/bin/dns-sd"
+    if not Path(dns_sd).is_file():
+        raise RuntimeError("macOS dns-sd is unavailable; gateway was not started")
+    advertiser = subprocess.Popen(
+        [
+            dns_sd, "-R", "Jarvis Companion", "_jarvis-companion._tcp.", "local.", str(port),
+            f"tls-host={hostname}", "protocol=1",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    server = uvicorn.Server(uvicorn.Config(
+        create_gateway_app(),
+        host=bind_host,
+        port=port,
+        ssl_certfile=str(tls_identity.certificate_path),
+        ssl_keyfile=str(tls_identity.private_key_path),
+        log_level="warning",
+        access_log=False,
+        proxy_headers=False,
+    ))
+    stop = threading.Event()
+
+    def stop_if_network_changes() -> None:
+        while not stop.wait(10):
+            if _wifi_ssid(interface) != allowed_ssid or _wifi_address(interface) != bind_host:
+                server.should_exit = True
+                return
+
+    monitor = threading.Thread(target=stop_if_network_changes, name="jarvis-wifi-policy", daemon=True)
+    monitor.start()
+    try:
+        server.run()
+    finally:
+        stop.set()
+        advertiser.terminate()
+        try:
+            advertiser.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            advertiser.kill()
+            advertiser.wait(timeout=2)
+
+
+def main() -> int:
+    try:
+        serve()
+    except Exception as exc:  # noqa: BLE001 - never expose network/config values in logs
+        print(f"Jarvis Wi-Fi gateway stopped ({type(exc).__name__}).", file=sys.stderr, flush=True)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - runner integration is opt-in
+    raise SystemExit(main())
