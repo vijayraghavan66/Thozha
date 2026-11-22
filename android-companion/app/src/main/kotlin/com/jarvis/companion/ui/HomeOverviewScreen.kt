@@ -45,6 +45,7 @@ fun HomeOverviewScreen(
     onOpenTasks: () -> Unit,
     onOpenDevices: () -> Unit,
     onOpenSettings: () -> Unit,
+    onCallJarvis: () -> Unit,
 ) {
     val connection = MacLinkPresentation.state(
         paired = store.macApiPaired || store.linkStatus?.certificatesVerified == true,
@@ -82,6 +83,9 @@ fun HomeOverviewScreen(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JarvisSpace.Page, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            item {
+                TextAction("Call Jarvis", filled = true, modifier = Modifier.fillMaxWidth(), onClick = onCallJarvis)
+            }
             item {
                 HeroSurfaceCard {
                     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {

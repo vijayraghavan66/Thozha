@@ -70,6 +70,7 @@ class JarvisVoiceController(
     private var recognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var neuralTts: KokoroNeuralTts? = null
+    @Volatile private var neuralSpeaking = false
     private val neuralCancelled = AtomicBoolean(false)
     private var ttsInitialized = false
     private var ttsReady = false
@@ -123,7 +124,7 @@ class JarvisVoiceController(
      */
     fun startBargeInTurn(): Boolean {
         checkMainThread()
-        if (state != VoiceControllerState.SPEAKING || activeUtteranceId == null) return false
+        if (state != VoiceControllerState.SPEAKING || (activeUtteranceId == null && !neuralSpeaking)) return false
         return startCapture(CaptureMode.BARGE_IN)
     }
 
@@ -224,6 +225,7 @@ class JarvisVoiceController(
         checkMainThread()
         if (closed || text.isBlank()) return
         neuralCancelled.set(false)
+        neuralSpeaking = true
         try { textToSpeech?.stop() } catch (_: RuntimeException) { }
         activeUtteranceId = null
         if (!requestFocus()) { fail(VoiceControllerError.SYNTHESIS_FAILED); return }
@@ -238,10 +240,10 @@ class JarvisVoiceController(
                 }
                 val synthMs = engine.speak(text, sid) { neuralCancelled.get() || closed }
                 android.util.Log.i("JarvisNeuralTts", "event=pcm_playback_finished voice=$voiceName sid=$sid synth_play_ms=$synthMs cancelled=${neuralCancelled.get()} elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
-                main.post { if (!closed && !neuralCancelled.get()) { abandonFocus(); setState(VoiceControllerState.IDLE) } }
+                main.post { neuralSpeaking = false; if (!closed && !neuralCancelled.get()) { abandonFocus(); setState(VoiceControllerState.IDLE) } }
             } catch (failure: Throwable) {
                 android.util.Log.e("JarvisNeuralTts", "event=neural_failed voice=$voiceName sid=$sid elapsed_ms=${android.os.SystemClock.elapsedRealtime() - started} type=${failure.javaClass.simpleName} detail=${failure.message?.take(300)}")
-                main.post { if (!closed && !neuralCancelled.get()) { listener.onError(VoiceControllerError.SYNTHESIS_FAILED); abandonFocus(); speak(text) } }
+                main.post { neuralSpeaking = false; if (!closed && !neuralCancelled.get()) { listener.onError(VoiceControllerError.SYNTHESIS_FAILED); abandonFocus(); speak(text) } }
             }
         }.start()
     }
@@ -473,6 +475,7 @@ class JarvisVoiceController(
     private fun stopTts(preserveCapture: Boolean) {
         pendingSpeech = null
         activeUtteranceId = null
+        if (neuralSpeaking) neuralCancelled.set(true)
         bargeInGate.disarm()
         try { textToSpeech?.stop() } catch (_: RuntimeException) { }
         if (!preserveCapture) {

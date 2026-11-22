@@ -84,6 +84,7 @@ fun JarvisApp(store: JarvisStore) {
     var lightTheme by remember(context) { mutableStateOf(AppearancePreference.isLight(context)) }
     JarvisColor.useLightMode(lightTheme)
     var destination by remember { mutableStateOf(ThozhaDestination.HOME) }
+    var callActive by remember { mutableStateOf(false) }
     val imeVisible = WindowInsets.isImeVisible
     SideEffect {
         context.findActivity()?.window?.let { window ->
@@ -128,13 +129,15 @@ fun JarvisApp(store: JarvisStore) {
         }
     }
 
-    BackHandler(enabled = store.overlay != null || destination != ThozhaDestination.HOME) {
-        if (store.overlay != null) store.openOverlay(null) else destination = ThozhaDestination.HOME
+    BackHandler(enabled = callActive || store.overlay != null || destination != ThozhaDestination.HOME) {
+        if (callActive) callActive = false else if (store.overlay != null) store.openOverlay(null) else destination = ThozhaDestination.HOME
     }
 
     CompositionLocalProvider(LocalReducedMotion provides reduced) {
         Box(Modifier.fillMaxSize().background(JarvisColor.Background)) {
-            Column(Modifier.fillMaxSize().statusBarsPadding()) {
+            if (callActive) {
+                JarvisCallScreen(store) { callActive = false }
+            } else Column(Modifier.fillMaxSize().statusBarsPadding()) {
                 Box(
                     Modifier
                         .weight(1f)
@@ -165,6 +168,7 @@ fun JarvisApp(store: JarvisStore) {
                                 onOpenTasks = { destination = ThozhaDestination.TASKS },
                                 onOpenDevices = { destination = ThozhaDestination.DEVICES },
                                 onOpenSettings = { store.openOverlay(Overlay.SETTINGS) },
+                                onCallJarvis = { callActive = true },
                             )
                             ThozhaDestination.CHAT -> HomeScreen(
                                 store,
