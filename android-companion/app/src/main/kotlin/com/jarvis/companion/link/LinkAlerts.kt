@@ -91,5 +91,47 @@ object LinkAlerts {
         return true
     }
 
+
+    /** Posts only new, persisted Mac lifecycle events. Stable notification IDs update a task card in place. */
+    fun notifyTaskUpdates(context: Context, updates: List<Map<String, Any>>) {
+        if (!LinkSettings(context).taskNotificationsEnabled || !canPost(context)) return
+        ensureChannels(context)
+        val prefs = context.getSharedPreferences("jarvis_task_notification_events", Context.MODE_PRIVATE)
+        val seen = prefs.getStringSet("seen", emptySet())?.toMutableSet() ?: mutableSetOf()
+        var changed = false
+        updates.forEach { event ->
+            val taskId = event["task_id"] as? String ?: return@forEach
+            val state = (event["state"] as? String)?.uppercase() ?: return@forEach
+            if (state !in setOf("RUNNING", "WAITING_APPROVAL", "FAILED", "COMPLETED", "CANCELLED")) return@forEach
+            // Do not duplicate approval notifications; those include the exact approval review flow.
+            if (state == "WAITING_APPROVAL") return@forEach
+            val seq = event["event_seq"]?.toString() ?: event["received_at_unix_ms"]?.toString() ?: event["timestamp_unix_ms"]?.toString() ?: event["event_id"]?.toString() ?: return@forEach
+            val fingerprint = "$taskId:$state:$seq"
+            if (!seen.add(fingerprint)) return@forEach
+            changed = true
+            if (seen.size > 500) { seen.clear(); seen.add(fingerprint) }
+            val title = when (state) {
+                "RUNNING" -> "Task in progress"
+                "COMPLETED" -> "Task completed"
+                "FAILED" -> "Task failed"
+                else -> "Task cancelled"
+            }
+            val text = when (state) {
+                "RUNNING" -> "Jarvis received a new task update. Open Tasks for details."
+                "COMPLETED" -> "A task finished. Open Tasks to review the verified result."
+                "FAILED" -> "A task failed. Open Tasks to review the recorded error."
+                else -> "A task was cancelled. Open Tasks to review its status."
+            }
+            val builder = Notification.Builder(context, CHANNEL_UPDATES)
+                .setSmallIcon(R.drawable.ic_stat_jarvis)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setAutoCancel(true)
+                .setCategory(Notification.CATEGORY_STATUS)
+            NotificationManagerCompat.from(context).notify(stableId("task:$taskId"), builder.build())
+        }
+        if (changed) prefs.edit().putStringSet("seen", seen).apply()
+    }
+
     private fun stableId(approvalId: String): Int = approvalId.hashCode() and 0x7fffffff
 }

@@ -11,6 +11,7 @@ import com.jarvis.companion.presentation.ApprovalDecisionPresentation
 import com.jarvis.companion.presentation.ApprovalDecisionStatus
 import com.jarvis.companion.presentation.shouldReconcileApiTask
 import com.jarvis.companion.link.LinkBackgroundSync
+import com.jarvis.companion.link.LinkAlerts
 import com.jarvis.companion.link.LinkService
 import com.jarvis.companion.link.LinkSettings
 import com.jarvis.companion.link.AssistantNamePolicy
@@ -116,6 +117,12 @@ class JarvisStore(private val app: Context) {
     var permissionRequester: ((String) -> Unit)? = null
 
     var reduceMotion by mutableStateOf(app.getSharedPreferences("jarvis_ui", Context.MODE_PRIVATE).getBoolean("reduce_motion", false))
+    var taskNotificationsEnabled by mutableStateOf(LinkSettings(app).taskNotificationsEnabled)
+        private set
+    fun updateTaskNotificationsEnabled(enabled: Boolean) = ui {
+        LinkSettings(app).taskNotificationsEnabled = enabled
+        taskNotificationsEnabled = enabled
+    }
     var aiRequestMode by mutableStateOf(loadAiRequestMode())
     var localAiSnapshot by mutableStateOf(localAi.status())
     var localAiRequestRunning by mutableStateOf(false)
@@ -321,6 +328,7 @@ class JarvisStore(private val app: Context) {
         apiApprovalPairs.forEach { (_, review) -> combinedApprovals[review.approvalId] = review }
         val directApprovalMap = apiApprovalPairs.associate { (approval, _) -> approval.id to approval }
         val updatesSnapshot = runtime.recentUpdates()
+        LinkAlerts.notifyTaskUpdates(app, updatesSnapshot)
         val taskRegistrySnapshot = runtime.taskRegistry()
         val taskEventSnapshot = runtime.taskEventHistory()
         val decisionIds = (approvalDecisions.keys + combinedApprovals.keys).distinct()
@@ -535,6 +543,7 @@ class JarvisStore(private val app: Context) {
     private fun refreshTaskRegistry(runtime: com.jarvis.link.LinkRuntime) {
         taskRegistry = runtime.taskRegistry()
         taskEventHistory = runtime.taskEventHistory()
+        LinkAlerts.notifyTaskUpdates(app, taskEventHistory)
     }
 
     /** Sends the composer text through the same signed Link path that Telegram carries when connected. */

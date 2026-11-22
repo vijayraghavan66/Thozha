@@ -47,6 +47,9 @@ class LinkSettings(context: Context) {
     var relayUrl: String
         get() = prefs.getString("relay_url", DEFAULT_TEST_RELAY_URL) ?: DEFAULT_TEST_RELAY_URL
         set(value) { prefs.edit().putString("relay_url", value.trim()).apply() }
+    var taskNotificationsEnabled: Boolean
+        get() = prefs.getBoolean("task_notifications_enabled", true)
+        set(value) { prefs.edit().putBoolean("task_notifications_enabled", value).apply() }
 
     /** Personal assistant name, independent of the Thozha product name and the Mac identity. */
     var assistantName: String

@@ -228,6 +228,17 @@ fun SettingsScreen(
 
             item { SectionLabel("Notifications") }
             item {
+                SurfaceCard {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            BasicText("Task updates", style = JarvisType.Section.copy(color = JarvisColor.Text))
+                            BasicText("Alert on meaningful task progress, completion or failure.", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+                        }
+                        Toggle(on = store.taskNotificationsEnabled, label = "Task notifications") { store.updateTaskNotificationsEnabled(!store.taskNotificationsEnabled) }
+                    }
+                }
+            }
+            item {
                 FactCard(listOf("Permission" to notificationPermissionLabel(context)))
             }
             item {
