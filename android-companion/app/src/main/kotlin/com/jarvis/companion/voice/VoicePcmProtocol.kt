@@ -50,3 +50,16 @@ internal object VoicePcmProtocol {
         return VoicePcmFrame(kind, sampleRate, sequence, elapsed, payload.copyOfRange(HEADER_BYTES, payload.size))
     }
 }
+
+/** Per-turn output sequence gate. AudioTrack setup/teardown must not reset this implicitly. */
+internal class VoiceOutputSequence {
+    private var next = 0L
+
+    fun accept(sequence: Long): Boolean {
+        if (sequence != next) return false
+        next += 1
+        return true
+    }
+
+    fun reset() { next = 0L }
+}

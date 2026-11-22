@@ -68,7 +68,7 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
     private var noiseSuppressor: NoiseSuppressor? = null
     private var track: AudioTrack? = null
     private var trackRate = 0
-    private var expectedOutputSequence = 0L
+    private val outputSequence = VoiceOutputSequence()
     private var inputSequence = 0L
     private var focusRequest: AudioFocusRequest? = null
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
@@ -181,7 +181,7 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
                 main.post { listener.onTranscript(transcript) }
             }
             "thinking" -> {
-                expectedOutputSequence = 0
+                outputSequence.reset()
                 publishState(MacVoiceLinkState.PROCESSING)
             }
             "response_text" -> {
@@ -304,15 +304,14 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
     }
 
     private fun playFrame(frame: VoicePcmFrame) {
-        if (closed || frame.sequence != expectedOutputSequence) {
-            Log.w(TAG, "event=output_sequence_mismatch expected=$expectedOutputSequence actual=${frame.sequence}")
+        if (closed || !outputSequence.accept(frame.sequence)) {
+            Log.w(TAG, "event=output_sequence_mismatch actual=${frame.sequence}")
             interrupt()
             return
         }
-        expectedOutputSequence++
         if (!requestAudioFocus()) return
         if (track == null || trackRate != frame.sampleRate) {
-            stopPlayback()
+            stopPlayback(resetSequence = false, clearSpeaking = false)
             val min = AudioTrack.getMinBufferSize(frame.sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
             if (min <= 0) return fail("Android cannot play the Mac voice audio format.")
             val builder = AudioTrack.Builder()
@@ -363,13 +362,13 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
         socket?.send(json.toString())
     }
 
-    private fun stopPlayback() {
+    private fun stopPlayback(resetSequence: Boolean = true, clearSpeaking: Boolean = true) {
         val old = track
         track = null
         trackRate = 0
-        expectedOutputSequence = 0
+        if (resetSequence) outputSequence.reset()
         outputSamplesWritten = 0
-        assistantAudioActive = false
+        if (clearSpeaking) assistantAudioActive = false
         runCatching { old?.pause(); old?.flush(); old?.stop() }
         runCatching { old?.release() }
     }

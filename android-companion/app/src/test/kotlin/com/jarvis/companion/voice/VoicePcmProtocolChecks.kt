@@ -23,6 +23,12 @@ object VoicePcmProtocolChecks {
 
         check(runCatching { VoicePcmProtocol.decodeMacFrame(output.copyOf(19)) }.isFailure)
         check(runCatching { VoicePcmProtocol.decodeMacFrame(output.copyOf().also { it[5] = 1 }) }.isFailure)
-        println("Voice PCM protocol checks passed: 10 assertions")
+        val outputSequence = VoiceOutputSequence()
+        check(outputSequence.accept(0L))
+        check(outputSequence.accept(1L))
+        check(!outputSequence.accept(1L))
+        outputSequence.reset()
+        check(outputSequence.accept(0L))
+        println("Voice PCM protocol checks passed: 14 assertions")
     }
 }
