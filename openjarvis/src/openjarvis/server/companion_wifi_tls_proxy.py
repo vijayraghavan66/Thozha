@@ -13,6 +13,7 @@ import ipaddress
 import os
 import ssl
 import sys
+import time
 from pathlib import Path
 
 UPSTREAM_HOST = "127.0.0.1"
@@ -43,20 +44,27 @@ def require_supported_runtime() -> None:
         raise RuntimeError("Wi-Fi TLS frontend requires Python 3.14+ with OpenSSL 3.6+ on this Mac")
 
 
-async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, label: str, debug: bool = False) -> None:
     total = 0
+    started = time.monotonic()
     while True:
         data = await asyncio.wait_for(reader.read(64 * 1024), timeout=IDLE_TIMEOUT_SECONDS)
         if not data:
             if writer.can_write_eof():
                 writer.write_eof()
                 await writer.drain()
+            if debug:
+                elapsed = int((time.monotonic() - started) * 1000)
+                print(f"tls_proxy_stream_end direction={label} bytes={total} elapsed_ms={elapsed}", file=sys.stderr, flush=True)
             return
         total += len(data)
         if total > MAX_BYTES_PER_DIRECTION:
             raise ValueError("companion request stream exceeded the byte budget")
         writer.write(data)
         await writer.drain()
+        if debug and total == len(data):
+            elapsed = int((time.monotonic() - started) * 1000)
+            print(f"tls_proxy_first_chunk direction={label} bytes={total} elapsed_ms={elapsed}", file=sys.stderr, flush=True)
 
 
 async def serve(host: str, port: int, certificate: Path, private_key: Path, *, debug: bool = False) -> None:
@@ -85,8 +93,12 @@ async def serve(host: str, port: int, certificate: Path, private_key: Path, *, d
                 upstream_reader, upstream_writer = await asyncio.wait_for(
                     asyncio.open_connection(UPSTREAM_HOST, UPSTREAM_PORT), timeout=3,
                 )
-                client_to_upstream = asyncio.create_task(_pipe(client_reader, upstream_writer))
-                upstream_to_client = asyncio.create_task(_pipe(upstream_reader, client_writer))
+                client_to_upstream = asyncio.create_task(
+                    _pipe(client_reader, upstream_writer, label="client_to_loopback", debug=debug),
+                )
+                upstream_to_client = asyncio.create_task(
+                    _pipe(upstream_reader, client_writer, label="loopback_to_client", debug=debug),
+                )
                 try:
                     await asyncio.gather(client_to_upstream, upstream_to_client)
                 except Exception:
