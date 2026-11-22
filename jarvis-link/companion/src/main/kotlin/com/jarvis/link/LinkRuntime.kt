@@ -328,6 +328,61 @@ class LinkRuntime(
     fun conversation(): List<Map<String, Any>> =
         (load()["conversation"] as? List<Map<String, Any>>) ?: emptyList()
 
+    /** Durable phone-side task index and ordered lifecycle events, independent of conversation UI lifetime. */
+    fun taskRegistry(): List<Map<String, Any>> = (load()["task_registry"] as? List<Map<String, Any>>) ?: emptyList()
+    fun taskEventHistory(): List<Map<String, Any>> = (load()["task_event_history"] as? List<Map<String, Any>>) ?: emptyList()
+
+    private fun normalizedTaskState(value: String): String = when (value.trim().uppercase()) {
+        "CREATED" -> "CREATED"
+        "QUEUED", "SENT", "DELIVERED_WAITING_SUPERVISOR", "UNCONFIRMED" -> "QUEUED"
+        "WAITING_APPROVAL" -> "WAITING_APPROVAL"
+        "WAITING_CONNECTION", "PAUSED" -> "WAITING_CONNECTION"
+        "COMPLETED" -> "COMPLETED"
+        "FAILED", "REJECTED", "EXPIRED", "INDETERMINATE" -> "FAILED"
+        "CANCELLED" -> "CANCELLED"
+        else -> "RUNNING"
+    }
+
+    private fun recordTaskLifecycleLocked(
+        requestId: String, supervisorTaskId: String, state: String, summary: String,
+        target: String, eventId: String,
+    ) {
+        val time = now()
+        val records = taskRegistry().toMutableList()
+        val old = records.firstOrNull { it["request_id"] == requestId }
+        val normalized = normalizedTaskState(state)
+        val terminal = setOf("COMPLETED", "FAILED", "CANCELLED")
+        if ((old?.get("status") as? String) in terminal && normalized !in terminal) return
+        val isTerminal = normalized in terminal
+        val record = linkedMapOf<String, Any>(
+            "task_id" to requestId, "request_id" to requestId,
+            "supervisor_task_id" to supervisorTaskId,
+            "execution_target" to (old?.get("execution_target") as? String ?: target),
+            "status" to normalized,
+            "created_at_unix_ms" to (old?.get("created_at_unix_ms") as? Long ?: time),
+            "updated_at_unix_ms" to time,
+            "summary" to summary,
+        ).also { row -> if (isTerminal) row["completed_at_unix_ms"] = old?.get("completed_at_unix_ms") as? Long ?: time }
+        val nextRecords = records.filterNot { it["request_id"] == requestId }.plus(record).takeLast(500)
+        val oldEvents = taskEventHistory()
+        val duplicate = oldEvents.any { it["event_id"] == eventId }
+        val newEvents = if (duplicate) oldEvents else oldEvents.plus(linkedMapOf<String, Any>(
+            "event_id" to eventId, "task_id" to requestId, "supervisor_task_id" to supervisorTaskId,
+            "status" to normalized, "timestamp_unix_ms" to time,
+            "event" to when (normalized) {
+                "CREATED" -> "Task created on phone"
+                "QUEUED" -> "Task queued for delivery"
+                "WAITING_APPROVAL" -> "Waiting for owner approval"
+                "WAITING_CONNECTION" -> "Waiting for connection"
+                "COMPLETED" -> "Task completed"
+                "FAILED" -> "Task failed"
+                "CANCELLED" -> "Task cancelled"
+                else -> "Task running"
+            }, "summary" to summary,
+        )).takeLast(2000)
+        save(mapOf("task_registry" to nextRecords, "task_event_history" to newEvents))
+    }
+
     /** Stores a local USB task under its API idempotency key before the request can time out. */
     fun recordLocalTaskRequest(
         idempotencyKey: String,
@@ -335,10 +390,12 @@ class LinkRuntime(
         transport: String = "api",
         capabilityScope: String = "assistant",
         lookupLinkStatus: Boolean = true,
+        executionTarget: String = "MAC",
     ) = synchronized(stateLock) {
         require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid task idempotency key" }
         require(transport in setOf("api", "link", "telegram")) { "invalid conversation transport" }
         require(capabilityScope in setOf("assistant", "development")) { "invalid task capability scope" }
+        require(executionTarget in setOf("PHONE", "MAC")) { "invalid execution target" }
         val cleaned = text.trim()
         require(cleaned.isNotEmpty() && cleaned.toByteArray(Charsets.UTF_8).size <= 4096) { "message must be 1–4096 bytes" }
         val entries = conversation().filterNot { it["message_id"] == idempotencyKey }.toMutableList()
@@ -346,7 +403,7 @@ class LinkRuntime(
             "message_id" to idempotencyKey,
             "text" to cleaned,
             "created_at_unix_ms" to now(),
-            "state" to "RUNNING",
+            "state" to "CREATED",
             "summary" to "",
             "task_id" to "",
             "transport" to transport,
@@ -355,11 +412,21 @@ class LinkRuntime(
             "updated_at_unix_ms" to now(),
         ))
         save(mapOf("conversation" to entries.takeLast(100)))
+        val existingTask = taskRegistry().firstOrNull { it["request_id"] == idempotencyKey }
+        if (existingTask == null) recordTaskLifecycleLocked(idempotencyKey, "", "CREATED", "", executionTarget, "$idempotencyKey:created")
+    }
+
+    /** Persists an actual local or Mac-reported lifecycle transition; duplicate event IDs are ignored. */
+    fun recordTaskLifecycle(requestId: String, supervisorTaskId: String, state: String, summary: String, target: String = "MAC", eventId: String? = null) = synchronized(stateLock) {
+        require(requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid request ID" }
+        require(target in setOf("PHONE", "MAC")) { "invalid execution target" }
+        recordTaskLifecycleLocked(requestId, supervisorTaskId, state, summary, target, eventId ?: "$requestId:${state.uppercase()}:$supervisorTaskId:${now()}")
     }
 
     /** Records the Mac's actual supervisor result or the last known task state. */
     fun recordLocalTaskResult(idempotencyKey: String, taskId: String, state: String, summary: String) {
         applyToConversation(idempotencyKey, taskId, state.uppercase(), summary)
+        recordTaskLifecycle(idempotencyKey, taskId, state, summary)
     }
 
     /** Corrects only the exact local 404 terminal marker after a fresh authenticated Mac status response. */
@@ -454,6 +521,7 @@ class LinkRuntime(
         val updates = ((load()["updates"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
         val decisionStates = approvalDecisionStates().toMutableMap()
         var entries = conversation()
+        val acceptedRegistryEvents = mutableListOf<Pair<CompanionEvent.TaskUpdate, String>>()
         for (event in events) {
             when (event) {
                 is CompanionEvent.ApprovalPending -> {
@@ -488,6 +556,11 @@ class LinkRuntime(
                         it["task_id"] == event.taskId && (it["event_seq"] as? Number)?.toLong() == event.eventSeq
                     }
                     if (!stale && !staleProgress && !duplicateProgress) {
+                        val linkedRequestId = (matching.firstOrNull()?.get("message_id") as? String)
+                            ?: event.inReplyTo.takeIf { it.isNotBlank() }
+                            ?: taskMatching.firstOrNull()?.get("message_id") as? String
+                            ?: ""
+                        if (linkedRequestId.isNotBlank()) acceptedRegistryEvents.add(event to linkedRequestId)
                         updates.add(linkedMapOf<String, Any>(
                             "task_id" to event.taskId,
                             "state" to updateState,
@@ -527,6 +600,10 @@ class LinkRuntime(
             "approval_decision_states" to decisionStates)
         if (received != null) changes["received_event_ids"] = received
         save(changes)
+        acceptedRegistryEvents.forEach { (event, requestId) ->
+            recordTaskLifecycle(requestId, event.taskId, event.state, event.summary, "MAC",
+                event.eventSeq?.let { "${event.taskId}:$it" } ?: "${event.taskId}:${event.state}:${event.inReplyTo}:${event.summary.hashCode()}")
+        }
     }
 
     fun flush(relayUrl: String): Map<String, Any> {

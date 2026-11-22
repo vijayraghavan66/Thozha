@@ -591,6 +591,14 @@ object CompanionProtocolTest {
         check(entry["capability_scope"] == "development")
         check(entry["state"] == "COMPLETED")
         check(entry["summary"] == "Java is a programming language.")
+        val task = recovered.taskRegistry().single()
+        check(task["task_id"] == requestId && task["supervisor_task_id"] == taskId)
+        check(task["status"] == "COMPLETED" && task["created_at_unix_ms"] == 1_800_000_000_000L)
+        val lifecycle = recovered.taskEventHistory().filter { it["task_id"] == requestId }
+        check(lifecycle.map { it["status"] } == listOf("CREATED", "COMPLETED")) { "durable task lifecycle events were not preserved: $lifecycle" }
+        recovered.recordTaskLifecycle(requestId, taskId, "RUNNING", "late event", "MAC", "late-running")
+        check(recovered.taskRegistry().single()["status"] == "COMPLETED") { "terminal registry task was reopened by stale progress" }
+        check(recovered.taskEventHistory().count { it["event_id"] == "${requestId}:created" } == 1) { "duplicate creation event was recorded" }
         check(runCatching {
             recovered.recordLocalTaskRequest("local-usb-task-20261116-000000000002", "bad scope", capabilityScope = "mac_root")
         }.isFailure)
