@@ -24,6 +24,7 @@ from openjarvis.server.companion_wifi import (
     ensure_local_gateway_tls_identity,
     local_gateway_hostname,
     validate_wifi_bind_host,
+    wifi_interface_ipv4_address,
     wifi_gateway_enabled,
 )
 
@@ -31,16 +32,7 @@ _MANUAL_SSID_CONFIRMATION_MAX_SECONDS = 600
 
 
 def _wifi_address(interface: str) -> str:
-    result = subprocess.run(
-        ["/usr/sbin/ipconfig", "getifaddr", interface],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=3,
-    )
-    if result.returncode != 0:
-        raise RuntimeError("configured Wi-Fi interface has no IPv4 address")
-    return validate_wifi_bind_host(result.stdout.strip())
+    return wifi_interface_ipv4_address(interface)
 
 
 def _wifi_ssid(interface: str) -> str:

@@ -12,6 +12,7 @@ This separate runner exposes a narrow, authenticated Android companion API over 
 - The gateway validates active enrolled-device bearer tokens and forwards only allowlisted task, approval, and device-registration endpoints to the fixed loopback backend. The supervisor remains responsible for authorization and operation execution.
 - DNS-SD advertises the local gateway. Discovery is a hint only; Android still requires the pinned hostname, certificate fingerprint, and authenticated API token.
 - The Bonjour advertisement uses the proxy-registration form with the actual pinned `.local` hostname and configured interface IP as its SRV/A target. This is important: advertising the default host as `localhost` cannot be accepted by Android's pinned-host address check.
+- The loopback-only `/v1/jarvis/local-gateway/address` endpoint signs the current private interface IP with the already-paired Mac key and a fresh nonce. Android stores this IP alongside the TLS pin in the same encrypted record and may use it only as a fallback when mDNS is unavailable. It still connects with HTTPS, verifies the pinned certificate and exact DNS SAN, and sends the device token only after TLS succeeds. If DHCP changes the IP and mDNS is blocked, refresh the signed address over the paired route.
 
 ## Manual start (not enabled by default)
 

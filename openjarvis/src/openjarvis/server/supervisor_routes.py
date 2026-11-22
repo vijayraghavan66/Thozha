@@ -546,6 +546,56 @@ async def local_gateway_identity(request: Request) -> dict[str, Any]:
     return {**payload, "signature": base64.b64encode(signature).decode("ascii")}
 
 
+@router.post("/local-gateway/address")
+async def local_gateway_address(request: Request) -> dict[str, Any]:
+    """Return a nonce-bound, Mac-signed private Wi-Fi address to the paired companion over loopback."""
+    _require_loopback(request)
+    authorize_supervisor_request(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Expected JSON Wi-Fi address request") from exc
+    nonce = body.get("nonce") if isinstance(body, dict) and set(body) == {"nonce"} else None
+    if not isinstance(nonce, str) or not re.fullmatch(r"[A-Za-z0-9._~-]{16,128}", nonce):
+        raise HTTPException(status_code=422, detail="nonce must be a URL-safe 16–128 character challenge")
+
+    store = get_supervisor_store()
+    private_key, public_der, server_fingerprint = _pairing_server_identity(store)
+    from openjarvis.server.companion_wifi import ensure_local_gateway_tls_identity, local_gateway_hostname, wifi_interface_ipv4_address
+
+    interface = os.environ.get("JARVIS_COMPANION_WIFI_INTERFACE", "en0").strip()
+    try:
+        address = wifi_interface_ipv4_address(interface)
+        gateway_port = int(os.environ.get("JARVIS_COMPANION_WIFI_PORT", "8443"))
+        if not 1024 <= gateway_port <= 65535:
+            raise ValueError("gateway port is invalid")
+        tls_identity = ensure_local_gateway_tls_identity(
+            Path(store.db_path).parent / "companion-wifi",
+            local_gateway_hostname(),
+            port=gateway_port,
+        )
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        logger.error("Local companion address is unavailable (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Local companion Wi-Fi address is unavailable") from exc
+
+    import base64
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    payload = {
+        "protocol": "openjarvis-local-gateway-address-v1",
+        "nonce": nonce,
+        "hostname": tls_identity.hostname,
+        "port": str(tls_identity.port),
+        "address": address,
+        "certificate_sha256": tls_identity.certificate_sha256,
+        "server_public_key": base64.b64encode(public_der).decode("ascii"),
+        "server_fingerprint": server_fingerprint,
+    }
+    signature = private_key.sign(_canonical_pairing_payload(payload), ec.ECDSA(hashes.SHA256()))
+    return {**payload, "signature": base64.b64encode(signature).decode("ascii")}
+
+
 def _device_actor(request: Request) -> str:
     actor = authorize_supervisor_request(request)
     if not actor.startswith("device:"):

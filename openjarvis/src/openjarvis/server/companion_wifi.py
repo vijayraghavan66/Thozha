@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import socket
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -65,6 +66,25 @@ def validate_wifi_bind_host(host: str) -> str:
 
 def wifi_gateway_enabled() -> bool:
     return os.environ.get("JARVIS_COMPANION_WIFI_ENABLED", "").strip() == "1"
+
+
+def wifi_interface_ipv4_address(interface: str) -> str:
+    """Return a validated private IPv4 assigned to the configured macOS Wi-Fi interface."""
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", interface):
+        raise ValueError("Wi-Fi interface name is invalid")
+    result = subprocess.run(
+        ["/usr/sbin/ipconfig", "getifaddr", interface],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("configured Wi-Fi interface has no IPv4 address")
+    address = validate_wifi_bind_host(result.stdout.strip())
+    if ":" in address:
+        raise ValueError("the local companion gateway requires an IPv4 Wi-Fi address")
+    return address
 
 
 def ensure_local_gateway_tls_identity(
@@ -162,5 +182,6 @@ __all__ = [
     "ensure_local_gateway_tls_identity",
     "local_gateway_hostname",
     "validate_wifi_bind_host",
+    "wifi_interface_ipv4_address",
     "wifi_gateway_enabled",
 ]
