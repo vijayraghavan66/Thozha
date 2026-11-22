@@ -8,6 +8,6 @@ let package = Package(
     targets: [
         .target(name: "ThozhaInstallerCore"),
         .executableTarget(name: "ThozhaSetup", dependencies: ["ThozhaInstallerCore"]),
-        .testTarget(name: "ThozhaInstallerCoreTests", dependencies: ["ThozhaInstallerCore"])
+        .testTarget(name: "ThozhaInstallerCoreTests", dependencies: ["ThozhaInstallerCore"], resources: [.copy("Fixtures")])
     ]
 )

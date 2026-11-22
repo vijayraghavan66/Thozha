@@ -48,6 +48,9 @@ cat > "$STAGE/root/Applications/$APP_NAME/Contents/Info.plist" <<'PLIST'
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSAppTransportSecurity</key><dict>
+<key>NSAllowsLocalNetworking</key><true/>
+</dict>
 </dict></plist>
 PLIST
 printf 'APPL????' > "$STAGE/root/Applications/$APP_NAME/Contents/PkgInfo"

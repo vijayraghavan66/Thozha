@@ -11,6 +11,7 @@ struct SetupView: View {
     @State private var serviceState = "Not checked"
     @State private var identityMessage = "No new installation identity created"
     @State private var isChecking = false
+    @State private var showingPhonePairing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -46,6 +47,17 @@ struct SetupView: View {
                 Text("Stores a random installation ID under this macOS user's Application Support. It is not a device credential and is separate from existing Jarvis pairing.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+            GroupBox("Phone pairing") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Connect an Android phone").font(.subheadline.weight(.medium))
+                        Text("Create a signed, short-lived pairing QR from the local OpenJarvis service.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Connect Phone") { showingPhonePairing = true }
+                }.padding(.vertical, 4)
+            }
             HStack {
                 Button(isChecking ? "Checking…" : "Run read-only health check") { Task { await healthCheck() } }.disabled(isChecking)
                 Spacer()
@@ -53,6 +65,7 @@ struct SetupView: View {
             }
         }
         .padding(24).frame(width: 570)
+        .sheet(isPresented: $showingPhonePairing) { ConnectPhoneView().frame(minWidth: 530, minHeight: 650) }
     }
 
     private func createIdentity() {
