@@ -366,28 +366,159 @@ def _approval_payload(item: dict[str, Any]) -> dict[str, Any]:
 @router.post("/pair/invitations")
 async def create_pairing_invitation(request: Request) -> dict[str, Any]:
     _authorize_local_pair_ui(request, state_changing=True)
+    authorize_supervisor_request(request, master_only=True)
     store = get_supervisor_store()
-    server_url = _local_server_origin(request)
+    transport, body = await _pair_invitation_request(request)
     private_key, public_der, server_fingerprint = _pairing_server_identity(store)
-    invitation_id, challenge, expires = store.begin_device_pairing()
     import base64
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import ec
 
-    qr_payload = {
-        "protocol": "openjarvis-pairing-v1",
-        "server_url": server_url,
-        "server_fingerprint": server_fingerprint,
-        "server_public_key": base64.b64encode(public_der).decode("ascii"),
-        "invitation_id": invitation_id,
-        "challenge": challenge,
-        "expires_at": expires,
-    }
+    wifi = _local_wifi_pairing_parameters(store) if transport == "wifi" else None
+    invitation_id, challenge, expires = store.begin_device_pairing()
+    if wifi is None:
+        # Keep the existing USB/loopback payload byte-for-byte compatible.
+        qr_payload = {
+            "protocol": "openjarvis-pairing-v1",
+            "server_url": _local_server_origin(request),
+            "server_fingerprint": server_fingerprint,
+            "server_public_key": base64.b64encode(public_der).decode("ascii"),
+            "invitation_id": invitation_id,
+            "challenge": challenge,
+            "expires_at": expires,
+        }
+    else:
+        qr_payload = {
+            "protocol": "openjarvis-pairing-v2",
+            "server_url": wifi["server_url"],
+            "gateway_address": wifi["gateway_address"],
+            "gateway_port": wifi["gateway_port"],
+            "gateway_certificate_sha256": wifi["gateway_certificate_sha256"],
+            "server_fingerprint": server_fingerprint,
+            "server_public_key": base64.b64encode(public_der).decode("ascii"),
+            "invitation_id": invitation_id,
+            "challenge": challenge,
+            "expires_at": expires,
+        }
     canonical = _canonical_pairing_payload(qr_payload)
     qr_payload["server_signature"] = base64.b64encode(
         private_key.sign(canonical, ec.ECDSA(hashes.SHA256()))
     ).decode("ascii")
-    return {**qr_payload, "qr_payload": qr_payload}
+    return JSONResponse(
+        content={**qr_payload, "qr_payload": qr_payload},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _pair_invitation_request(request: Request) -> tuple[str, dict[str, Any]]:
+    """Accept no body (legacy loopback pairing) or an explicit Wi-Fi request only."""
+    content_length = request.headers.get("content-length", "0")
+    try:
+        if int(content_length or "0") > 1024:
+            raise HTTPException(status_code=413, detail="Pairing request is too large")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid pairing request length") from exc
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 1024:
+            raise HTTPException(status_code=413, detail="Pairing request is too large")
+    if not raw:
+        return "loopback", {}
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(status_code=415, detail="Pairing request must be JSON")
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid pairing request JSON") from exc
+    if not isinstance(value, dict) or set(value) != {"transport"} or value.get("transport") != "wifi":
+        raise HTTPException(status_code=422, detail="Only an explicit {transport: wifi} request is supported")
+    return "wifi", value
+
+
+def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:
+    """Return a signed Wi-Fi endpoint only when the explicitly enabled gateway is live."""
+    from openjarvis.server.companion_wifi import (
+        ensure_local_gateway_tls_identity,
+        local_gateway_hostname,
+        validate_wifi_bind_host,
+        wifi_gateway_enabled,
+        wifi_interface_ipv4_address,
+    )
+
+    if not wifi_gateway_enabled():
+        raise HTTPException(status_code=409, detail="Local Wi-Fi pairing is not enabled")
+    interface = os.environ.get("JARVIS_COMPANION_WIFI_INTERFACE", "en0").strip()
+    allowed_ssid = os.environ.get("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "").strip()
+    configured_bind = os.environ.get("JARVIS_COMPANION_WIFI_BIND_HOST", "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", interface) or not allowed_ssid or not configured_bind:
+        raise HTTPException(status_code=409, detail="Local Wi-Fi pairing configuration is incomplete")
+    if len(allowed_ssid) > 128 or any(ord(char) < 0x20 or ord(char) == 0x7f for char in allowed_ssid):
+        raise HTTPException(status_code=409, detail="Local Wi-Fi pairing configuration is invalid")
+    try:
+        configured_address = validate_wifi_bind_host(configured_bind)
+        actual_address = wifi_interface_ipv4_address(interface)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        logger.info("Local Wi-Fi pairing unavailable (%s)", type(exc).__name__)
+        raise HTTPException(status_code=409, detail="The configured Wi-Fi address is unavailable") from exc
+    if actual_address != configured_address or ":" in actual_address:
+        raise HTTPException(status_code=409, detail="The configured Wi-Fi address is not assigned to this interface")
+
+    try:
+        ssid_result = subprocess.run(
+            ["/usr/sbin/networksetup", "-getairportnetwork", interface],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except subprocess.SubprocessError as exc:
+        raise HTTPException(status_code=409, detail="The configured Wi-Fi network could not be verified") from exc
+    prefix = "Current Wi-Fi Network:"
+    current_ssid = ""
+    if ssid_result.returncode == 0:
+        for line in ssid_result.stdout.splitlines():
+            if line.startswith(prefix):
+                current_ssid = line[len(prefix):].strip()
+                break
+    if current_ssid != allowed_ssid:
+        raise HTTPException(status_code=409, detail="The current Wi-Fi network is not the configured network")
+
+    raw_port = os.environ.get("JARVIS_COMPANION_WIFI_PORT", "8443").strip()
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="The Wi-Fi gateway port is invalid") from exc
+    # The TLS front end has a fixed supported port. Do not sign an endpoint the runner rejects.
+    if port != 8443:
+        raise HTTPException(status_code=409, detail="The Wi-Fi gateway must use port 8443")
+
+    try:
+        hostname = local_gateway_hostname()
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local", hostname):
+            raise ValueError("invalid local hostname")
+        tls_identity = ensure_local_gateway_tls_identity(
+            Path(store.db_path).parent / "companion-wifi", hostname, port=port,
+        )
+        if (
+            tls_identity.hostname != hostname
+            or tls_identity.port != port
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", tls_identity.certificate_sha256)
+        ):
+            raise ValueError("Wi-Fi TLS identity does not match the configured endpoint")
+        import socket
+        with socket.create_connection((actual_address, port), timeout=0.5):
+            pass
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.info("Local Wi-Fi gateway not ready (%s)", type(exc).__name__)
+        raise HTTPException(status_code=409, detail="The local Wi-Fi gateway is not accepting connections") from exc
+
+    return {
+        "server_url": f"https://{hostname}:{port}",
+        "gateway_address": actual_address,
+        "gateway_port": str(port),
+        "gateway_certificate_sha256": tls_identity.certificate_sha256,
+    }
 
 
 # Compatibility alias for the previous internal API name. It follows the same

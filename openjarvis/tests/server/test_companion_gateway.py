@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
@@ -18,6 +19,8 @@ from fastapi.testclient import TestClient
 from openjarvis.server.companion_gateway import ReadOnlyGatewayStore, create_gateway_app, validate_bind_host
 from openjarvis.server.supervisor_routes import _canonical_pairing_payload
 from openjarvis.tasks.supervisor import SupervisorStore
+import openjarvis.tasks.supervisor as supervisor_module
+from openjarvis.server.supervisor_routes import router as supervisor_router
 
 
 @pytest.fixture
@@ -82,6 +85,11 @@ def test_gateway_allows_only_companion_paths_and_methods(gateway):
 
     assert client.get("/v1/jarvis/pair/pending", headers=headers).status_code == 404
     assert client.post("/v1/jarvis/pair/claim", headers=headers, json={}).status_code == 404
+    assert client.post("/v1/jarvis/pair/invitations", headers=headers).status_code == 404
+    assert client.post("/v1/jarvis/pair/start", headers=headers).status_code == 404
+    assert client.post("/v1/jarvis/pair/complete", headers=headers, json={}).status_code == 404
+    assert client.get("/v1/jarvis/pair/pending", headers=headers).status_code == 404
+    assert client.post(f"/v1/jarvis/pair/{'a' * 32}/decision", headers=headers, json={}).status_code == 404
     assert client.get("/v1/chat/completions", headers=headers).status_code == 404
     assert client.get("/docs").status_code == 404
     assert client.post("/v1/jarvis/tasks", headers=headers).status_code == 405
@@ -94,6 +102,152 @@ def test_gateway_allows_only_companion_paths_and_methods(gateway):
     revoked = client.delete("/v1/jarvis/devices/fcm-token", headers=headers)
     assert revoked.status_code == 200
     assert upstream[-1].method == "DELETE"
+
+
+def _pairing_gateway(tmp_path, monkeypatch):
+    store = SupervisorStore(str(tmp_path / "pairing-supervisor.db"))
+    monkeypatch.setattr(supervisor_module, "_STORE_INSTANCE", store)
+    monkeypatch.setenv("OPENJARVIS_API_KEY", "pairing-integration-master")
+    backend_app = FastAPI()
+    backend_app.include_router(supervisor_router)
+
+    forwarded_requests: list[httpx.Request] = []
+
+    async def upstream_handler(request: httpx.Request) -> httpx.Response:
+        forwarded_requests.append(request)
+        transport = httpx.ASGITransport(app=backend_app, client=("127.0.0.1", 12345))
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as backend:
+            response = await backend.request(
+                request.method,
+                request.url.raw_path.decode("ascii"),
+                content=request.content,
+                headers={key: value for key, value in request.headers.items() if key.lower() in {"content-type", "accept"}},
+            )
+        return httpx.Response(response.status_code, headers=response.headers, content=response.content)
+
+    app = create_gateway_app(
+        supervisor_store=store,
+        backend_transport=httpx.MockTransport(upstream_handler),
+    )
+    client = TestClient(app, base_url="http://127.0.0.1:8001")
+    return client, store, forwarded_requests
+
+
+def _new_pairing(store):
+    invitation_id, challenge, expires = store.begin_device_pairing()
+    key = ec.generate_private_key(ec.SECP256R1())
+    public_der = key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    signature = key.sign(challenge.encode("utf-8"), ec.ECDSA(hashes.SHA256()))
+    body = {
+        "device_name": "Test Android",
+        "public_key": base64.b64encode(public_der).decode("ascii"),
+        "signature": base64.b64encode(signature).decode("ascii"),
+    }
+    return invitation_id, key, body
+
+
+def test_invitation_scoped_gateway_pairing_preserves_approval_expiry_and_replay(tmp_path, monkeypatch):
+    client, store, forwarded = _pairing_gateway(tmp_path, monkeypatch)
+    invitation_id, key, body = _new_pairing(store)
+    headers = {"Content-Type": "application/json"}
+
+    completed = client.post(f"/v1/jarvis/pair/{invitation_id}/complete", headers=headers, json=body)
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "PENDING_CONFIRMATION"
+    assert forwarded[-1].url.path == "/v1/jarvis/pair/complete"
+    assert forwarded[-1].headers.get("authorization") is None
+    assert set(json.loads(forwarded[-1].content)) == {"invitation_id", "device_name", "public_key", "signature"}
+    replayed_complete = client.post(f"/v1/jarvis/pair/{invitation_id}/complete", headers=headers, json=body)
+    assert replayed_complete.status_code == 409
+
+    pending = client.get(f"/v1/jarvis/pair/{invitation_id}/status")
+    assert pending.status_code == 200
+    assert pending.json()["status"] == "PENDING_CONFIRMATION"
+    assert "claim_challenge" not in pending.json()
+    premature = client.post(
+        f"/v1/jarvis/pair/{invitation_id}/claim",
+        headers=headers,
+        json={"signature": base64.b64encode(b"not a valid device signature" * 3).decode("ascii")},
+    )
+    assert premature.status_code == 409
+    assert "access_token" not in premature.json()
+
+    assert store.decide_device_pairing(invitation_id, "approve") == "APPROVED"
+    approved = client.get(f"/v1/jarvis/pair/{invitation_id}/status")
+    challenge = approved.json()["claim_challenge"]
+    claim_signature = base64.b64encode(key.sign(challenge.encode("utf-8"), ec.ECDSA(hashes.SHA256()))).decode("ascii")
+    claimed = client.post(
+        f"/v1/jarvis/pair/{invitation_id}/claim", headers=headers, json={"signature": claim_signature},
+    )
+    assert claimed.status_code == 200
+    assert claimed.json()["access_token"].startswith("ojd_")
+    replayed_claim = client.post(
+        f"/v1/jarvis/pair/{invitation_id}/claim", headers=headers, json={"signature": claim_signature},
+    )
+    assert replayed_claim.status_code == 409
+    store.close()
+    monkeypatch.setattr(supervisor_module, "_STORE_INSTANCE", None)
+
+
+def test_invitation_scoped_gateway_rejects_expired_or_mismatched_proofs(tmp_path, monkeypatch):
+    client, store, _forwarded = _pairing_gateway(tmp_path, monkeypatch)
+    invitation_id, key, body = _new_pairing(store)
+    store._db.execute(
+        "UPDATE device_pairings SET expires_at=? WHERE id=?",
+        ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), invitation_id),
+    )
+    store._db.commit()
+    expired = client.post(f"/v1/jarvis/pair/{invitation_id}/complete", json=body)
+    assert expired.status_code == 409
+
+    other_id, _, _ = _new_pairing(store)
+    mismatched = client.post(f"/v1/jarvis/pair/{other_id}/complete", json=body)
+    assert mismatched.status_code == 409
+    assert "access_token" not in mismatched.json()
+
+    # Strict path IDs, methods, schemas, and body sizes keep this from becoming a proxy.
+    assert client.get("/v1/jarvis/pair/not-an-id/status").status_code == 404
+    assert client.get(f"/v1/jarvis/pair/{other_id}/status?debug=1").status_code == 422
+    assert client.post(f"/v1/jarvis/pair/{other_id}/claim", json={"signature": "x" * 2000}).status_code == 413
+    assert client.post(f"/v1/jarvis/pair/{other_id}/claim", json={"signature": "x" * 80, "token": "extra"}).status_code == 422
+    store.close()
+    monkeypatch.setattr(supervisor_module, "_STORE_INSTANCE", None)
+
+
+def test_invitation_scoped_gateway_rejects_owner_rejection_and_expired_claim(tmp_path, monkeypatch):
+    client, store, _forwarded = _pairing_gateway(tmp_path, monkeypatch)
+    rejected_id, _rejected_key, rejected_body = _new_pairing(store)
+    rejected = client.post(f"/v1/jarvis/pair/{rejected_id}/complete", json=rejected_body)
+    assert rejected.status_code == 200
+    assert store.decide_device_pairing(rejected_id, "reject") == "REJECTED"
+    rejected_status = client.get(f"/v1/jarvis/pair/{rejected_id}/status")
+    assert rejected_status.json()["status"] == "REJECTED"
+    rejected_claim = client.post(
+        f"/v1/jarvis/pair/{rejected_id}/claim", json={"signature": base64.b64encode(b"x" * 72).decode("ascii")},
+    )
+    assert rejected_claim.status_code == 409
+    assert "access_token" not in rejected_claim.json()
+
+    expired_id, expired_key, expired_body = _new_pairing(store)
+    assert client.post(f"/v1/jarvis/pair/{expired_id}/complete", json=expired_body).status_code == 200
+    assert store.decide_device_pairing(expired_id, "approve") == "APPROVED"
+    store._db.execute(
+        "UPDATE device_pairings SET claim_expires_at=? WHERE id=?",
+        ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), expired_id),
+    )
+    store._db.commit()
+    assert client.get(f"/v1/jarvis/pair/{expired_id}/status").json()["status"] == "EXPIRED"
+    expired_claim = client.post(
+        f"/v1/jarvis/pair/{expired_id}/claim",
+        json={"signature": base64.b64encode(expired_key.sign(b"expired", ec.ECDSA(hashes.SHA256()))).decode("ascii")},
+    )
+    assert expired_claim.status_code == 409
+    assert "access_token" not in expired_claim.json()
+    store.close()
+    monkeypatch.setattr(supervisor_module, "_STORE_INSTANCE", None)
 
 
 def test_gateway_allows_only_read_only_link_task_envelopes(gateway):

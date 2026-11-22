@@ -4,15 +4,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import contextlib
+from types import SimpleNamespace
 
+import openjarvis.tasks.supervisor as supervisor
 import pytest
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import openjarvis.tasks.supervisor as supervisor
 import openjarvis.server.companion_wifi as wifi
 from openjarvis.server.companion_wifi import ensure_local_gateway_tls_identity, validate_wifi_bind_host
 from openjarvis.server import companion_wifi_gateway
@@ -171,5 +174,178 @@ def test_gateway_tls_pin_is_signed_over_loopback_and_requires_auth(tmp_path, mon
         headers={"Authorization": "Bearer local-gateway-test-admin-key"},
         json={"nonce": "N" * 20},
     ).status_code == 403
+    store.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
+def _pairing_test_client(tmp_path, monkeypatch):
+    store = SupervisorStore(str(tmp_path / "supervisor.db"))
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", store)
+    monkeypatch.setenv("OPENJARVIS_API_KEY", "pairing-test-master-key")
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 12345))
+    return client, store
+
+
+def test_wifi_qr_creation_stays_loopback_master_authenticated_and_v1_default(tmp_path, monkeypatch):
+    client, store = _pairing_test_client(tmp_path, monkeypatch)
+    headers = {"Authorization": "Bearer pairing-test-master-key", "Origin": "http://127.0.0.1:8000"}
+
+    denied = client.post("/v1/jarvis/pair/invitations", headers={"Origin": "http://127.0.0.1:8000"})
+    assert denied.status_code == 401
+    bad_origin = client.post(
+        "/v1/jarvis/pair/invitations",
+        headers={"Authorization": "Bearer pairing-test-master-key", "Origin": "https://attacker.example"},
+    )
+    assert bad_origin.status_code == 403
+    unexpected = client.post(
+        "/v1/jarvis/pair/invitations",
+        headers=headers,
+        json={"transport": "wifi", "debug": True},
+    )
+    assert unexpected.status_code == 422
+    oversized = client.post(
+        "/v1/jarvis/pair/invitations",
+        headers={**headers, "Content-Type": "application/json"},
+        content=b"{" + b" " * 1025 + b"}",
+    )
+    assert oversized.status_code == 413
+    remote = TestClient(app=client.app, base_url="http://192.168.1.4:8000", client=("192.168.1.4", 12345))
+    assert remote.post("/v1/jarvis/pair/invitations", headers=headers).status_code == 403
+
+    response = client.post("/v1/jarvis/pair/invitations", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    payload = response.json()["qr_payload"]
+    assert set(payload) == {
+        "protocol", "server_url", "server_fingerprint", "server_public_key",
+        "invitation_id", "challenge", "expires_at", "server_signature",
+    }
+    assert payload["protocol"] == "openjarvis-pairing-v1"
+    assert payload["server_url"] == "http://127.0.0.1:8000"
+    signature = base64.b64decode(payload.pop("server_signature"), validate=True)
+    public_key = serialization.load_der_public_key(base64.b64decode(payload["server_public_key"], validate=True))
+    public_key.verify(signature, _canonical_pairing_payload(payload), ec.ECDSA(hashes.SHA256()))
+    store.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
+@pytest.mark.parametrize(
+    "bind,ssid,enabled,expected_status",
+    [
+        ("203.0.113.8", "HomeNet", "1", 409),
+        ("127.0.0.1", "HomeNet", "1", 409),
+        ("169.254.1.4", "HomeNet", "1", 409),
+        ("192.168.1.8", "OtherNet", "1", 409),
+        ("192.168.1.8", "HomeNet", "0", 409),
+    ],
+)
+def test_wifi_qr_refuses_invalid_or_disabled_gateway_configuration(
+    tmp_path, monkeypatch, bind, ssid, enabled, expected_status,
+):
+    client, store = _pairing_test_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ENABLED", enabled)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_INTERFACE", "en0")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_BIND_HOST", bind)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_PORT", "8443")
+    monkeypatch.setattr(wifi, "wifi_interface_ipv4_address", lambda _interface: "192.168.1.8")
+    monkeypatch.setattr(
+        "openjarvis.server.supervisor_routes.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=f"Current Wi-Fi Network: {ssid}\n"),
+    )
+    headers = {"Authorization": "Bearer pairing-test-master-key", "Origin": "http://127.0.0.1:8000"}
+    response = client.post(
+        "/v1/jarvis/pair/invitations", headers=headers, json={"transport": "wifi"},
+    )
+    assert response.status_code == expected_status
+    assert response.json().get("protocol") is None
+    assert store._db.execute("SELECT COUNT(*) FROM device_pairings").fetchone()[0] == 0
+    store.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
+def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_path, monkeypatch):
+    client, store = _pairing_test_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ENABLED", "1")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_INTERFACE", "en0")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_BIND_HOST", "192.168.1.8")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_PORT", "8443")
+    monkeypatch.setattr(wifi, "wifi_interface_ipv4_address", lambda _interface: "192.168.1.8")
+    monkeypatch.setattr(wifi, "local_gateway_hostname", lambda: "thozha-mac.local")
+    monkeypatch.setattr(
+        "openjarvis.server.supervisor_routes.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Current Wi-Fi Network: HomeNet\n"),
+    )
+    monkeypatch.setattr(
+        wifi,
+        "ensure_local_gateway_tls_identity",
+        lambda directory, hostname, *, port: SimpleNamespace(
+            hostname=hostname, port=port, certificate_sha256="sha256:" + "a" * 64,
+        ),
+    )
+    monkeypatch.setattr("socket.create_connection", lambda *_args, **_kwargs: contextlib.nullcontext())
+    headers = {"Authorization": "Bearer pairing-test-master-key", "Origin": "http://127.0.0.1:8000"}
+    response = client.post(
+        "/v1/jarvis/pair/invitations", headers=headers, json={"transport": "wifi"},
+    )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    payload = response.json()["qr_payload"]
+    assert set(payload) == {
+        "protocol", "server_url", "gateway_address", "gateway_port", "gateway_certificate_sha256",
+        "server_fingerprint", "server_public_key", "invitation_id", "challenge", "expires_at", "server_signature",
+    }
+    assert payload["protocol"] == "openjarvis-pairing-v2"
+    assert payload["server_url"] == "https://thozha-mac.local:8443"
+    assert payload["gateway_address"] == "192.168.1.8"
+    assert payload["gateway_port"] == "8443"
+    assert payload["gateway_certificate_sha256"] == "sha256:" + "a" * 64
+    unsigned = dict(payload)
+    signature = base64.b64decode(unsigned.pop("server_signature"), validate=True)
+    public_key = serialization.load_der_public_key(base64.b64decode(unsigned["server_public_key"], validate=True))
+    public_key.verify(signature, _canonical_pairing_payload(unsigned), ec.ECDSA(hashes.SHA256()))
+    unsigned["gateway_address"] = "192.168.1.9"
+    with pytest.raises(InvalidSignature):
+        public_key.verify(signature, _canonical_pairing_payload(unsigned), ec.ECDSA(hashes.SHA256()))
+    store.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
+@pytest.mark.parametrize("failure", ["hostname", "certificate", "listener"])
+def test_wifi_qr_rejects_unverifiable_tls_endpoint(tmp_path, monkeypatch, failure):
+    client, store = _pairing_test_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ENABLED", "1")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_INTERFACE", "en0")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_BIND_HOST", "192.168.1.8")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_PORT", "8443")
+    monkeypatch.setattr(wifi, "wifi_interface_ipv4_address", lambda _interface: "192.168.1.8")
+    monkeypatch.setattr(
+        "openjarvis.server.supervisor_routes.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Current Wi-Fi Network: HomeNet\n"),
+    )
+    monkeypatch.setattr(wifi, "local_gateway_hostname", lambda: "attacker.example" if failure == "hostname" else "thozha-mac.local")
+    fingerprint = "sha256:invalid" if failure == "certificate" else "sha256:" + "a" * 64
+    monkeypatch.setattr(
+        wifi,
+        "ensure_local_gateway_tls_identity",
+        lambda directory, hostname, *, port: SimpleNamespace(hostname=hostname, port=port, certificate_sha256=fingerprint),
+    )
+    if failure == "listener":
+        def unavailable(*_args, **_kwargs):
+            raise OSError("connection refused")
+        monkeypatch.setattr("socket.create_connection", unavailable)
+    else:
+        monkeypatch.setattr("socket.create_connection", lambda *_args, **_kwargs: contextlib.nullcontext())
+
+    headers = {"Authorization": "Bearer pairing-test-master-key", "Origin": "http://127.0.0.1:8000"}
+    response = client.post(
+        "/v1/jarvis/pair/invitations", headers=headers, json={"transport": "wifi"},
+    )
+    assert response.status_code == 409
+    assert store._db.execute("SELECT COUNT(*) FROM device_pairings").fetchone()[0] == 0
     store.close()
     monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)

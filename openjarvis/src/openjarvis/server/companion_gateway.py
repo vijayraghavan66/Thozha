@@ -85,21 +85,21 @@ def _device_id_for_request(request: Request, store: SupervisorStore) -> tuple[st
     return device_id, token
 
 
-async def _read_json_body(request: Request) -> dict[str, Any]:
+async def _read_json_body(request: Request, *, max_bytes: int = MAX_BODY_BYTES) -> dict[str, Any]:
     content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type != "application/json":
         raise HTTPException(status_code=415, detail="Content-Type must be application/json")
     content_length = request.headers.get("content-length")
     if content_length:
         try:
-            if int(content_length) > MAX_BODY_BYTES:
+            if int(content_length) > max_bytes:
                 raise HTTPException(status_code=413, detail="Request body is too large")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid Content-Length") from exc
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
-        if len(body) > MAX_BODY_BYTES:
+        if len(body) > max_bytes:
             raise HTTPException(status_code=413, detail="Request body is too large")
     try:
         value = json.loads(body)
@@ -108,6 +108,36 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object")
     return value
+
+
+async def _proxy_invitation(
+    request: Request,
+    *,
+    backend_path: str,
+    method: str,
+    body: bytes | None = None,
+) -> Response:
+    """Forward only one invitation-scoped bootstrap request without device credentials."""
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    try:
+        async with httpx.AsyncClient(
+            base_url=request.app.state.backend_url,
+            transport=request.app.state.backend_transport,
+            timeout=5.0,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            upstream = await client.request(method, backend_path, content=body, headers=headers)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Local pairing service is unavailable") from exc
+    content_type = upstream.headers.get("content-type", "application/json")
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers={"Content-Type": content_type, "Cache-Control": "no-store"},
+    )
 
 
 async def _proxy(
@@ -202,6 +232,61 @@ def create_gateway_app(
     else:
         canonical_origin = ""
     app.state.expected_identity_origin = canonical_origin
+
+    @app.post("/v1/jarvis/pair/{invitation_id}/complete")
+    async def complete_invitation_pairing(invitation_id: str, request: Request):
+        """Complete only a QR-scoped device proof; never accepts a token or arbitrary route."""
+        if request.query_params:
+            raise HTTPException(status_code=422, detail="Unexpected pairing query parameters")
+        if not _ID_RE.fullmatch(invitation_id):
+            raise HTTPException(status_code=404, detail="Pairing invitation not found")
+        body = await _read_json_body(request, max_bytes=2048)
+        if set(body) != {"device_name", "public_key", "signature"}:
+            raise HTTPException(status_code=422, detail="Unexpected pairing completion fields")
+        device_name, public_key, signature = body.get("device_name"), body.get("public_key"), body.get("signature")
+        if (
+            not isinstance(device_name, str) or not device_name.strip() or len(device_name) > 80
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in device_name)
+            or not isinstance(public_key, str) or not 80 <= len(public_key) <= 256
+            or not isinstance(signature, str) or not 40 <= len(signature) <= 1024
+        ):
+            raise HTTPException(status_code=422, detail="Pairing proof fields are invalid")
+        forwarded = json.dumps(
+            {"invitation_id": invitation_id, "device_name": device_name, "public_key": public_key, "signature": signature},
+            separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+        return await _proxy_invitation(
+            request, backend_path="/v1/jarvis/pair/complete", method="POST", body=forwarded,
+        )
+
+    @app.get("/v1/jarvis/pair/{invitation_id}/status")
+    async def get_invitation_pairing_status(invitation_id: str, request: Request):
+        """Expose only the lifecycle of the invitation named by the QR."""
+        if request.query_params:
+            raise HTTPException(status_code=422, detail="Unexpected pairing query parameters")
+        if not _ID_RE.fullmatch(invitation_id):
+            raise HTTPException(status_code=404, detail="Pairing invitation not found")
+        return await _proxy_invitation(
+            request, backend_path=f"/v1/jarvis/pair/status/{invitation_id}", method="GET",
+        )
+
+    @app.post("/v1/jarvis/pair/{invitation_id}/claim")
+    async def claim_invitation_pairing(invitation_id: str, request: Request):
+        """Issue a paired-device token only after the store's approved one-time proof."""
+        if request.query_params:
+            raise HTTPException(status_code=422, detail="Unexpected pairing query parameters")
+        if not _ID_RE.fullmatch(invitation_id):
+            raise HTTPException(status_code=404, detail="Pairing invitation not found")
+        body = await _read_json_body(request, max_bytes=1024)
+        if set(body) != {"signature"} or not isinstance(body.get("signature"), str) or not 40 <= len(body["signature"]) <= 1024:
+            raise HTTPException(status_code=422, detail="Pairing claim signature is invalid")
+        forwarded = json.dumps(
+            {"invitation_id": invitation_id, "signature": body["signature"]},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return await _proxy_invitation(
+            request, backend_path="/v1/jarvis/pair/claim", method="POST", body=forwarded,
+        )
 
     @app.get("/v1/jarvis/tasks")
     async def list_tasks(request: Request, state: str = "active", limit: int = 100):
