@@ -10,6 +10,7 @@ struct ConnectPhoneView: View {
     @State private var gatewayDisabled = false
     @State private var showRefreshConfirmation = false
     @State private var showPendingDevices = false
+    @State private var showPairedDevices = false
     private let service = PairingInvitationService()
 
     var body: some View {
@@ -21,6 +22,7 @@ struct ConnectPhoneView: View {
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("Paired phones") { showPairedDevices = true }
                 Button("Pending devices") { showPendingDevices = true }
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
             }
@@ -97,6 +99,9 @@ struct ConnectPhoneView: View {
         .frame(width: 560, height: 690)
         .sheet(isPresented: $showPendingDevices) {
             PendingDeviceConfirmationView()
+        }
+        .sheet(isPresented: $showPairedDevices) {
+            PairedDevicesView()
         }
     }
 

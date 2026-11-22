@@ -40,6 +40,14 @@ Only a direct owner tap on **Confirm** or **Reject** begins a decision. After th
 
 Tests use a fake transport and verify there is no decision POST from listing/polling, exact request method/path/body/Origin, expiry/replay errors, and safe device fields. No production endpoint or device decision was exercised.
 
+## Paired-phone management
+
+The **Paired phones** screen calls the loopback `GET /v1/jarvis/pair/devices` endpoint and displays only device ID, sanitized name, public-key fingerprint, created/expiry timestamps and server-reported status. It never retrieves or displays a raw public key or bearer token. Revocation is available only for a server-reported active row. Clicking **Revoke** opens a confirmation dialog; only its explicit confirmation starts a fresh GET and compares ID, name, fingerprint, creation/expiry and status before POSTing exactly `{"confirm":true}` to `/v1/jarvis/pair/devices/{id}/revoke`.
+
+HTTP 404/409 are reported as missing/conflicting state. HTTP 503 on the revoke endpoint is reported distinctly: the backend may already have revoked device access while FCM cleanup remains pending. The screen refreshes afterward and does not represent the 503 as rollback or successful cleanup.
+
+Fake-transport tests verify request shapes, no revoke POST from a list read, changed/expired/revoked row refusal, and the post-revocation 503 outcome. No production device list or revocation request was made.
+
 ## Verification boundary
 
 Swift tests use fixed v1 and v2 signed fixtures, plus fake transports; they do not call the production invitation endpoint, enable the gateway, enroll a device, or mutate pairing state. The test-only v2 signer was ephemeral and its private key was not retained.
