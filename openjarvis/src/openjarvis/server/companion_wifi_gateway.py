@@ -153,14 +153,15 @@ def serve() -> None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    debug_logging = os.environ.get("JARVIS_COMPANION_WIFI_DEBUG", "").strip() == "1"
     server = uvicorn.Server(uvicorn.Config(
         create_gateway_app(),
         host=bind_host,
         port=port,
         ssl_certfile=str(tls_identity.certificate_path),
         ssl_keyfile=str(tls_identity.private_key_path),
-        log_level="warning",
-        access_log=False,
+        log_level="info" if debug_logging else "warning",
+        access_log=debug_logging,
         proxy_headers=False,
     ))
     stop = threading.Event()

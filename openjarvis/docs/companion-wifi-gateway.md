@@ -30,6 +30,8 @@ uv run python -m openjarvis.server.companion_wifi_gateway
 
 Stop the process with Ctrl-C after the test. Do not use `0.0.0.0`, a public address, or an unverified/managed network. The gateway is not installed as a LaunchAgent and was not started during code verification. There is no consumer setup flow yet.
 
+For a short diagnostic run only, `JARVIS_COMPANION_WIFI_DEBUG=1` enables Uvicorn info/access metadata (peer address, method/path, and status). It does not log request bodies, authorization headers, tokens, or keys. Leave this unset in any persistent service.
+
 ## Verification state
 
 The offline gateway and Wi-Fi identity test suites are in `tests/server/test_companion_gateway.py` and `tests/server/test_companion_wifi.py`. These validate token authorization, route/method allowlisting, request bounds, identity bootstrap/signature, TLS certificate generation and private-key modes, bind restrictions, and refusal of public/wildcard addresses. Passing these tests does not verify a real network path; that requires the Mac and Samsung on the same approved Wi-Fi, a verified certificate pin, and a request with ADB reverse absent.
