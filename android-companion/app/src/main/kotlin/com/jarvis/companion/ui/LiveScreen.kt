@@ -219,6 +219,11 @@ fun LiveScreen(store: JarvisStore) {
                                 store.lastSyncError.isBlank() -> "No error reported"
                                 else -> store.lastSyncError
                             },
+                            "Mac API result" to when {
+                                !store.macApiPaired -> "Not paired"
+                                store.macApiSyncError.isBlank() -> "No error reported"
+                                else -> store.macApiSyncError.take(200)
+                            },
                             "Telegram sign-in" to authLabel(telegram?.auth),
                             "Pending Telegram pings" to (telegram?.pendingPings?.toString() ?: "Unknown"),
                         ),
