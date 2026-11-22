@@ -420,7 +420,7 @@ class LinkRuntime(
     fun recordTaskLifecycle(requestId: String, supervisorTaskId: String, state: String, summary: String, target: String = "MAC", eventId: String? = null) = synchronized(stateLock) {
         require(requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid request ID" }
         require(target in setOf("PHONE", "MAC")) { "invalid execution target" }
-        recordTaskLifecycleLocked(requestId, supervisorTaskId, state, summary, target, eventId ?: "$requestId:${state.uppercase()}:$supervisorTaskId:${now()}")
+        recordTaskLifecycleLocked(requestId, supervisorTaskId, state, summary, target, eventId ?: "$requestId:${state.uppercase()}:$supervisorTaskId")
     }
 
     /** Records the Mac's actual supervisor result or the last known task state. */

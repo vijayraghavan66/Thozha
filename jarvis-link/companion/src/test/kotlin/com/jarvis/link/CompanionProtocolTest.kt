@@ -596,6 +596,8 @@ object CompanionProtocolTest {
         check(task["status"] == "COMPLETED" && task["created_at_unix_ms"] == 1_800_000_000_000L)
         val lifecycle = recovered.taskEventHistory().filter { it["task_id"] == requestId }
         check(lifecycle.map { it["status"] } == listOf("CREATED", "COMPLETED")) { "durable task lifecycle events were not preserved: $lifecycle" }
+        first.recordLocalTaskResult(requestId, taskId, "COMPLETED", "Java is a programming language.")
+        check(recovered.taskEventHistory().count { it["event_id"] == "$requestId:COMPLETED:$taskId" } == 1) { "repeated terminal status duplicated lifecycle event" }
         val phoneId = "local-phone-task-20261122-000000000001"
         first.recordLocalTaskRequest(phoneId, "calculate 19 * 7", executionTarget = "PHONE")
         check(first.conversation().first { it["message_id"] == phoneId }["lookup_link_status"] == false) { "phone task must not be probed on Mac" }
