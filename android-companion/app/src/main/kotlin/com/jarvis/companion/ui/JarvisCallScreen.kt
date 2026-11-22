@@ -23,6 +23,7 @@ import com.jarvis.companion.voice.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
@@ -38,15 +39,18 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
     var started by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     var seconds by remember { mutableIntStateOf(0) }
     var pending by remember { mutableStateOf(false) }
+    var missedUtterances by remember { mutableIntStateOf(0) }
+    var retryJob by remember { mutableStateOf<Job?>(null) }
     val settings = remember(context) { context.getSharedPreferences("jarvis_voice", Context.MODE_PRIVATE) }
     var sid by remember { mutableIntStateOf(settings.getInt("kokoro_sid", 5)) }
     val voiceName = when(sid) { 1 -> "af_bella"; 6 -> "am_michael"; 9 -> "bm_george"; 10 -> "bm_lewis"; else -> "am_adam" }
     var controller by remember { mutableStateOf<JarvisVoiceController?>(null) }
     val created = remember(context) { JarvisVoiceController(context, object : JarvisVoiceController.Listener {
         override fun onStateChanged(value: VoiceControllerState) { state = value }
-        override fun onPartialText(text: String) { transcript = text }
+        override fun onPartialText(text: String) { transcript = text; missedUtterances = 0; retryJob?.cancel(); response = "" }
         override fun onBargeInDetected() { response = "Interrupted"; pending = false }
         override fun onFinalText(text: String) {
+            retryJob?.cancel(); missedUtterances = 0
             transcript = text; pending = true
             android.util.Log.i("JarvisCall", "event=transcript_final chars=${text.length} elapsed_ms=${SystemClock.elapsedRealtime()}")
             if (WeatherIntentRouter.isWeatherRequest(text)) {
@@ -68,10 +72,35 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
                 pending = false
             }
         }
-        override fun onError(error: VoiceControllerError) { response = "Voice error: $error"; pending = false }
+        override fun onError(error: VoiceControllerError) {
+            pending = false
+            if (VoiceRecognitionRetryPolicy.isRecoverable(error) && active && !muted) {
+                missedUtterances += 1
+                val wait = VoiceRecognitionRetryPolicy.delayMs(missedUtterances)
+                response = if (missedUtterances <= 2) "Didn't catch that. Listening again…" else "Still here. Listening again…"
+                android.util.Log.i("JarvisVoiceSession", "event=recoverable_recognition_error error=$error retry=$missedUtterances delay_ms=$wait")
+                retryJob?.cancel()
+                retryJob = scope.launch {
+                    delay(wait)
+                    if (active && !muted && state == VoiceControllerState.ERROR) {
+                        android.util.Log.i("JarvisVoiceSession", "event=recognition_retry attempt=$missedUtterances elapsed_ms=${SystemClock.elapsedRealtime()}")
+                        if (controller?.startVoiceTurn() != true) response = "Microphone is unavailable. Tap Start again when ready."
+                    }
+                }
+            } else {
+                response = when (error) {
+                    VoiceControllerError.PERMISSION_REQUIRED -> "Microphone permission is needed to continue this call."
+                    VoiceControllerError.RECOGNIZER_UNAVAILABLE -> "Speech recognition is unavailable on this device."
+                    VoiceControllerError.MICROPHONE_UNAVAILABLE -> "The microphone could not start. Check whether another app is using it."
+                    VoiceControllerError.NETWORK_OR_SERVICE -> "The speech service is unavailable right now."
+                    else -> "Voice needs attention. You can keep the call open or hang up."
+                }
+                android.util.Log.w("JarvisVoiceSession", "event=recognition_unrecoverable error=$error elapsed_ms=${SystemClock.elapsedRealtime()}")
+            }
+        }
     }) }
     SideEffect { controller = created }
-    DisposableEffect(created) { onDispose { active = false; created.cancel(); created.close() } }
+    DisposableEffect(created) { onDispose { active = false; retryJob?.cancel(); created.cancel(); created.close() } }
     LaunchedEffect(active) { while(active) { seconds = ((SystemClock.elapsedRealtime()-started)/1000).toInt(); delay(1000) } }
     LaunchedEffect(state, pending, muted, active) {
         if (active && !muted && !pending && state == VoiceControllerState.IDLE) {

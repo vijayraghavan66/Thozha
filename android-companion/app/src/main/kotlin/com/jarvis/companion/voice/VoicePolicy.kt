@@ -58,6 +58,12 @@ internal object VoicePolicy {
     }
 }
 
+internal object VoiceRecognitionRetryPolicy {
+    fun isRecoverable(error: VoiceControllerError): Boolean = error == VoiceControllerError.NO_MATCH || error == VoiceControllerError.SPEECH_TIMEOUT
+    /** Exponential, bounded delay avoids a hot restart loop while keeping a live call recoverable. */
+    fun delayMs(failedAttempts: Int): Long = (750L shl (failedAttempts.coerceAtLeast(1) - 1).coerceAtMost(3)).coerceAtMost(6_000L)
+}
+
 internal object VoiceFocusPolicy {
     /** Android reports all focus-loss variants as negative changes, including permanent loss (-1). */
     fun shouldStop(change: Int): Boolean = change < 0

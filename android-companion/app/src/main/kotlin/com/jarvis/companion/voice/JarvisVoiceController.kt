@@ -137,6 +137,7 @@ class JarvisVoiceController(
             return false
         }
         if (state == VoiceControllerState.LISTENING) return captureMode == mode
+        android.util.Log.i("JarvisVoiceSession", "event=recognition_start_requested mode=$mode elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
         val outputWasSpeaking = state == VoiceControllerState.SPEAKING && activeUtteranceId != null
         if (mode == CaptureMode.BARGE_IN && !outputWasSpeaking) return false
         if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
@@ -298,8 +299,11 @@ class JarvisVoiceController(
     private fun recognitionListener(owner: SpeechRecognizer, generation: Long) = object : RecognitionListener {
         private fun current() = !closed && recognizer === owner && sessionGeneration.isCurrent(generation)
 
-        override fun onReadyForSpeech(params: Bundle?) { }
+        override fun onReadyForSpeech(params: Bundle?) {
+            if (current()) android.util.Log.i("JarvisVoiceSession", "event=recognizer_ready provider=$activeRecognitionProvider elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
+        }
         override fun onBeginningOfSpeech() {
+            if (current()) android.util.Log.i("JarvisVoiceSession", "event=speech_begin elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
             if (current() && captureMode == CaptureMode.BARGE_IN && bargeInGate.onSpeechStarted()) {
                 stopTts(preserveCapture = true)
                 postIfCurrent(generation) { listener.onBargeInDetected() }
@@ -342,6 +346,7 @@ class JarvisVoiceController(
 
         override fun onError(error: Int) {
             if (!current()) return
+            android.util.Log.i("JarvisVoiceSession", "event=recognizer_error android_code=$error mapped=${mapRecognitionError(error)} elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
             val completedGeneration = sessionGeneration.invalidate()
             recognizer = null
             captureMode = null
@@ -497,6 +502,7 @@ class JarvisVoiceController(
     private fun setState(next: VoiceControllerState, generation: Long? = null) {
         if (closed || state == next) return
         state = next
+        android.util.Log.i("JarvisVoiceSession", "event=state state=$next elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
         post {
             if (!closed && (generation == null || sessionGeneration.isCurrent(generation))) listener.onStateChanged(next)
         }
