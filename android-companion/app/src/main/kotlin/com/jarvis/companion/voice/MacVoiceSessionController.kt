@@ -62,6 +62,8 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
     @Volatile private var muted = false
     @Volatile private var awaitingResponse = false
     @Volatile private var assistantAudioActive = false
+    @Volatile private var inputTurnId = 0L
+    @Volatile private var currentInputTurnId = -1L
     private var recordThread: Thread? = null
     private var recorder: AudioRecord? = null
     private var echoCanceler: AcousticEchoCanceler? = null
@@ -69,7 +71,7 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
     private var track: AudioTrack? = null
     private var trackRate = 0
     private val outputSequence = VoiceOutputSequence()
-    private var inputSequence = 0L
+    private val outputTurnGate = VoiceOutputTurnGate()
     private var focusRequest: AudioFocusRequest? = null
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         if (change <= AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) interrupt()
@@ -89,7 +91,7 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
         socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "event=socket_open session=$sessionId transport=${endpoint.transport} elapsed_ms=${SystemClock.elapsedRealtime()}")
-                webSocket.send(JSONObject().put("type", "start").put("protocol", 1).put("session_id", sessionId)
+                webSocket.send(JSONObject().put("type", "start").put("protocol", 2).put("session_id", sessionId)
                     .put("device_id", deviceId).put("sample_rate", 16_000).put("channels", 1).toString())
             }
 
@@ -123,25 +125,33 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
 
     fun respond(speaker: String) {
         if (speaker !in setOf("Ryan", "Aiden", "Vivian", "Serena")) return fail("That Mac voice is unavailable.")
-        sendControl("respond", "speaker" to speaker)
+        val inputId = currentInputTurnId
+        if (inputId < 0) return fail("There is no current recognized voice turn to answer.")
+        sendControl("respond", "input_turn_id" to inputId, "speaker" to speaker)
     }
 
     fun speakLocalResult(text: String, speaker: String) {
         if (speaker !in setOf("Ryan", "Aiden", "Vivian", "Serena") || text.isBlank() || text.length > 2_000) {
             return fail("The local response could not be sent to the selected Mac voice.")
         }
-        sendControl("local_speech", "speaker" to speaker, "text" to text)
+        val inputId = currentInputTurnId
+        if (inputId < 0) return fail("The recognized voice turn is no longer current.")
+        sendControl("local_speech", "input_turn_id" to inputId, "speaker" to speaker, "text" to text)
     }
 
     fun completeLocally() {
         awaitingResponse = false
-        sendControl("local_complete")
+        val inputId = currentInputTurnId
+        if (inputId >= 0) sendControl("local_complete", "input_turn_id" to inputId)
+        currentInputTurnId = -1L
     }
 
     fun setMuted(value: Boolean) {
         muted = value
         if (value) {
             awaitingResponse = false
+            currentInputTurnId = -1L
+            outputTurnGate.invalidate()
             sendControl("interrupt")
             stopPlayback()
             publishState(MacVoiceLinkState.LISTENING)
@@ -152,7 +162,8 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
     fun interrupt() {
         if (closed) return
         awaitingResponse = false
-        inputSequence = 0
+        currentInputTurnId = -1L
+        outputTurnGate.invalidate()
         sendControl("interrupt")
         stopPlayback()
         publishState(MacVoiceLinkState.LISTENING)
@@ -165,7 +176,7 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
         when (json.optString("type")) {
             "session_ready" -> {
                 val sample = json.optInt("sample_rate")
-                if (sample != 16_000) return fail("Mac voice input format was not accepted.")
+                if (sample != 16_000 || json.optInt("protocol") != 2) return fail("Mac voice input format was not accepted.")
                 if (startCapture()) {
                     Log.i(TAG, "event=session_ready session=$sessionId tts_load_ms=${json.optLong("tts_load_ms", -1)} elapsed_ms=${SystemClock.elapsedRealtime()}")
                     publishState(MacVoiceLinkState.LISTENING)
@@ -175,30 +186,43 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
             "processing" -> publishState(MacVoiceLinkState.PROCESSING)
             "transcript" -> {
                 val transcript = json.optString("text")
+                currentInputTurnId = json.optLong("input_turn_id", -1L)
+                if (currentInputTurnId < 0) return fail("Mac voice omitted the current turn identity.")
                 awaitingResponse = true
                 publishState(MacVoiceLinkState.PROCESSING)
                 Log.i(TAG, "event=transcript_received chars=${transcript.length} asr_ms=${json.optLong("asr_ms", -1)} elapsed_ms=${SystemClock.elapsedRealtime()}")
                 main.post { listener.onTranscript(transcript) }
             }
             "thinking" -> {
+                val outputTurnId = json.optLong("output_turn_id", -1L)
+                if (outputTurnId < 0) return fail("Mac voice omitted the output turn identity.")
+                outputTurnGate.activate(outputTurnId)
                 outputSequence.reset()
                 publishState(MacVoiceLinkState.PROCESSING)
             }
             "response_text" -> {
+                if (!outputTurnGate.accepts(json.optLong("output_turn_id", -1L))) return
                 val text = json.optString("text")
                 main.post { listener.onResponseText(text) }
             }
             "speaking" -> {
+                if (!outputTurnGate.accepts(json.optLong("output_turn_id", -1L))) return
                 assistantAudioActive = true
                 publishState(MacVoiceLinkState.SPEAKING)
             }
             "turn_complete" -> {
+                val outputId = json.optLong("output_turn_id", -1L)
+                if (outputId >= 0 && !outputTurnGate.accepts(outputId)) return
                 awaitingResponse = false
+                currentInputTurnId = -1L
                 if (track != null) drainPlayback() else publishState(MacVoiceLinkState.LISTENING)
             }
             "interrupted", "no_match" -> {
                 awaitingResponse = false
+                currentInputTurnId = -1L
+                outputTurnGate.invalidate()
                 assistantAudioActive = false
+                outputSequence.reset()
                 stopPlayback()
                 publishState(MacVoiceLinkState.LISTENING)
                 if (json.optString("type") == "interrupted") main.post { if (!closed) listener.onInterrupted() }
@@ -255,6 +279,7 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
         var voicedFrames = 0
         var silenceFrames = 0
         var seq = 0L
+        var turnId = inputTurnId
         while (running && !closed) {
             val read = record.read(frame, 0, frame.size, AudioRecord.READ_BLOCKING)
             if (read <= 0) continue
@@ -271,6 +296,8 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
                 if (voicedFrames >= 2) {
                     if (awaitingResponse || assistantAudioActive) {
                         awaitingResponse = false
+                        currentInputTurnId = -1L
+                        outputTurnGate.invalidate()
                         stopPlayback()
                         sendControl("interrupt")
                         Log.i(TAG, "event=barge_in_detected rms=${rms.toInt()} elapsed_ms=${SystemClock.elapsedRealtime()}")
@@ -278,34 +305,37 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
                     activeVoice = true
                     silenceFrames = 0
                     seq = 0
-                    inputSequence = 0
-                    preRoll.forEach { samples -> sendPcm(samples, samples.size, seq++) }
+                    turnId = inputTurnId
+                    preRoll.forEach { samples -> sendPcm(turnId, samples, samples.size, seq++) }
                 }
             } else {
-                sendPcm(copy, read, seq++)
-                inputSequence = seq
+                sendPcm(turnId, copy, read, seq++)
                 silenceFrames = if (voiceDetected) 0 else silenceFrames + 1
                 if (silenceFrames >= 35) {
                     activeVoice = false
                     voicedFrames = 0
-                    sendControl("end_turn", "next_sequence" to seq)
+                    sendControl("end_turn", "input_turn_id" to turnId, "next_sequence" to seq)
                     awaitingResponse = true
-                    inputSequence = 0
+                    inputTurnId = turnId + 1
                     Log.i(TAG, "event=speech_end frames=$seq elapsed_ms=${SystemClock.elapsedRealtime()}")
                 }
             }
         }
     }
 
-    private fun sendPcm(samples: ShortArray, count: Int, sequence: Long) {
+    private fun sendPcm(turnId: Long, samples: ShortArray, count: Int, sequence: Long) {
         if (count <= 0 || count * 2 + VoicePcmProtocol.HEADER_BYTES > 64 * 1024) return
-        val frame = VoicePcmProtocol.encodePhoneFrame(sequence, SystemClock.elapsedRealtime(), samples, count)
+        val frame = VoicePcmProtocol.encodePhoneFrame(turnId, sequence, SystemClock.elapsedRealtime(), samples, count)
         if (socket?.send(ByteString.of(*frame)) != true) Log.w(TAG, "event=input_frame_send_failed seq=$sequence")
     }
 
     private fun playFrame(frame: VoicePcmFrame) {
+        if (!outputTurnGate.accepts(frame.turnId)) {
+            Log.i(TAG, "event=stale_audio_frame_ignored frame_turn=${frame.turnId} seq=${frame.sequence}")
+            return
+        }
         if (closed || !outputSequence.accept(frame.sequence)) {
-            Log.w(TAG, "event=output_sequence_mismatch actual=${frame.sequence}")
+            Log.w(TAG, "event=output_sequence_mismatch turn=${frame.turnId} actual=${frame.sequence}")
             interrupt()
             return
         }
