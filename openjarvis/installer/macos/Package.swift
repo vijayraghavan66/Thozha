@@ -12,7 +12,7 @@ let package = Package(
     targets: [
         .target(name: "ThozhaInstallerCore"),
         .executableTarget(name: "ThozhaSetup", dependencies: ["ThozhaInstallerCore"]),
-        .executableTarget(name: "ThozhaGatewaySupervisor"),
+        .executableTarget(name: "ThozhaGatewaySupervisor", dependencies: ["ThozhaInstallerCore"]),
         .testTarget(name: "ThozhaInstallerCoreTests", dependencies: ["ThozhaInstallerCore"], resources: [.copy("Fixtures")])
     ]
 )

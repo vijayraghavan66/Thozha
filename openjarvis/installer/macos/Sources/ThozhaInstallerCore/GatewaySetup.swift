@@ -170,6 +170,44 @@ public enum GatewayPreflight {
     }
 }
 
+public protocol CurrentWiFiSSIDReading {
+    func currentSSID(interfaceName: String) -> String?
+}
+
+public struct CoreWLANCurrentWiFiSSIDReader: CurrentWiFiSSIDReading {
+    public init() { }
+
+    public func currentSSID(interfaceName: String) -> String? {
+        guard interfaceName.range(of: #"^[A-Za-z0-9._-]{1,32}$"#, options: .regularExpression) != nil,
+              let interface = CWWiFiClient.shared().interface(withName: interfaceName),
+              interface.powerOn(), interface.interfaceMode() == .station,
+              let ssid = interface.ssid(), GatewaySSIDHelper.isSafeSSID(ssid) else { return nil }
+        return ssid
+    }
+}
+
+/// Pure command and output validation shared by the bundled helper and tests.
+/// Missing CoreWLAN/TCC data is represented only as failure; there is no fallback.
+public enum GatewaySSIDHelper {
+    public static func output(arguments: [String], reader: any CurrentWiFiSSIDReading) -> String? {
+        guard arguments.count == 2, arguments[0] == "--ssid",
+              arguments[1].range(of: #"^[A-Za-z0-9._-]{1,32}$"#, options: .regularExpression) != nil,
+              let ssid = reader.currentSSID(interfaceName: arguments[1]), isSafeSSID(ssid) else { return nil }
+        return ssid + "\n"
+    }
+
+    public static func isSafeSSID(_ ssid: String) -> Bool {
+        !ssid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && ssid.utf8.count <= 128
+            && !ssid.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
+    }
+
+    public static func matchesAllowedSSID(_ currentSSID: String?, allowedSSID: String) -> Bool {
+        guard isSafeSSID(allowedSSID), let currentSSID, isSafeSSID(currentSSID) else { return false }
+        return currentSSID == allowedSSID
+    }
+}
+
 @MainActor public final class GatewayLocationPermissionRequester: NSObject, ObservableObject, @preconcurrency CLLocationManagerDelegate {
     @Published public private(set) var authorization: GatewayLocationAuthorization = .notDetermined
     private let manager = CLLocationManager()
@@ -374,13 +412,14 @@ public enum GatewayLaunchAgentPlanner {
             "JARVIS_COMPANION_WIFI_PORT": "8443",
             "JARVIS_COMPANION_WIFI_HOSTNAME": configuration.hostname,
             "JARVIS_COMPANION_TLS_PROXY_PYTHON": runtime.tlsPython.path,
+            "JARVIS_COMPANION_WIFI_SSID_HELPER": runtime.shutdownSupervisor.path,
             "PATH": runtime.launchdPath,
         ]
         let plist: [String: Any] = [
             "Label": label,
             "ProgramArguments": [runtime.shutdownSupervisor.path, runtime.openJarvisPython.path, "-m", "openjarvis.server.companion_wifi_gateway"],
             "RunAtLoad": true,
-            "KeepAlive": false,
+            "KeepAlive": true,
             "ProcessType": "Background",
             "ThrottleInterval": 30,
             "EnvironmentVariables": environment,

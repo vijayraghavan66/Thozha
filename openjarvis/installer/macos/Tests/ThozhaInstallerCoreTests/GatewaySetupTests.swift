@@ -2,6 +2,16 @@ import Foundation
 import XCTest
 @testable import ThozhaInstallerCore
 
+private struct FakeSSIDReader: CurrentWiFiSSIDReading {
+    let current: String?
+    func currentSSID(interfaceName: String) -> String? { current }
+}
+
+private struct FixedCurrentSSIDReader: CurrentWiFiSSIDReading {
+    let value: String?
+    func currentSSID(interfaceName: String) -> String? { value }
+}
+
 private final class RecordingGatewayFiles: GatewayServiceFileOperations, @unchecked Sendable {
     private let lock = NSLock()
     private var contents: [String: Data] = [:]
@@ -114,6 +124,28 @@ final class GatewaySetupTests: XCTestCase {
         XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: nil, auth: .authorized), installationID: installID), .failure(.ssidUnavailable))
     }
 
+    func testBundledSSIDHelperModeOutputsOnlyCurrentSSIDAndFailsClosed() {
+        XCTAssertEqual(GatewaySSIDHelper.output(arguments: ["--ssid", "en0"], reader: FakeSSIDReader(current: "My Home WiFi")), "My Home WiFi\n")
+        XCTAssertNil(GatewaySSIDHelper.output(arguments: ["--ssid", "en0"], reader: FakeSSIDReader(current: nil)))
+        XCTAssertNil(GatewaySSIDHelper.output(arguments: ["--ssid", "en0"], reader: FakeSSIDReader(current: "Hidden\nNetwork")))
+        XCTAssertNil(GatewaySSIDHelper.output(arguments: ["--ssid", "../en0"], reader: FakeSSIDReader(current: "My Home WiFi")))
+        XCTAssertNil(GatewaySSIDHelper.output(arguments: ["--ssid", "en0", "extra"], reader: FakeSSIDReader(current: "My Home WiFi")))
+        XCTAssertTrue(GatewaySSIDHelper.matchesAllowedSSID("My Home WiFi", allowedSSID: "My Home WiFi"))
+        XCTAssertFalse(GatewaySSIDHelper.matchesAllowedSSID("Guest", allowedSSID: "My Home WiFi"))
+        XCTAssertFalse(GatewaySSIDHelper.matchesAllowedSSID(nil, allowedSSID: "My Home WiFi"))
+    }
+
+    func testSSIDHelperStrictModePrintsOnlySSIDAndFailsClosed() {
+        XCTAssertEqual(GatewaySSIDHelper.output(arguments: ["--ssid", "en0"], reader: FixedCurrentSSIDReader(value: "HomeNet")), "HomeNet\n")
+        XCTAssertNil(GatewaySSIDHelper.output(arguments: ["--ssid", "en0", "extra"], reader: FixedCurrentSSIDReader(value: "HomeNet")))
+        XCTAssertNil(GatewaySSIDHelper.output(arguments: ["--ssid", "../../etc"], reader: FixedCurrentSSIDReader(value: "HomeNet")))
+        XCTAssertNil(GatewaySSIDHelper.output(arguments: ["--ssid", "en0"], reader: FixedCurrentSSIDReader(value: nil)))
+        XCTAssertNil(GatewaySSIDHelper.output(arguments: ["--ssid", "en0"], reader: FixedCurrentSSIDReader(value: "Hidden\nSSID")))
+        XCTAssertTrue(GatewaySSIDHelper.matchesAllowedSSID("HomeNet", allowedSSID: "HomeNet"))
+        XCTAssertFalse(GatewaySSIDHelper.matchesAllowedSSID("Guest", allowedSSID: "HomeNet"))
+        XCTAssertFalse(GatewaySSIDHelper.matchesAllowedSSID(nil, allowedSSID: "HomeNet"))
+    }
+
     func testPreflightRejectsInvalidSSIDAndPublicOrLoopbackAddresses() {
         XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: ""), installationID: installID), .failure(.invalidSSID))
         XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: "Home\nInjected"), installationID: installID), .failure(.invalidSSID))
@@ -141,7 +173,7 @@ final class GatewaySetupTests: XCTestCase {
         XCTAssertEqual(plan.environmentKeys, [
             "JARVIS_COMPANION_WIFI_ENABLED", "JARVIS_COMPANION_WIFI_INTERFACE", "JARVIS_COMPANION_WIFI_ALLOWED_SSID",
             "JARVIS_COMPANION_WIFI_BIND_HOST", "JARVIS_COMPANION_WIFI_PORT", "JARVIS_COMPANION_WIFI_HOSTNAME",
-            "JARVIS_COMPANION_TLS_PROXY_PYTHON", "PATH",
+            "JARVIS_COMPANION_TLS_PROXY_PYTHON", "JARVIS_COMPANION_WIFI_SSID_HELPER", "PATH",
         ])
         XCTAssertTrue(GatewayLaunchAgentPlanner.activationEnabled)
 
@@ -149,7 +181,8 @@ final class GatewaySetupTests: XCTestCase {
         let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
         XCTAssertEqual(plist["Label"] as? String, "com.thozha.companion-wifi-gateway")
         XCTAssertEqual(plist["RunAtLoad"] as? Bool, true)
-        XCTAssertEqual(plist["KeepAlive"] as? Bool, false)
+        XCTAssertEqual(plist["KeepAlive"] as? Bool, true)
+        XCTAssertEqual(plist["ThrottleInterval"] as? Int, 30)
         XCTAssertEqual(plist["ProgramArguments"] as? [String], [runtime.shutdownSupervisor.path, runtime.openJarvisPython.path, "-m", "openjarvis.server.companion_wifi_gateway"])
         let environment = try XCTUnwrap(plist["EnvironmentVariables"] as? [String: String])
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_ENABLED"], "1")
@@ -158,6 +191,7 @@ final class GatewaySetupTests: XCTestCase {
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_PORT"], "8443")
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_HOSTNAME"], "thozha-12345678.local")
         XCTAssertEqual(environment["JARVIS_COMPANION_TLS_PROXY_PYTHON"], runtime.tlsPython.path)
+        XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_SSID_HELPER"], runtime.shutdownSupervisor.path)
         XCTAssertNil(environment["OPENJARVIS_API_KEY"])
         XCTAssertNil(environment["SUPERVISOR_API_KEY"])
         XCTAssertNil(environment["JARVIS_DEV_WORKER_CONFIG"])
