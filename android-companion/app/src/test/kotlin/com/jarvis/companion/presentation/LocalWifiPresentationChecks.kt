@@ -23,6 +23,11 @@ object LocalWifiPresentationChecks {
         val actualWifiRequest = LocalWifiPresentation.state(true, true, true, "wifi")
         check(actualWifiRequest.latestRouteLabel == "Last confirmed request used Wi-Fi")
 
+        check(ConnectionRoutePresentation.label("wifi", "Legacy fallback") == "Local Wi-Fi")
+        check(ConnectionRoutePresentation.label("usb", "Legacy fallback") == "Local USB")
+        check(ConnectionRoutePresentation.label("tailscale", "Legacy fallback") == "Private Tailscale")
+        check(ConnectionRoutePresentation.label("", "Legacy fallback") == "Legacy fallback")
+
         val unknownRoute = LocalWifiPresentation.state(true, true, false, "")
         check(unknownRoute.latestRouteLabel == "No successful Mac route recorded yet")
 

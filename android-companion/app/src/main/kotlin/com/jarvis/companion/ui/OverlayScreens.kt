@@ -51,6 +51,7 @@ import com.jarvis.companion.localai.LocalAiManager
 import com.jarvis.companion.localai.LocalAiPhase
 import com.jarvis.companion.localai.AndroidDeviceProfileReader
 import com.jarvis.companion.localai.LocalModelCatalog
+import com.jarvis.companion.presentation.ConnectionRoutePresentation
 import com.jarvis.companion.link.LinkAlerts
 import com.jarvis.companion.link.LinkSettings
 import com.jarvis.companion.link.AssistantNamePolicy
@@ -83,7 +84,7 @@ fun SettingsScreen(store: JarvisStore, onClose: () -> Unit) {
             item {
                 FactCard(
                     listOf(
-                        "Route" to modeLabel(settings.mode),
+                        "Route" to ConnectionRoutePresentation.label(store.lastMacApiTransport, modeLabel(settings.mode)),
                         "Relay" to settings.relayUrl,
                         "Telegram" to telegramConnectionLabel(telegram?.connection),
                         "Last sync" to if (store.lastSyncMs > 0L) "${clockTime(store.lastSyncMs)} (${ageLabel(store.now - store.lastSyncMs)})" else "Not yet",

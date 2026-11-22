@@ -44,6 +44,7 @@ import com.jarvis.companion.data.LocalGatewayDiscovery
 import com.jarvis.companion.AdvancedActivity
 import com.jarvis.companion.localai.AndroidDeviceProfileReader
 import com.jarvis.companion.presentation.MacLinkPresentation
+import com.jarvis.companion.presentation.ConnectionRoutePresentation
 import com.jarvis.companion.presentation.LocalWifiPresentation
 import com.jarvis.companion.presentation.TaskTone
 import com.jarvis.companion.voice.JarvisVoiceController
@@ -132,7 +133,7 @@ fun LiveScreen(store: JarvisStore) {
             item {
                 FactCard(
                     listOf(
-                        "Route" to modeLabel(settings.mode),
+                        "Route" to ConnectionRoutePresentation.label(store.lastMacApiTransport, modeLabel(settings.mode)),
                         "Telegram" to telegramConnectionLabel(telegram?.connection),
                         "Last successful sync" to if (maxOf(store.lastSyncMs, store.macApiLastSyncMs) > 0L && (store.macApiSyncError.isBlank() || !store.macApiPaired)) {
                             val latest = maxOf(store.lastSyncMs, store.macApiLastSyncMs)

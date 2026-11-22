@@ -28,3 +28,12 @@ data class LocalWifiPresentation(
         }
     }
 }
+
+object ConnectionRoutePresentation {
+    fun label(lastSuccessfulMacRoute: String, fallback: String): String = when (lastSuccessfulMacRoute.lowercase()) {
+        "usb" -> "Local USB"
+        "wifi" -> "Local Wi-Fi"
+        "tailscale" -> "Private Tailscale"
+        else -> fallback.ifBlank { "Not checked yet" }
+    }
+}
