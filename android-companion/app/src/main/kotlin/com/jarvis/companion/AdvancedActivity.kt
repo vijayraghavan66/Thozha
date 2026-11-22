@@ -296,7 +296,7 @@ class AdvancedActivity : ComponentActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val brand = text("JARVIS  /  COMPANION", 12, color(R.color.signal), bold = true).apply {
+        val brand = text("THOZHA  /  COMPANION", 12, color(R.color.signal), bold = true).apply {
             letterSpacing = 0.08f
         }
         top.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
@@ -324,7 +324,7 @@ class AdvancedActivity : ComponentActivity() {
             Screen.APPROVALS -> "Check the exact action before deciding"
             Screen.ACTIVITY -> "Recent task events from the Mac"
             Screen.COMPLETED -> "Finished tasks and their final status"
-            Screen.DEVICE -> "Scan a Mac invitation over USB-reverse localhost"
+            Screen.DEVICE -> "Scan a signed Mac invitation over local Wi-Fi or USB fallback"
             Screen.TASK_DETAIL -> selectedTask?.title.orEmpty()
             Screen.APPROVAL_DETAIL -> "Review the operation and its exact arguments"
         }
