@@ -6,6 +6,7 @@ This separate runner exposes a narrow, authenticated Android companion API over 
 
 - The runner exits unless `JARVIS_COMPANION_WIFI_ENABLED=1` is explicitly set.
 - It also requires an explicit Wi-Fi interface, exact SSID allowlist, and private interface bind address. It checks the live interface address and SSID before binding and stops if either changes.
+- Some macOS privacy/runtime combinations report that no SSID is available to an unprivileged process even while the Wi-Fi card is connected. In that case, a **manual, owner-confirmed session** is supported only when `JARVIS_COMPANION_WIFI_OWNER_CONFIRMED_SSID` exactly matches the allowlist, `JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL` is a Unix expiry no more than 10 minutes ahead, and macOS reports Wi-Fi power on plus link connected. This is an explicit attestation, not an automatic SSID match; the monitor also requires the same private interface IP and the session expires. Never persist these variables in a LaunchAgent.
 - It listens on HTTPS TCP 8443 at only that private interface address. It does not bind wildcard or public addresses.
 - A self-signed TLS certificate/private key are stored in the OpenJarvis config directory with private filesystem permissions. The Android device must first obtain the certificate fingerprint over its existing paired route and verify the Mac’s signed identity before persisting the pin. The bearer device token is sent only after the TLS pin verifies.
 - The gateway validates active enrolled-device bearer tokens and forwards only allowlisted task, approval, and device-registration endpoints to the fixed loopback backend. The supervisor remains responsible for authorization and operation execution.
@@ -19,11 +20,13 @@ After confirming that the Mac and paired phone are on the intended authorized ho
 JARVIS_COMPANION_WIFI_ENABLED=1 \
 JARVIS_COMPANION_WIFI_INTERFACE=en0 \
 JARVIS_COMPANION_WIFI_ALLOWED_SSID='<exact home SSID>' \
+JARVIS_COMPANION_WIFI_OWNER_CONFIRMED_SSID='<same exact home SSID>' \
+JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL="$(($(date +%s)+600))" \
 JARVIS_COMPANION_WIFI_BIND_HOST='<private IP assigned to that interface>' \
 uv run python -m openjarvis.server.companion_wifi_gateway
 ```
 
-Stop the process with Ctrl-C. Do not use `0.0.0.0`, a public address, or an unverified/managed network. The gateway is not installed as a LaunchAgent and was not started during code verification. There is no consumer setup flow yet.
+Stop the process with Ctrl-C after the test. Do not use `0.0.0.0`, a public address, or an unverified/managed network. The gateway is not installed as a LaunchAgent and was not started during code verification. There is no consumer setup flow yet.
 
 ## Verification state
 

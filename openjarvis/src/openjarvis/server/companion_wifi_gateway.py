@@ -8,6 +8,7 @@ API remains on 127.0.0.1:8000.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,8 @@ from openjarvis.server.companion_wifi import (
     validate_wifi_bind_host,
     wifi_gateway_enabled,
 )
+
+_MANUAL_SSID_CONFIRMATION_MAX_SECONDS = 600
 
 
 def _wifi_address(interface: str) -> str:
@@ -57,6 +60,58 @@ def _wifi_ssid(interface: str) -> str:
     return ""
 
 
+def _manual_ssid_confirmation_expiry(allowed_ssid: str, *, now: float | None = None) -> float | None:
+    """Return a short-lived owner attestation only when it matches the allowlist.
+
+    Some macOS versions withhold the associated SSID from the non-privileged
+    networksetup/CoreWLAN interfaces. In that case an operator may attest the
+    exact SSID for one manual run. The attestation expires within ten minutes
+    and is never written to the LaunchAgent or persistent configuration.
+    """
+    confirmed = os.environ.get("JARVIS_COMPANION_WIFI_OWNER_CONFIRMED_SSID", "")
+    raw_expiry = os.environ.get("JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL", "")
+    if not confirmed or confirmed != allowed_ssid or not re.fullmatch(r"[0-9]{10,12}", raw_expiry):
+        return None
+    try:
+        expiry = float(int(raw_expiry))
+    except ValueError:
+        return None
+    current = time.time() if now is None else now
+    if not current < expiry <= current + _MANUAL_SSID_CONFIRMATION_MAX_SECONDS:
+        return None
+    return expiry
+
+
+def _wifi_interface_connected(interface: str) -> bool:
+    """Confirm the selected Wi-Fi radio is on and macOS reports a live link."""
+    power = subprocess.run(
+        ["/usr/sbin/networksetup", "-getairportpower", interface],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    if power.returncode != 0 or not re.search(r":\s*on\s*$", power.stdout.strip(), re.IGNORECASE):
+        return False
+    status = subprocess.run(
+        ["/usr/sbin/system_profiler", "SPAirPortDataType"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return status.returncode == 0 and re.search(r"^\s*Status:\s*Connected\s*$", status.stdout, re.MULTILINE | re.IGNORECASE) is not None
+
+
+def _network_matches_allowlist(interface: str, allowed_ssid: str, manual_expiry: float | None) -> bool:
+    actual_ssid = _wifi_ssid(interface)
+    if actual_ssid:
+        return actual_ssid == allowed_ssid
+    if manual_expiry is None or time.time() >= manual_expiry:
+        return False
+    return _wifi_interface_connected(interface)
+
+
 def serve() -> None:
     if not wifi_gateway_enabled():
         raise RuntimeError("Local Wi-Fi gateway is disabled")
@@ -68,7 +123,8 @@ def serve() -> None:
     bind_host = validate_wifi_bind_host(configured_bind)
     if _wifi_address(interface) != bind_host:
         raise RuntimeError("Configured Wi-Fi bind IP is not assigned to the selected interface")
-    if _wifi_ssid(interface) != allowed_ssid:
+    manual_expiry = _manual_ssid_confirmation_expiry(allowed_ssid)
+    if not _network_matches_allowlist(interface, allowed_ssid, manual_expiry):
         raise RuntimeError("Current Wi-Fi network does not match the configured allowlist")
 
     port = int(os.environ.get("JARVIS_COMPANION_WIFI_PORT", "8443"))
@@ -106,7 +162,7 @@ def serve() -> None:
 
     def stop_if_network_changes() -> None:
         while not stop.wait(10):
-            if _wifi_ssid(interface) != allowed_ssid or _wifi_address(interface) != bind_host:
+            if not _network_matches_allowlist(interface, allowed_ssid, manual_expiry) or _wifi_address(interface) != bind_host:
                 server.should_exit = True
                 return
 

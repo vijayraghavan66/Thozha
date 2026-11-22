@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 import openjarvis.tasks.supervisor as supervisor
 from openjarvis.server.companion_wifi import ensure_local_gateway_tls_identity, validate_wifi_bind_host
+from openjarvis.server import companion_wifi_gateway
 from openjarvis.server.supervisor_routes import _canonical_pairing_payload, router
 from openjarvis.tasks.supervisor import SupervisorStore
 
@@ -41,6 +42,30 @@ def test_wifi_bind_accepts_only_private_interface_addresses(host):
 def test_wifi_bind_rejects_public_wildcard_and_link_local_addresses(host):
     with pytest.raises(ValueError):
         validate_wifi_bind_host(host)
+
+
+def test_manual_ssid_attestation_requires_exact_name_and_short_expiry(monkeypatch):
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_OWNER_CONFIRMED_SSID", "Airtel_Minnal Murali")
+    now = 1_800_000_000
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL", str(now + 300))
+    assert companion_wifi_gateway._manual_ssid_confirmation_expiry("Airtel_Minnal Murali", now=now) == now + 300
+    assert companion_wifi_gateway._manual_ssid_confirmation_expiry("different", now=now) is None
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL", str(now + 601))
+    assert companion_wifi_gateway._manual_ssid_confirmation_expiry("Airtel_Minnal Murali", now=now) is None
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL", str(now - 1))
+    assert companion_wifi_gateway._manual_ssid_confirmation_expiry("Airtel_Minnal Murali", now=now) is None
+
+
+def test_manual_ssid_attestation_is_only_used_when_ssid_unavailable(monkeypatch):
+    monkeypatch.setattr(companion_wifi_gateway.time, "time", lambda: 1000)
+    monkeypatch.setattr(companion_wifi_gateway, "_wifi_ssid", lambda _interface: "")
+    monkeypatch.setattr(companion_wifi_gateway, "_wifi_interface_connected", lambda _interface: True)
+    assert companion_wifi_gateway._network_matches_allowlist("en0", "Airtel_Minnal Murali", 2000)
+    monkeypatch.setattr(companion_wifi_gateway, "_wifi_interface_connected", lambda _interface: False)
+    assert not companion_wifi_gateway._network_matches_allowlist("en0", "Airtel_Minnal Murali", 2000)
+    monkeypatch.setattr(companion_wifi_gateway, "_wifi_ssid", lambda _interface: "different")
+    monkeypatch.setattr(companion_wifi_gateway, "_wifi_interface_connected", lambda _interface: True)
+    assert not companion_wifi_gateway._network_matches_allowlist("en0", "Airtel_Minnal Murali", 2000)
 
 
 def test_gateway_tls_pin_is_signed_over_loopback_and_requires_auth(tmp_path, monkeypatch):
