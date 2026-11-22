@@ -1,5 +1,7 @@
 package com.jarvis.companion.data
 
+import android.util.Log
+import com.jarvis.companion.BuildConfig
 import java.security.MessageDigest
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
@@ -23,6 +25,7 @@ object LocalGatewayTls {
                 throw CertificateException("Client certificates are not used by the companion gateway")
             }
             override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
+                if (BuildConfig.DEBUG) Log.i("JarvisWifi", "tls_peer_received chain_size=${chain?.size ?: 0}")
                 val leaf = chain?.firstOrNull() ?: throw CertificateException("Gateway did not present a certificate")
                 try {
                     leaf.checkValidity()
@@ -32,8 +35,10 @@ object LocalGatewayTls {
                 val actual = MessageDigest.getInstance("SHA-256").digest(leaf.encoded)
                     .joinToString("") { "%02x".format(it.toInt() and 0xff) }
                 if (!MessageDigest.isEqual(actual.toByteArray(Charsets.US_ASCII), expected.toByteArray(Charsets.US_ASCII))) {
+                    if (BuildConfig.DEBUG) Log.w("JarvisWifi", "tls_pin_match=false")
                     throw CertificateException("Gateway certificate does not match the Mac pin")
                 }
+                if (BuildConfig.DEBUG) Log.i("JarvisWifi", "tls_pin_match=true")
             }
         }
         return SSLContext.getInstance("TLS").apply { init(null, arrayOf(trustManager), null) }.socketFactory
@@ -42,7 +47,11 @@ object LocalGatewayTls {
     fun hostnameVerifier(expectedHostname: String): HostnameVerifier {
         require(localHostnamePattern.matches(expectedHostname)) { "invalid local gateway hostname" }
         val canonicalHost = expectedHostname.lowercase(java.util.Locale.ROOT)
-        return HostnameVerifier { _, session -> matchesPinnedDnsName(session, canonicalHost) }
+        return HostnameVerifier { _, session ->
+            val matches = matchesPinnedDnsName(session, canonicalHost)
+            if (BuildConfig.DEBUG) Log.i("JarvisWifi", "tls_dns_san_match=$matches")
+            matches
+        }
     }
 
     fun configure(connection: HttpsURLConnection, pin: LocalGatewayPin) {
