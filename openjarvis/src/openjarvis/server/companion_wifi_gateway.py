@@ -29,9 +29,16 @@ from openjarvis.server.companion_wifi import (
     wifi_gateway_enabled,
 )
 
-_MANUAL_SSID_CONFIRMATION_MAX_SECONDS = 600
 _LOOPBACK_GATEWAY_HOST = "127.0.0.1"
 _LOOPBACK_GATEWAY_PORT = 8001
+_SSID_HELPER_TIMEOUT_SECONDS = 3
+_MAX_SSID_UTF8_BYTES = 32
+_MAX_SSID_HELPER_OUTPUT_BYTES = 64
+_NETWORKSETUP_PREFIX = "Current Wi-Fi Network:"
+_NETWORKSETUP_UNAVAILABLE = re.compile(
+    r"^You are not associated with (?:an )?(?:AirPort|Wi-Fi) network\.?$",
+    re.IGNORECASE,
+)
 
 
 def _wifi_address(interface: str) -> str:
@@ -39,72 +46,98 @@ def _wifi_address(interface: str) -> str:
 
 
 def _wifi_ssid(interface: str) -> str:
-    result = subprocess.run(
-        ["/usr/sbin/networksetup", "-getairportnetwork", interface],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=3,
-    )
-    if result.returncode != 0:
-        return ""
-    prefix = "Current Wi-Fi Network:"
-    for line in result.stdout.splitlines():
-        if line.startswith(prefix):
-            return line[len(prefix):].strip()
-    return ""
+    """Read the active SSID without logging it; optionally use the signed app helper.
 
-
-def _manual_ssid_confirmation_expiry(allowed_ssid: str, *, now: float | None = None) -> float | None:
-    """Return a short-lived owner attestation only when it matches the allowlist.
-
-    Some macOS versions withhold the associated SSID from the non-privileged
-    networksetup/CoreWLAN interfaces. In that case an operator may attest the
-    exact SSID for one manual run. The attestation expires within ten minutes
-    and is never written to the LaunchAgent or persistent configuration.
+    `networksetup` is authoritative when it returns a valid result. The helper
+    is consulted only when that command reports the expected unassociated
+    state or returns a nonzero status. Unknown/malformed output and timeouts
+    fail closed instead of turning into an implicit manual attestation.
     """
-    confirmed = os.environ.get("JARVIS_COMPANION_WIFI_OWNER_CONFIRMED_SSID", "")
-    raw_expiry = os.environ.get("JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL", "")
-    if not confirmed or confirmed != allowed_ssid or not re.fullmatch(r"[0-9]{10,12}", raw_expiry):
-        return None
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", interface):
+        return ""
     try:
-        expiry = float(int(raw_expiry))
-    except ValueError:
-        return None
-    current = time.time() if now is None else now
-    if not current < expiry <= current + _MANUAL_SSID_CONFIRMATION_MAX_SECONDS:
-        return None
-    return expiry
+        result = subprocess.run(
+            ["/usr/sbin/networksetup", "-getairportnetwork", interface],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            timeout=_SSID_HELPER_TIMEOUT_SECONDS,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return ""
+
+    output = result.stdout
+    if result.returncode == 0:
+        if not output.strip():
+            return _wifi_ssid_from_helper(interface)
+        lines = output.splitlines()
+        if len(lines) == 1 and lines[0].startswith(_NETWORKSETUP_PREFIX):
+            value = lines[0][len(_NETWORKSETUP_PREFIX):]
+            if value.startswith(" "):
+                value = value[1:]
+            return _validate_ssid_line(value)
+        if len(lines) != 1 or not _NETWORKSETUP_UNAVAILABLE.fullmatch(lines[0]):
+            return ""
+    return _wifi_ssid_from_helper(interface)
 
 
-def _wifi_interface_connected(interface: str) -> bool:
-    """Confirm the selected Wi-Fi radio is on and macOS reports a live link."""
-    power = subprocess.run(
-        ["/usr/sbin/networksetup", "-getairportpower", interface],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=3,
-    )
-    if power.returncode != 0 or not re.search(r":\s*on\s*$", power.stdout.strip(), re.IGNORECASE):
-        return False
-    status = subprocess.run(
-        ["/usr/sbin/system_profiler", "SPAirPortDataType"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    return status.returncode == 0 and re.search(r"^\s*Status:\s*Connected\s*$", status.stdout, re.MULTILINE | re.IGNORECASE) is not None
+def _validate_ssid_line(value: str) -> str:
+    if not value or len(value.encode("utf-8")) > _MAX_SSID_UTF8_BYTES:
+        return ""
+    if any(ord(char) < 0x20 or ord(char) == 0x7f for char in value):
+        return ""
+    return value
 
 
-def _network_matches_allowlist(interface: str, allowed_ssid: str, manual_expiry: float | None) -> bool:
+def _wifi_ssid_from_helper(interface: str) -> str:
+    helper = os.environ.get("JARVIS_COMPANION_WIFI_SSID_HELPER", "").strip()
+    if not helper:
+        return ""
+    executable = Path(helper)
+    if (
+        not executable.is_absolute()
+        or executable.is_symlink()
+        or not executable.is_file()
+        or not os.access(executable, os.X_OK)
+    ):
+        return ""
+    try:
+        result = subprocess.run(
+            [str(executable), "--ssid", interface],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=False,
+            timeout=_SSID_HELPER_TIMEOUT_SECONDS,
+            env={"PATH": "/usr/bin:/bin"},
+            cwd="/",
+            close_fds=True,
+            start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if result.returncode != 0 or len(result.stdout) > _MAX_SSID_HELPER_OUTPUT_BYTES:
+        return ""
+    try:
+        output = result.stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return ""
+    if output.endswith("\r\n"):
+        output = output[:-2]
+    elif output.endswith("\n"):
+        output = output[:-1]
+    if "\n" in output or "\r" in output:
+        return ""
+    return _validate_ssid_line(output)
+
+
+def _network_matches_allowlist(interface: str, allowed_ssid: str) -> bool:
     actual_ssid = _wifi_ssid(interface)
-    if actual_ssid:
-        return actual_ssid == allowed_ssid
-    if manual_expiry is None or time.time() >= manual_expiry:
-        return False
-    return _wifi_interface_connected(interface)
+    return bool(actual_ssid) and actual_ssid == allowed_ssid
 
 
 def _dns_sd_registration_args(executable: str, hostname: str, bind_host: str, port: int) -> list[str]:
@@ -161,8 +194,7 @@ def serve() -> None:
     bind_host = validate_wifi_bind_host(configured_bind)
     if _wifi_address(interface) != bind_host:
         raise RuntimeError("Configured Wi-Fi bind IP is not assigned to the selected interface")
-    manual_expiry = _manual_ssid_confirmation_expiry(allowed_ssid)
-    if not _network_matches_allowlist(interface, allowed_ssid, manual_expiry):
+    if not _network_matches_allowlist(interface, allowed_ssid):
         raise RuntimeError("Current Wi-Fi network does not match the configured allowlist")
 
     port = int(os.environ.get("JARVIS_COMPANION_WIFI_PORT", "8443"))
@@ -238,7 +270,7 @@ def serve() -> None:
 
         def stop_if_network_changes() -> None:
             while not stop.wait(10):
-                if not _network_matches_allowlist(interface, allowed_ssid, manual_expiry) or _wifi_address(interface) != bind_host:
+                if not _network_matches_allowlist(interface, allowed_ssid) or _wifi_address(interface) != bind_host:
                     if tls_proxy is not None:
                         tls_proxy.terminate()
                     loopback_server.should_exit = True

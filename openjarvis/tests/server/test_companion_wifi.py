@@ -5,6 +5,8 @@ import base64
 import hashlib
 import os
 import contextlib
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import openjarvis.tasks.supervisor as supervisor
@@ -66,28 +68,161 @@ def test_wifi_interface_ipv4_reader_validates_private_addresses(monkeypatch):
         wifi.wifi_interface_ipv4_address("en0")
 
 
-def test_manual_ssid_attestation_requires_exact_name_and_short_expiry(monkeypatch):
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_OWNER_CONFIRMED_SSID", "Airtel_Minnal Murali")
-    now = 1_800_000_000
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL", str(now + 300))
-    assert companion_wifi_gateway._manual_ssid_confirmation_expiry("Airtel_Minnal Murali", now=now) == now + 300
-    assert companion_wifi_gateway._manual_ssid_confirmation_expiry("different", now=now) is None
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL", str(now + 601))
-    assert companion_wifi_gateway._manual_ssid_confirmation_expiry("Airtel_Minnal Murali", now=now) is None
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL", str(now - 1))
-    assert companion_wifi_gateway._manual_ssid_confirmation_expiry("Airtel_Minnal Murali", now=now) is None
+def _make_ssid_helper(tmp_path, *, executable=True):
+    helper = tmp_path / "ThozhaGatewaySupervisor"
+    helper.write_text("test fixture; subprocess is always mocked\n", encoding="utf-8")
+    helper.chmod(0o700 if executable else 0o600)
+    return helper
 
 
-def test_manual_ssid_attestation_is_only_used_when_ssid_unavailable(monkeypatch):
-    monkeypatch.setattr(companion_wifi_gateway.time, "time", lambda: 1000)
-    monkeypatch.setattr(companion_wifi_gateway, "_wifi_ssid", lambda _interface: "")
-    monkeypatch.setattr(companion_wifi_gateway, "_wifi_interface_connected", lambda _interface: True)
-    assert companion_wifi_gateway._network_matches_allowlist("en0", "Airtel_Minnal Murali", 2000)
-    monkeypatch.setattr(companion_wifi_gateway, "_wifi_interface_connected", lambda _interface: False)
-    assert not companion_wifi_gateway._network_matches_allowlist("en0", "Airtel_Minnal Murali", 2000)
-    monkeypatch.setattr(companion_wifi_gateway, "_wifi_ssid", lambda _interface: "different")
-    monkeypatch.setattr(companion_wifi_gateway, "_wifi_interface_connected", lambda _interface: True)
-    assert not companion_wifi_gateway._network_matches_allowlist("en0", "Airtel_Minnal Murali", 2000)
+def test_networksetup_ssid_takes_precedence_over_helper(tmp_path, monkeypatch):
+    helper = _make_ssid_helper(tmp_path)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        assert args == ["/usr/sbin/networksetup", "-getairportnetwork", "en0"]
+        return SimpleNamespace(returncode=0, stdout="Current Wi-Fi Network: HomeNet\n")
+
+    monkeypatch.setattr(companion_wifi_gateway.subprocess, "run", fake_run)
+    assert companion_wifi_gateway._wifi_ssid("en0") == "HomeNet"
+    assert len(calls) == 1
+
+
+def test_helper_is_used_only_for_unavailable_networksetup_and_has_minimal_environment(tmp_path, monkeypatch):
+    helper = _make_ssid_helper(tmp_path)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        if args[0] == "/usr/sbin/networksetup":
+            return SimpleNamespace(returncode=0, stdout="You are not associated with an AirPort network.\n")
+        assert args == [str(helper), "--ssid", "en0"]
+        assert kwargs["timeout"] == companion_wifi_gateway._SSID_HELPER_TIMEOUT_SECONDS
+        assert kwargs["env"] == {"PATH": "/usr/bin:/bin"}
+        assert kwargs["cwd"] == "/"
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        return SimpleNamespace(returncode=0, stdout=b"HomeNet\n")
+
+    monkeypatch.setattr(companion_wifi_gateway.subprocess, "run", fake_run)
+    assert companion_wifi_gateway._wifi_ssid("en0") == "HomeNet"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "networksetup_code,networksetup_output",
+    [
+        (0, "You are not associated with an AirPort network.\n"),
+        (0, ""),
+        (1, ""),
+    ],
+)
+def test_helper_can_recover_an_unavailable_networksetup_result(
+    tmp_path, monkeypatch, networksetup_code, networksetup_output,
+):
+    helper = _make_ssid_helper(tmp_path)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
+
+    def fake_run(args, **kwargs):
+        if args[0] == "/usr/sbin/networksetup":
+            return SimpleNamespace(returncode=networksetup_code, stdout=networksetup_output)
+        return SimpleNamespace(returncode=0, stdout="HomeNet\n".encode())
+
+    monkeypatch.setattr(companion_wifi_gateway.subprocess, "run", fake_run)
+    assert companion_wifi_gateway._wifi_ssid("en0") == "HomeNet"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [b"", b"HomeNet\nOtherNet\n", b"A" * 65, b"A" * 33, b"Home\x00Net\n", b"\xff\xfe"],
+)
+def test_helper_rejects_invalid_or_multiline_output(tmp_path, monkeypatch, stdout):
+    helper = _make_ssid_helper(tmp_path)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
+
+    def fake_run(args, **kwargs):
+        if args[0] == "/usr/sbin/networksetup":
+            return SimpleNamespace(returncode=1, stdout="")
+        return SimpleNamespace(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(companion_wifi_gateway.subprocess, "run", fake_run)
+    assert companion_wifi_gateway._wifi_ssid("en0") == ""
+
+
+@pytest.mark.parametrize("helper_result", ["nonzero", "timeout"])
+def test_helper_nonzero_and_timeout_fail_closed(tmp_path, monkeypatch, helper_result):
+    helper = _make_ssid_helper(tmp_path)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
+
+    def fake_run(args, **kwargs):
+        if args[0] == "/usr/sbin/networksetup":
+            return SimpleNamespace(returncode=1, stdout="")
+        if helper_result == "timeout":
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        return SimpleNamespace(returncode=1, stdout=b"HomeNet\n")
+
+    monkeypatch.setattr(companion_wifi_gateway.subprocess, "run", fake_run)
+    assert companion_wifi_gateway._wifi_ssid("en0") == ""
+
+
+@pytest.mark.parametrize("helper_state", ["missing", "relative", "not_executable", "symlink"])
+def test_missing_or_invalid_helper_fails_closed(tmp_path, monkeypatch, helper_state):
+    helper = _make_ssid_helper(tmp_path, executable=helper_state != "not_executable")
+    if helper_state == "missing":
+        helper = tmp_path / "missing-helper"
+    elif helper_state == "relative":
+        helper = Path("relative-helper")
+    elif helper_state == "symlink":
+        link = tmp_path / "helper-link"
+        link.symlink_to(helper)
+        helper = link
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=1, stdout="")
+
+    monkeypatch.setattr(companion_wifi_gateway.subprocess, "run", fake_run)
+    assert companion_wifi_gateway._wifi_ssid("en0") == ""
+    assert len(calls) == 1  # Only networksetup; an invalid helper is never invoked.
+
+
+def test_networksetup_timeout_and_malformed_output_fail_closed_without_helper(tmp_path, monkeypatch):
+    helper = _make_ssid_helper(tmp_path)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
+    calls = []
+
+    def timed_out(args, **kwargs):
+        calls.append(args)
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(companion_wifi_gateway.subprocess, "run", timed_out)
+    assert companion_wifi_gateway._wifi_ssid("en0") == ""
+    assert len(calls) == 1
+
+    def malformed(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="unexpected output\n")
+
+    monkeypatch.setattr(companion_wifi_gateway.subprocess, "run", malformed)
+    assert companion_wifi_gateway._wifi_ssid("en0") == ""
+    assert len(calls) == 2
+
+
+def test_no_helper_or_manual_ssid_environment_fails_closed(monkeypatch):
+    monkeypatch.delenv("JARVIS_COMPANION_WIFI_SSID_HELPER", raising=False)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_OWNER_CONFIRMED_SSID", "HomeNet")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_OWNER_CONFIRMATION_UNTIL", "9999999999")
+    monkeypatch.setattr(
+        companion_wifi_gateway.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+    assert not companion_wifi_gateway._network_matches_allowlist("en0", "HomeNet")
 
 
 def test_dns_sd_advertisement_uses_pinned_hostname_and_private_interface_ip():
