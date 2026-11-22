@@ -91,13 +91,24 @@ object LocalGatewayDiscovery {
                 start()
             }
         }
-        return null
+        return endpointFromSignedAddress(pin)
     }
 
     /** Waits only when loopback is unavailable, joining an existing DNS-SD attempt if one is active. */
     fun discoverOrWait(context: Context, pin: LocalGatewayPin): LocalGatewayEndpoint? {
         if (!localNetworkPermissionGranted(context)) return null
         cachedEndpoint(pin)?.let { return it }
+        val signedAddress = endpointFromSignedAddress(pin)
+        if (signedAddress != null) {
+            val session = startDiscovery(context, pin)
+            if (session?.second == true) {
+                Thread({ runDiscoveryAndFinish(context.applicationContext, pin, session.first) }, "jarvis-local-gateway-refresh").apply {
+                    isDaemon = true
+                    start()
+                }
+            }
+            return signedAddress
+        }
         val session = startDiscovery(context, pin) ?: return null
         if (session.second) runDiscoveryAndFinish(context.applicationContext, pin, session.first)
         else runCatching { session.first.await(DISCOVERY_TIMEOUT_MS + 500L, TimeUnit.MILLISECONDS) }

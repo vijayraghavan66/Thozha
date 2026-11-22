@@ -842,7 +842,10 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
                     else -> "tailscale"
                 }
                 secureStore.recordMacConnection(transport)
-                if (BuildConfig.DEBUG) Log.i("JarvisWifi", "request_success route=$transport status=$status")
+                if (BuildConfig.DEBUG) {
+                    val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - requestStartedNs)
+                    Log.i("JarvisWifi", "request_success route=$transport status=$status elapsed_ms=$elapsedMs")
+                }
             }
             return if (text.isBlank()) JSONObject() else JSONObject(text)
         } catch (e: ApiException) {
