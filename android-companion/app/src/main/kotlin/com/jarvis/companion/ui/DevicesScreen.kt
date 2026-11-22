@@ -26,7 +26,7 @@ fun DevicesScreen(store: JarvisStore, onOpenSettings: () -> Unit) {
             IconAction(JarvisIcons.Settings, "Settings", onClick = onOpenSettings)
         }
         Box(Modifier.weight(1f)) {
-            LiveScreen(store, showHeader = false, showPhoneDetails = false, showVoice = false)
+            LiveScreen(store, showHeader = false, showPhoneDetails = false, showVoice = true)
         }
     }
 }
