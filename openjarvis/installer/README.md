@@ -10,9 +10,10 @@ From `installer/macos`:
 swift test
 swift build -c release
 ./package-staging.sh "$HOME/Documents/Jarvis-Lab/installer-staging"
+Tests/test-package-staging-safety.sh
 ```
 
-The script creates a locally testable app and an unsigned `.pkg` at the specified staging path. The app is ad-hoc signed for local inspection; the installer package is not Developer ID signed or notarized. Do not distribute it as a trusted consumer installer.
+The script requires a fresh staging directory whose parent already exists. It refuses existing output directories and symlinks, never recursively deletes a caller-supplied path, and uses no-clobber moves for final artifacts. The script creates a locally testable app and an unsigned `.pkg` at the specified staging path. The app is ad-hoc signed for local inspection; the installer package is not Developer ID signed or notarized. Do not distribute it as a trusted consumer installer.
 
 The staging app:
 

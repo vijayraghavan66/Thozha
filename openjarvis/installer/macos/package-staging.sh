@@ -5,15 +5,33 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:-$ROOT/../staging-out}"
 APP_NAME="Thozha Setup.app"
 VERSION="0.1.0"
-STAGE="$(mktemp -d "${TMPDIR:-/tmp}/thozha-installer.XXXXXX")"
-trap 'rm -rf "$STAGE"' EXIT
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This package script requires macOS; no installation changes were made." >&2
   exit 2
 fi
 
-mkdir -p "$OUT" "$STAGE/root/Applications/$APP_NAME/Contents/MacOS"
+[[ "$OUT" = /* ]] || OUT="$PWD/$OUT"
+OUT_PARENT="$(dirname "$OUT")"
+OUT_NAME="$(basename "$OUT")"
+if [[ ! -d "$OUT_PARENT" || -L "$OUT_PARENT" ]]; then
+  echo "The staging parent must already exist and must not be a symlink: $OUT_PARENT" >&2
+  exit 4
+fi
+OUT_PARENT="$(cd "$OUT_PARENT" && pwd -P)"
+OUT="$OUT_PARENT/$OUT_NAME"
+if [[ -e "$OUT" || -L "$OUT" ]]; then
+  echo "Refusing to reuse an existing output path. Choose a new, empty staging directory: $OUT" >&2
+  exit 4
+fi
+if ! mkdir -m 700 "$OUT"; then
+  echo "Could not create a fresh private staging directory: $OUT" >&2
+  exit 4
+fi
+
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/thozha-installer.XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
+mkdir -p "$STAGE/root/Applications/$APP_NAME/Contents/MacOS"
 swift build -c release --package-path "$ROOT"
 BIN="$ROOT/.build/release/ThozhaSetup"
 [[ -x "$BIN" ]] || { echo "Build did not produce the setup app executable." >&2; exit 3; }
@@ -37,13 +55,33 @@ chmod 0755 "$STAGE/root/Applications/$APP_NAME/Contents/MacOS/ThozhaSetup"
 codesign --force --deep --sign - "$STAGE/root/Applications/$APP_NAME"
 # Keep only ordinary bundle files; AppleDouble metadata is not part of the app.
 find "$STAGE/root" -name '._*' -delete
-mkdir -p "$OUT"
-rm -rf "$OUT/$APP_NAME" "$OUT/ThozhaSetup-$VERSION-unsigned.pkg"
-pkgbuild --component "$STAGE/root/Applications/$APP_NAME" --identifier com.thozha.setup.staging --version "$VERSION" \
-  --install-location /Applications "$OUT/ThozhaSetup-$VERSION-unsigned.pkg" >/dev/null
-ditto --norsrc --noextattr --noqtn --noacl "$STAGE/root/Applications/$APP_NAME" "$OUT/$APP_NAME"
+APP_TMP="$OUT/.Thozha Setup.app.tmp-$$"
+PKG_TMP="$OUT/.ThozhaSetup-$VERSION-unsigned.pkg.tmp-$$"
+APP_FINAL="$OUT/$APP_NAME"
+PKG_FINAL="$OUT/ThozhaSetup-$VERSION-unsigned.pkg"
+ditto --norsrc --noextattr --noqtn --noacl "$STAGE/root/Applications/$APP_NAME" "$APP_TMP"
+if [[ -e "$APP_FINAL" || -L "$APP_FINAL" ]]; then
+  echo "Refusing to replace existing app bundle: $APP_FINAL" >&2
+  exit 5
+fi
+mv -n "$APP_TMP" "$APP_FINAL"
+if [[ -e "$APP_TMP" ]]; then
+  echo "App bundle could not be placed without overwriting an existing target." >&2
+  exit 5
+fi
+pkgbuild --component "$APP_FINAL" --identifier com.thozha.setup.staging --version "$VERSION" \
+  --install-location /Applications "$PKG_TMP" >/dev/null
+if [[ -e "$PKG_FINAL" || -L "$PKG_FINAL" ]]; then
+  echo "Refusing to replace existing package: $PKG_FINAL" >&2
+  exit 5
+fi
+mv -n "$PKG_TMP" "$PKG_FINAL"
+if [[ -e "$PKG_TMP" ]]; then
+  echo "Package could not be placed without overwriting an existing target." >&2
+  exit 5
+fi
 find "$OUT/$APP_NAME" -name '._*' -delete
 echo "Created local staging artifacts (unsigned for distribution):"
-echo "$OUT/$APP_NAME"
-echo "$OUT/ThozhaSetup-$VERSION-unsigned.pkg"
+echo "$APP_FINAL"
+echo "$PKG_FINAL"
 echo "The package contains only the setup app. It does not install or alter OpenJarvis, LaunchAgents, VM images, credentials, or network settings."
