@@ -1,5 +1,6 @@
 package com.jarvis.companion.notifications
 
+import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.jarvis.companion.link.LinkBackgroundSync
