@@ -31,6 +31,221 @@ paths:
                 type: object
                 properties:
                   status: { type: string, const: ok }
+  /v1/web/session/login:
+    post:
+      operationId: createWebSession
+      security: []
+      tags: [session]
+      description: >
+        Implemented but disabled unless THOZHA_WEB_OWNER_ID,
+        THOZHA_WEB_PASSWORD_HASH, and THOZHA_WEB_ORIGIN are configured outside
+        source control. Requires an exact same-origin Origin header. Sets an
+        opaque HttpOnly SameSite=Strict cookie; never accepts Android tokens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebLoginRequest' }
+      responses:
+        '200':
+          description: Authenticated owner and CSRF value; session cookie is set.
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/session:
+    get:
+      operationId: getWebSession
+      security:
+        - WebSessionCookie: []
+      tags: [session]
+      responses:
+        '200':
+          description: Current browser-session metadata and CSRF value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/session/logout:
+    post:
+      operationId: revokeWebSession
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      tags: [session]
+      description: Requires exact same-origin Origin, application/json, and X-Thozha-CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '204': { description: Session revoked and cookies expired. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/web/conversations:
+    post:
+      operationId: createWebConversation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: Owner identity is derived from the server-side browser session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebConversationCreate' }
+      responses:
+        '201':
+          description: Conversation created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebConversation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      operationId: listWebConversations
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      parameters:
+        - name: include_archived
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Owner-scoped conversations.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/WebConversation' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/web/conversations/{conversation_id}:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+    get:
+      operationId: getWebConversation
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      responses:
+        '200':
+          description: Owner-scoped conversation with persisted messages and lifecycle events.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebConversationDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteWebConversation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: Requires exact same-origin Origin, application/json, and X-Thozha-CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '204': { description: Conversation and owned history deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/conversations/{conversation_id}/archive:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+    post:
+      operationId: archiveWebConversation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: Requires exact same-origin Origin, application/json, and X-Thozha-CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200': { description: Conversation archived. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/conversations/{conversation_id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+    post:
+      operationId: submitWebConversationMessage
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: >
+        Persists the message and calls the configured model with tools disabled.
+        The response is asynchronous (202) but this is not a streaming API.
+        A blocking model call cannot be forcibly cancelled; late output is suppressed.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebMessageCreate' }
+      responses:
+        '202':
+          description: User message persisted and response work accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMessageAccepted' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/web/conversations/{conversation_id}/messages/{message_id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+      - name: message_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: cancelWebConversationMessage
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: "message_id is the assistant response ID; cancellation suppresses late results but may not stop inference already running."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200':
+          description: Current cancellation state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMessageCancelResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /v1/jarvis/system/info:
     get:
       operationId: getMacSystemInfo
@@ -402,6 +617,16 @@ components:
       scheme: bearer
       bearerFormat: opaque
       description: Server/device credential for direct API only; never place in a browser.
+    WebSessionCookie:
+      type: apiKey
+      in: cookie
+      name: thozha_web_session
+      description: Separate opaque owner session. Never use Android paired-device credentials.
+    WebCsrf:
+      type: apiKey
+      in: header
+      name: X-Thozha-CSRF
+      description: Session-bound CSRF value required for state-changing Web requests.
   parameters:
     TaskId:
       name: task_id
@@ -418,7 +643,88 @@ components:
       in: path
       required: true
       schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+    WebConversationId:
+      name: conversation_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   schemas:
+    WebLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: { type: string, maxLength: 128 }
+        password: { type: string, minLength: 12, maxLength: 1024, writeOnly: true }
+    WebSession:
+      type: object
+      required: [user_id, expires_at, csrf_token]
+      properties:
+        user_id: { type: string }
+        expires_at: { type: integer, format: int64 }
+        csrf_token: { type: string }
+    WebConversationCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        title: { type: [string, 'null'], maxLength: 160 }
+    WebConversation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        archived_at: { type: [string, 'null'], format: date-time }
+    WebConversationDetail:
+      allOf:
+        - $ref: '#/components/schemas/WebConversation'
+        - type: object
+          properties:
+            messages: { type: array, items: { $ref: '#/components/schemas/WebMessage' } }
+            events: { type: array, items: { $ref: '#/components/schemas/WebConversationEvent' } }
+    WebMessageCreate:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1, maxLength: 16000 }
+    WebMessage:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string }
+        status: { type: string, enum: [accepted, queued, running, completed, failed, cancelled] }
+        response_to: { type: [string, 'null'], format: uuid }
+        error_code: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    WebConversationEvent:
+      type: object
+      properties:
+        sequence: { type: integer }
+        message_id: { type: string, format: uuid }
+        event_type: { type: string, enum: [accepted, queued, started, completed, failed, cancelled, cancellation_requested] }
+        created_at: { type: string, format: date-time }
+        details: { type: object, additionalProperties: true }
+    WebMessageAccepted:
+      type: object
+      required: [conversation_id, message_id, response_id, status, replayed]
+      properties:
+        conversation_id: { type: string, format: uuid }
+        message_id: { type: string, format: uuid }
+        response_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, completed, failed, cancelled] }
+        replayed: { type: boolean }
+    WebMessageCancelResult:
+      type: object
+      required: [conversation_id, message_id, status]
+      properties:
+        conversation_id: { type: string, format: uuid }
+        message_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, completed, failed, cancelled, cancellation_requested] }
     MacSystemInfo:
       type: object
       required: [online, uptime]
@@ -576,8 +882,6 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
   x-thozha-not-implemented:
-    - browser login/session/CSRF endpoints
-    - device-bound web conversation history
     - authenticated web task SSE/WebSocket
     - event replay and resume contract for browsers
     - artifact relay through the companion gateway
