@@ -67,6 +67,7 @@ type LiveResponse = {
   responseId: string;
   mode?: WebConversationStreamMode;
   partial: string;
+  ended?: boolean;
 };
 
 function Message({
@@ -229,7 +230,7 @@ export default function ConversationWorkspace({
     id,
     enabled,
     id ? receipts[id] : undefined,
-    live?.conversationId === id
+    live?.conversationId === id && !live.ended
   );
   const snapshot = detail.data;
   const messages = snapshot?.messages;
@@ -361,11 +362,26 @@ export default function ConversationWorkspace({
         const controller = new AbortController();
         activeStream.current = controller;
         let acknowledged = false;
+        let responseId: string | undefined;
+        let chunks: string[] = [];
+        let frame: number | undefined;
+        function flush() {
+          frame = undefined;
+          if (!chunks.length) return;
+          const text = chunks.join('');
+          chunks = [];
+          setLive(current =>
+            current && current.responseId === responseId && current.mode === 'engine_stream'
+              ? { ...current, partial: current.partial + text }
+              : current
+          );
+        }
         try {
           await api.stream(attempt.id, body, attempt.key, controller.signal, event => {
             switch (event.event) {
               case 'accepted':
                 acknowledged = true;
+                responseId = event.data.response_id;
                 setLive({
                   conversationId: attempt.id,
                   responseId: event.data.response_id,
@@ -374,14 +390,17 @@ export default function ConversationWorkspace({
                 recordAcceptance(attempt, event.data.response_id);
                 break;
               case 'stream_mode':
-                setLive(current => (current ? { ...current, mode: event.data.mode } : current));
-                break;
-              case 'delta':
                 setLive(current =>
-                  current?.mode === 'engine_stream'
-                    ? { ...current, partial: current.partial + event.data.content }
+                  current?.responseId === event.data.response_id
+                    ? { ...current, mode: event.data.mode }
                     : current
                 );
+                break;
+              case 'delta':
+                if (event.data.response_id === responseId) {
+                  chunks.push(event.data.content);
+                  frame ??= requestAnimationFrame(flush);
+                }
                 break;
             }
           });
@@ -401,7 +420,11 @@ export default function ConversationWorkspace({
           );
         } finally {
           activeStream.current = null;
-          setLive(undefined);
+          if (frame !== undefined) cancelAnimationFrame(frame);
+          if (!controller.signal.aborted) flush();
+          setLive(current =>
+            current && current.responseId === responseId ? { ...current, ended: true } : current
+          );
         }
       }
       const accepted = await api.submit(attempt.id, body, attempt.key);
