@@ -13,10 +13,10 @@ Codex reviews contract changes that affect Android or Web consumers.
 
 ## Copilot
 
-Copilot owns branch copilot/web and the Web Workspace frontend under web/ after the owner approves its design. Until approval:
+Copilot owns branch copilot/web and the Web Workspace frontend under web/, implementing the owner-approved MagicPath concept. Until that implementation is integrated:
 
 - Keep the interactive Web mockup in its separate prototype workspace.
-- Do not add or replace the approved Web design in this repository.
+- Do not replace or independently recreate the approved Web design.
 - Use clearly labeled local preview data only.
 - Do not edit `openjarvis/`, `android-companion/`, `jarvis-link/`, or `contracts/`.
 

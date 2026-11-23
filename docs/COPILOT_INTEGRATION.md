@@ -1,6 +1,6 @@
 # Copilot Web Workspace integration guide
 
-Status: integration contract and ownership guide only. The approved interactive Web design is still under owner review; this repository does not contain the Web frontend.
+Status: integration contract and ownership guide only. The owner-approved MagicPath Web Workspace concept exists, but its React/TypeScript frontend is not yet in this repository.
 
 ## Current source-of-truth routes
 
@@ -12,9 +12,9 @@ The Android client implements authenticated request shapes in android-companion/
 
 OpenJarvis also has general chat routes: POST /v1/chat/completions (including SSE where the selected engine supports streaming), WebSocket /v1/chat/stream, GET /v1/sessions, and several /v1/memory routes. They are not in the companion-gateway allowlist and are not a browser-safe authorization model. SessionStore/trace and memory-backend records should not be treated as a per-device conversation history without a separate user/device binding contract. The Codex SDK path is not certified for sub-3-second first-token latency.
 
-## Frontend rules before design approval
+## Frontend rules before live backend wiring
 
-- Keep the current Web Workspace mockup in Copilot's separate prototype. Do not replace or publish it until the owner approves the design.
+- Implement from the approved MagicPath Web Workspace concept. Keep preview fixtures labeled while wiring is pending; do not independently recreate or replace the design.
 - Any fixture must visibly say Preview or Sample; fixture values must never be labeled as live Mac state, real tasks, real approvals, or generated artifacts.
 - Build a typed API adapter that consumes only versioned contract types. Do not add hard-coded backend paths in screen components.
 - Do not put a paired-device bearer token, API key, certificate private key, or pairing secret in browser local/session storage, URLs, source maps, or mock data.

@@ -1,6 +1,6 @@
 # Thozha
 
-Thozha is the private monorepo for the existing Jarvis companion and backend. It preserves the independently maintained Android, Jarvis Link, and OpenJarvis histories under separate directories. The Web Workspace is owned separately by Copilot and is not included until its design is reviewed and approved.
+Thozha is the private monorepo for the existing Jarvis companion and backend. It preserves the independently maintained Android, Jarvis Link, and OpenJarvis histories under separate directories. The approved MagicPath Web Workspace concept is owned by Copilot; its source is not integrated yet.
 
 ## Repository layout
 

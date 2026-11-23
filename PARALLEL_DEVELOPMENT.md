@@ -4,8 +4,8 @@
 
 - main is the reviewed integration baseline. Merge through pull requests; do not force-push.
 - Codex works on codex/core: OpenJarvis, Android backend integration, Jarvis Link, security boundaries, persistence, and versioned contracts.
-- Copilot works on copilot/web: only the approved React/TypeScript Web Workspace under web/.
-- The MagicPath Web and Android concepts remain references until the owner approves the design. The standalone Android visual prototype is not the approved Web design and is not part of the baseline.
+- Copilot works on copilot/web: the approved React/TypeScript Web Workspace under web/.
+- Implement the MagicPath Web concept directly; do not independently recreate or replace it. The Android concept remains a reference for native Compose integration. The standalone Android visual prototype is not a MagicPath design and is not part of the baseline.
 
 ## Workspace setup
 
