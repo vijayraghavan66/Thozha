@@ -17,6 +17,7 @@ OpenJarvis also has general chat routes: POST /v1/chat/completions (including SS
 - Implement from the approved MagicPath Web Workspace concept. Keep preview fixtures labeled while wiring is pending; do not independently recreate or replace the design.
 - Any fixture must visibly say Preview or Sample; fixture values must never be labeled as live Mac state, real tasks, real approvals, or generated artifacts.
 - Build a typed API adapter that consumes only versioned contract types. Do not add hard-coded backend paths in screen components.
+- Current browser type definitions are in `contracts/web-api/v1.ts`; OpenAPI source is on `codex/openapi-contracts`. Types cover only implemented Web session, conversation, and memory routes. Wait for the supervisor-task/approval/device contract update before wiring those screens.
 - Do not put a paired-device bearer token, API key, certificate private key, or pairing secret in browser local/session storage, URLs, source maps, or mock data.
 - The browser session and conversation interfaces are implemented in source and documented in contracts/web-auth/v1.md. The Web UI is not integrated. Do not use companion bearer tokens; an owner must configure separate browser credentials and an exact HTTPS origin before browser login is available. Do not expose the raw API or relay from a browser.
 - Keep actions disabled in preview mode. Do not simulate approval decisions, task execution, push notifications, or artifact delivery.
