@@ -50,6 +50,19 @@ def gateway(tmp_path):
 
     async def upstream_handler(request: httpx.Request) -> httpx.Response:
         upstream_requests.append(request)
+        if request.url.path.endswith("/download"):
+            digest = "a" * 64
+            return httpx.Response(
+                200,
+                content=b"synthetic archive bytes",
+                headers={
+                    "Content-Type": "application/zip",
+                    "Content-Disposition": 'attachment; filename="archive.zip"',
+                    "X-Content-SHA256": digest,
+                    "ETag": f'"{digest}"',
+                    "X-Internal-Header": "must-not-be-forwarded",
+                },
+            )
         return httpx.Response(200, json={"path": request.url.path, "method": request.method, "ok": True})
 
     app = create_gateway_app(
@@ -289,6 +302,33 @@ def test_gateway_allows_only_read_only_link_task_envelopes(gateway):
         "/v1/jarvis/link/tasks/" + body["idempotency_key"], headers=headers,
     ).status_code == 200
     assert upstream[-1].url.path == "/v1/jarvis/link/tasks/" + body["idempotency_key"]
+    events = client.get(
+        f"/v1/jarvis/link/tasks/{body['idempotency_key']}/events?after_seq=7&limit=25",
+        headers=headers,
+    )
+    assert events.status_code == 200
+    assert upstream[-1].url.path.endswith(f"/link/tasks/{body['idempotency_key']}/events")
+    assert dict(upstream[-1].url.params) == {"after_seq": "7", "limit": "25"}
+    assert client.get(
+        f"/v1/jarvis/link/tasks/{body['idempotency_key']}/events?after_seq=-1",
+        headers=headers,
+    ).status_code == 422
+    artifact_task = "b" * 32
+    artifacts = client.get(f"/v1/jarvis/tasks/{artifact_task}/artifacts", headers=headers)
+    assert artifacts.status_code == 200
+    assert upstream[-1].url.path == f"/v1/jarvis/tasks/{artifact_task}/artifacts"
+    archive = client.get(
+        f"/v1/jarvis/tasks/{artifact_task}/artifacts/{'a' * 64}/download", headers=headers,
+    )
+    assert archive.status_code == 200
+    assert archive.content == b"synthetic archive bytes"
+    assert archive.headers["content-type"] == "application/zip"
+    assert archive.headers["x-content-sha256"] == "a" * 64
+    assert archive.headers["etag"] == '"' + "a" * 64 + '"'
+    assert "x-internal-header" not in archive.headers
+    assert client.get(
+        f"/v1/jarvis/tasks/{artifact_task}/artifacts/invalid/download", headers=headers,
+    ).status_code == 404
     cancelled = client.post(
         f"/v1/jarvis/link/tasks/{body['idempotency_key']}/cancel",
         headers=headers,

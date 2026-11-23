@@ -30,7 +30,7 @@ OpenJarvis also has general chat routes: POST /v1/chat/completions (including SS
 | Task list and detail | Implemented persisted state/events | Contracted; polling only via available routes |
 | Async task submit/status/cancel | Implemented supervisor path and Android client | Contracted; route availability depends on local gateway; no Web client |
 | Approval review and exact-digest decision | Implemented supervisor boundary and Android client | Contracted; Web controls stay preview-only until auth/design approval |
-| ZIP artifact manifest/download | Implemented in direct loopback API and Android client | Not in gateway allowlist; no Web delivery |
+| ZIP artifact manifest/download | Implemented in direct API, Android client, and restricted paired-device gateway | Not browser-accessible until a Web session/auth contract is implemented |
 | FCM token registration | Registration/revoke route implemented | End-to-end delivery not verified; not a Web feature |
 | Generic OpenJarvis chat/SSE/WebSocket | Implemented in the general server | Not companion-gateway allowlisted; no browser session/auth contract |
 | OpenJarvis sessions and memory | General server routes exist | Not bound to a Thozha per-device conversation history/profile; memory may be unconfigured |

@@ -169,10 +169,15 @@ async def _proxy(
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail="Local Jarvis API is unavailable") from exc
     content_type = upstream.headers.get("content-type", "application/json")
+    safe_headers = {"Content-Type": content_type, "Cache-Control": "no-store"}
+    for name in ("Content-Disposition", "ETag", "X-Content-SHA256"):
+        value = upstream.headers.get(name)
+        if value is not None and len(value) <= 256 and all(ord(char) >= 0x20 and ord(char) != 0x7f for char in value):
+            safe_headers[name] = value
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
-        headers={"Content-Type": content_type, "Cache-Control": "no-store"},
+        headers=safe_headers,
     )
 
 
@@ -302,6 +307,23 @@ def create_gateway_app(
             raise HTTPException(status_code=404, detail="Task not found")
         return await _proxy(request, backend_path=f"/v1/jarvis/tasks/{task_id}")
 
+    @app.get("/v1/jarvis/tasks/{task_id}/artifacts")
+    async def list_task_artifacts(task_id: str, request: Request):
+        _device_id_for_request(request, request.app.state.supervisor_store)
+        if not _ID_RE.fullmatch(task_id):
+            raise HTTPException(status_code=404, detail="Task not found")
+        return await _proxy(request, backend_path=f"/v1/jarvis/tasks/{task_id}/artifacts")
+
+    @app.get("/v1/jarvis/tasks/{task_id}/artifacts/{artifact_id}/download")
+    async def download_task_artifact(task_id: str, artifact_id: str, request: Request):
+        _device_id_for_request(request, request.app.state.supervisor_store)
+        if not _ID_RE.fullmatch(task_id) or not re.fullmatch(r"[0-9a-f]{64}", artifact_id):
+            raise HTTPException(status_code=404, detail="Artifact not found")
+        return await _proxy(
+            request,
+            backend_path=f"/v1/jarvis/tasks/{task_id}/artifacts/{artifact_id}/download",
+        )
+
     @app.get("/v1/jarvis/system/info")
     async def get_system_info(request: Request):
         """Return only the existing authenticated, read-only Mac status fields."""
@@ -345,6 +367,24 @@ def create_gateway_app(
         if not _IDEMPOTENCY_RE.fullmatch(idempotency_key):
             raise HTTPException(status_code=404, detail="Link task not found")
         return await _proxy(request, backend_path=f"/v1/jarvis/link/tasks/{idempotency_key}")
+
+    @app.get("/v1/jarvis/link/tasks/{idempotency_key}/events")
+    async def get_link_task_events(
+        idempotency_key: str,
+        request: Request,
+        after_seq: int = 0,
+        limit: int = 100,
+    ):
+        _device_id_for_request(request, request.app.state.supervisor_store)
+        if not _IDEMPOTENCY_RE.fullmatch(idempotency_key):
+            raise HTTPException(status_code=404, detail="Link task not found")
+        if after_seq < 0 or not 1 <= limit <= 200:
+            raise HTTPException(status_code=422, detail="Invalid task event cursor")
+        return await _proxy(
+            request,
+            backend_path=f"/v1/jarvis/link/tasks/{idempotency_key}/events",
+            params={"after_seq": str(after_seq), "limit": str(limit)},
+        )
 
     @app.post("/v1/jarvis/link/tasks/{idempotency_key}/cancel")
     async def cancel_link_task(idempotency_key: str, request: Request):
