@@ -61,7 +61,10 @@ def _supervisor_store():
     global _STORE
     if _STORE is None:
         from openjarvis.tasks.supervisor import SupervisorStore
-        _STORE = SupervisorStore(run_recovery=False)
+        configured_path = os.environ.get("JARVIS_SUPERVISOR_DB", "").strip()
+        if configured_path and not Path(configured_path).is_absolute():
+            raise ValueError("supervisor database path must be absolute")
+        _STORE = SupervisorStore(configured_path or None, run_recovery=False)
     return _STORE
 
 def _request_supervisor_approval(name: str, args: dict[str, Any]) -> dict[str, Any]:

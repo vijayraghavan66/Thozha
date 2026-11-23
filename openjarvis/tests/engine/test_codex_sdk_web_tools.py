@@ -153,6 +153,63 @@ def test_mac_read_scope_enables_only_fixed_mac_bridge_and_disables_shell(
     assert any("JARVIS_SUPERVISOR_DB" in value and test_db in value for value in scoped)
 
 
+def test_supervised_assistant_mcp_receives_its_task_store_path(tmp_path, monkeypatch):
+    from openjarvis.tasks import supervisor
+    from openjarvis.tasks.supervisor import bind_task
+
+    task_db = str(tmp_path / "supervisor.db")
+    monkeypatch.setattr(
+        supervisor,
+        "get_supervisor_store",
+        lambda: SimpleNamespace(db_path=task_db),
+    )
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setattr(codex_sdk, "CODEX_HOME", codex_home)
+    monkeypatch.setattr(codex_sdk, "_working_directory_for_current_task", lambda: str(tmp_path))
+
+    task_id = "b" * 32
+    with bind_task(
+        task_id,
+        source="jarvis_link",
+        scope="assistant",
+    ):
+        overrides = set(codex_sdk._config_overrides("control"))
+    assert any(f"JARVIS_SUPERVISOR_TASK_ID=\"{task_id}\"" in value for value in overrides)
+    assert any("JARVIS_SUPERVISOR_DB" in value and task_db in value for value in overrides)
+
+
+def test_mac_mcp_uses_explicit_supervisor_db_path(monkeypatch, tmp_path):
+    import importlib.util
+    from openjarvis.tasks import supervisor
+
+    module_path = (
+        codex_sdk.Path(__file__).resolve().parents[2]
+        / "src"
+        / "openjarvis"
+        / "mac_desktop_mcp.py"
+    )
+    spec = importlib.util.spec_from_file_location("thozha_test_mac_mcp_db_path", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setenv("JARVIS_DESKTOP_MODE", "control")
+    selected_path = str(tmp_path / "supervisor.db")
+    monkeypatch.setenv("JARVIS_SUPERVISOR_DB", selected_path)
+    spec.loader.exec_module(module)
+
+    captured = {}
+
+    class FakeStore:
+        def __init__(self, db_path=None, *, run_recovery=True):
+            captured["db_path"] = db_path
+            captured["run_recovery"] = run_recovery
+
+    monkeypatch.setattr(supervisor, "SupervisorStore", FakeStore)
+    module._STORE = None
+    module._supervisor_store()
+    assert captured == {"db_path": selected_path, "run_recovery": False}
+
+
 def test_codex_readiness_does_not_mislabel_auth_file_as_verified(tmp_path, monkeypatch):
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()

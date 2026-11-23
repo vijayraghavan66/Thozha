@@ -277,10 +277,14 @@ def _config_overrides(mode: str, *, disable_tools: bool = False) -> tuple[str, .
         and context.source in {"agent_chat", "jarvis_link"}
         and (context.source != "jarvis_link" or context.scope in {"assistant", "mac_read"})
     ):
+        from openjarvis.tasks.supervisor import get_supervisor_store
+
+        supervisor_db = str(get_supervisor_store().db_path)
         overrides.extend((
             f'mcp_servers.jarvis_mac.env.JARVIS_SUPERVISOR_TASK_ID="{context.task_id}"',
             f'mcp_servers.jarvis_mac.env.JARVIS_SUPERVISOR_TASK_SOURCE="{context.source}"',
             f'mcp_servers.jarvis_mac.env.JARVIS_SUPERVISOR_TASK_SCOPE="{context.scope}"',
+            f"mcp_servers.jarvis_mac.env.JARVIS_SUPERVISOR_DB={json.dumps(supervisor_db)}",
         ))
     return tuple(overrides)
 
