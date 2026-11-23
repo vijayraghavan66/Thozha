@@ -320,8 +320,8 @@ def tool_list():
           {"name":"scroll","description":"Scroll a small amount in the current app.","inputSchema":{"type":"object","properties":{"direction":{"type":"string","enum":["up","down","left","right"]},"amount":{"type":"integer","minimum":1,"maximum":8},"target":{"type":"string"}},"required":["direction","target"],"additionalProperties":False}},
           {"name":"open_app","description":"Open a named macOS application at the user's request.","inputSchema":{"type":"object","properties":{"name":{"type":"string","maxLength":120}},"required":["name"],"additionalProperties":False}},
         ]
-    if MODE=="workspace":
-        common.append({"name":"open_browser_workspace","description":"Open a separate Chrome profile for this task.","inputSchema":{"type":"object","properties":{"url":{"type":"string","maxLength":2048}},"additionalProperties":False}})
+    if MODE in {"control", "workspace"}:
+        common.append({"name":"open_browser_workspace","description":"Open a separate Chrome profile only after the exact URL receives supervisor approval.","inputSchema":{"type":"object","properties":{"url":{"type":"string","maxLength":2048}},"additionalProperties":False}})
     if not open_app_mcp_enabled():
         common = [tool for tool in common if tool.get("name") != "open_app"]
     return common

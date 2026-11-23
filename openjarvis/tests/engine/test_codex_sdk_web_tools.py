@@ -244,6 +244,79 @@ def test_mac_mcp_uses_explicit_supervisor_db_path(monkeypatch, tmp_path):
     assert captured == {"db_path": selected_path, "run_recovery": False}
 
 
+def test_control_exposes_only_supervised_browser_workspace_when_open_app_is_disabled(
+    tmp_path, monkeypatch
+):
+    import importlib.util
+
+    from openjarvis.tasks import supervisor
+
+    store = supervisor.SupervisorStore(str(tmp_path / "supervisor.db"))
+    objective = "Open a separate blank browser workspace after owner approval."
+    key = "approved-browser-workspace-test-0001"
+    run = store.create_link_task(
+        objective,
+        capability_scope=["assistant"],
+        idempotency_key=key,
+        owner_actor="device:" + ("a" * 32),
+    )
+    store.start_link_task(
+        run["task_id"],
+        objective_digest=run["objective_digest"],
+        objective_text_digest=run["objective_digest"],
+        capability_scope=["assistant"],
+        idempotency_key=key,
+    )
+    monkeypatch.setattr(supervisor, "get_supervisor_store", lambda: store)
+    monkeypatch.setenv("JARVIS_DESKTOP_MODE", "control")
+    monkeypatch.setenv("JARVIS_MCP_OPEN_APP_ENABLED", "0")
+    module_path = (
+        codex_sdk.Path(__file__).resolve().parents[2]
+        / "src"
+        / "openjarvis"
+        / "mac_desktop_mcp.py"
+    )
+    spec = importlib.util.spec_from_file_location("thozha_test_control_browser_tool", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    names = {item["name"] for item in module.tool_list()}
+    assert "open_browser_workspace" in names
+    assert "open_app" not in names
+
+    def execution_must_not_start(*_args, **_kwargs):
+        raise AssertionError("browser launch handler must not run before owner approval")
+
+    monkeypatch.setattr(codex_sdk, "_call_local_mcp", execution_must_not_start)
+    with supervisor.bind_task(
+        run["task_id"],
+        source="jarvis_link",
+        scope="assistant",
+        allowed_capabilities=supervisor.LINK_SCOPE_CAPABILITIES["assistant"],
+    ):
+        response = codex_sdk._approval_handler("control")(
+            "mcpServer/tool/call",
+            {
+                "server": "jarvis_mac",
+                "tool": "open_browser_workspace",
+                "arguments": {"url": "about:blank"},
+            },
+        )
+    assert response["isError"] is True
+    assert "waiting for approval" in response["content"][0]["text"].lower()
+    pending = [item for item in store.pending_approvals(10) if item["task_id"] == run["task_id"]]
+    assert len(pending) == 1
+    assert pending[0]["operation"] == "mcp:jarvis_mac:open_browser_workspace"
+    assert pending[0]["target"]
+    assert pending[0]["safe_args"] == {"url": "about:blank"}
+    assert pending[0]["status"] == "PENDING"
+    assert store._db.execute(
+        "SELECT COUNT(*) FROM mcp_approval_dispatches WHERE approval_id=?",
+        (pending[0]["id"],),
+    ).fetchone()[0] == 0
+    store.close()
+
+
 def test_codex_readiness_does_not_mislabel_auth_file_as_verified(tmp_path, monkeypatch):
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
