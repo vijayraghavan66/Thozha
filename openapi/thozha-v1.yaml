@@ -394,6 +394,24 @@ paths:
         '204': { description: Owned memory deleted. }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/supervisor/readiness:
+    get:
+      operationId: getWebSupervisorReadiness
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser authentication configuration
+      tags: [companion]
+      description: >
+        Returns only safe component states and reason codes. Codex credential
+        file presence is preflight evidence and is not reported as runtime
+        authentication unless a model turn has succeeded in this process.
+      responses:
+        '200':
+          description: Supervisor, engine, device-mapping, and automation readiness.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebSupervisorReadiness' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/web/tasks:
     post:
       operationId: submitWebSupervisorTask
@@ -412,8 +430,13 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/WebTaskCreate' }
       responses:
+        '200':
+          description: Completed idempotent replay; no worker wake occurs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebTaskResult' }
         '202':
-          description: Task accepted or idempotent replay.
+          description: Newly accepted task or nonterminal idempotent replay.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WebTaskResult' }
@@ -533,7 +556,7 @@ paths:
           description: Current cancellation state; an operation already started may not be reversible.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/WebTaskResult' }
+              schema: { $ref: '#/components/schemas/WebTaskCancellation' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
@@ -1389,6 +1412,15 @@ components:
       required: true
       schema: { type: string, pattern: '^[0-9a-f]{32}$' }
   schemas:
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          oneOf:
+            - { type: string }
+            - { type: object, additionalProperties: true }
+            - { type: array, items: {} }
     WebLoginRequest:
       type: object
       additionalProperties: false
@@ -1501,7 +1533,7 @@ components:
       required: [objective, capability_scope, idempotency_key, requester_device_id]
       properties:
         objective: { type: string, minLength: 1, maxLength: 20000 }
-        capability_scope: { type: array, minItems: 1, maxItems: 1, items: { type: string, enum: [read_only, assistant, development] } }
+        capability_scope: { type: array, minItems: 1, maxItems: 1, items: { type: string, enum: [read_only, mac_read, assistant, development] } }
         idempotency_key: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' }
         requester_device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
     WebTaskResult:
@@ -1515,6 +1547,51 @@ components:
         result_digest: { type: [string, 'null'], pattern: '^[0-9a-f]{64}$' }
         idempotent_replay: { type: boolean }
         error_code: { type: [string, 'null'] }
+    WebSupervisorReadiness:
+      type: object
+      required: [status, components]
+      properties:
+        status: { type: string, enum: [ready, degraded] }
+        components:
+          type: object
+          required: [authentication, device_mapping, engine, supervisor_worker, automation_scheduler]
+          properties:
+            authentication:
+              type: object
+              required: [browser_session, codex_sdk]
+              properties:
+                browser_session: { type: string, const: authenticated }
+                codex_sdk: { type: string, enum: [not_reported, missing, credential_present_unverified, verified_this_process, unavailable] }
+            device_mapping:
+              allOf:
+                - $ref: '#/components/schemas/WebComponentReadiness'
+                - type: object
+                  required: [active_device_count]
+                  properties:
+                    active_device_count: { type: integer, minimum: 0 }
+            engine:
+              allOf:
+                - $ref: '#/components/schemas/WebComponentReadiness'
+                - type: object
+                  properties:
+                    check: { type: string, enum: [preflight, runtime] }
+            supervisor_worker: { $ref: '#/components/schemas/WebComponentReadiness' }
+            automation_scheduler: { $ref: '#/components/schemas/WebComponentReadiness' }
+    WebComponentReadiness:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string, enum: [ready, unavailable, unknown] }
+        reason: { type: string }
+    WebTaskCancellation:
+      type: object
+      additionalProperties: false
+      required: [task_id, state, cancelled, action_may_have_started]
+      properties:
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        state: { type: string, enum: [CREATED, PLANNING, RUNNING, VERIFYING, WAITING_APPROVAL, PAUSED, COMPLETED, FAILED, CANCELLED] }
+        cancelled: { type: boolean }
+        action_may_have_started: { type: boolean }
     WebTaskEventPage:
       type: object
       required: [task_id, events, next_seq]
@@ -1665,7 +1742,7 @@ components:
         objective: { type: string, minLength: 1, maxLength: 20000 }
         capability_scope:
           type: array
-          items: { type: string, enum: [read_only, assistant, development] }
+          items: { type: string, enum: [read_only, mac_read, assistant, development] }
         idempotency_key: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' }
         requester_device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
     LinkTaskResult:
@@ -1680,17 +1757,21 @@ components:
         idempotent_replay: { type: boolean }
     Approval:
       type: object
-      required: [id, task_id, operation, target_resource, operation_digest, status, created_at, expires_at]
+      required: [id, task_id, operation, target_resource, operation_digest, status, created_at, expires_at, requester_device_id]
       properties:
         id: { type: string, pattern: '^[0-9a-f]{32}$' }
         task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
         operation: { type: string }
         target_resource: { type: string }
         canonical_arguments: { type: object, additionalProperties: true }
+        arguments: { type: object, additionalProperties: true }
         operation_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        reason: { type: string }
+        risk: { type: string, const: requires_user_approval }
         status: { type: string }
         created_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
+        requester_device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
     ApprovalDecision:
       type: object
       additionalProperties: false
