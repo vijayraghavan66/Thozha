@@ -2,6 +2,10 @@ import { z } from 'zod';
 import type { components, paths } from './generated';
 import type { WebConversationSseEvent } from '../../../contracts/web-api/v1';
 import { readConversationStream } from './sse';
+import { WebApiError } from './errors';
+import { createControlApi } from './control';
+
+export { WebApiError } from './errors';
 
 type Schemas = components['schemas'];
 export type LoginInput = Schemas['WebLoginRequest'];
@@ -88,16 +92,6 @@ export type WebMessage = z.infer<typeof messageContract>;
 export type ConversationEvent = z.infer<typeof eventContract>;
 export type WebMemory = z.infer<typeof memoryContract>;
 
-export class WebApiError extends Error {
-  constructor(
-    readonly kind: 'http' | 'connection' | 'timeout' | 'protocol' | 'html',
-    readonly status?: number
-  ) {
-    super(kind === 'http' ? `Browser API returned HTTP ${status}` : `Browser API ${kind} error`);
-    this.name = 'WebApiError';
-  }
-}
-
 export function isUnauthorized(error: unknown) {
   return error instanceof WebApiError && error.status === 401;
 }
@@ -115,6 +109,7 @@ export function errorText(error: unknown, action = 'complete this request'): str
   if (error.kind === 'timeout') return `The server took too long to ${action}.`;
   if (error.kind === 'connection')
     return 'The browser could not reach the workspace API. Check your connection and retry.';
+  if (error.kind === 'integrity') return 'The data did not pass its integrity check.';
   switch (error.status) {
     case 401:
       return 'Your Web session is no longer valid. Sign in again.';
@@ -145,27 +140,76 @@ const memoryPath: keyof paths = '/v1/web/memory';
 const memorySearchPath: keyof paths = '/v1/web/memory/search';
 const detailPath = (id: string) => `${conversationsPath}/${encodeURIComponent(id)}`;
 const requestTimeout = 15_000;
-type Options = {
-  method?: 'POST' | 'DELETE';
+export type Options = {
+  method?: 'POST' | 'PATCH' | 'DELETE';
   body?: object;
   csrf?: string;
   key?: string;
   signal?: AbortSignal;
   stream?: boolean;
+  cursor?: number;
+  accept?: 'application/zip';
+  explain?: boolean;
 };
+type ExpectedStatus = number | readonly number[];
+export type JsonRequest = <S extends z.ZodType>(
+  path: string,
+  status: ExpectedStatus,
+  schema: S,
+  options?: Options
+) => Promise<z.output<S>>;
+export type Exchange = <T>(
+  path: string,
+  status: ExpectedStatus,
+  options: Options,
+  consume: (response: Response, signal: AbortSignal) => Promise<T>
+) => Promise<T>;
+
+async function readControlError(response: Response, signal: AbortSignal) {
+  if (
+    ![400, 403, 404, 409, 422, 500, 501, 503].includes(response.status) ||
+    !response.headers.get('content-type')?.toLowerCase().startsWith('application/json')
+  )
+    return undefined;
+  const json: unknown = await response.json().catch(() => {
+    if (signal.aborted) throw signal.reason;
+    return undefined;
+  });
+  const parsed = z
+    .object({
+      detail: z.union([z.string(), z.object({ reason: z.string() })]),
+    })
+    .safeParse(json);
+  const detail = parsed.data?.detail;
+  const message = typeof detail === 'string' ? detail : detail?.reason;
+  return message && message.length <= 300 && !/[\r\n]/.test(message) ? message : undefined;
+}
 
 export function createWebApi(fetcher: typeof fetch = globalThis.fetch.bind(globalThis)) {
   async function exchange<T>(
     path: string,
-    expectedStatus: number,
+    expectedStatus: ExpectedStatus,
     options: Options,
     consume: (response: Response, signal: AbortSignal) => Promise<T>
   ): Promise<T> {
-    const { signal, method = 'GET', body, csrf, key, stream = false } = options;
-    const headers = new Headers({ Accept: stream ? 'text/event-stream' : 'application/json' });
+    const {
+      signal,
+      method = 'GET',
+      body,
+      csrf,
+      key,
+      stream = false,
+      cursor,
+      accept,
+      explain,
+    } = options;
+    const headers = new Headers({
+      Accept: accept ?? (stream ? 'text/event-stream' : 'application/json'),
+    });
     if (body !== undefined) headers.set('Content-Type', 'application/json');
     if (csrf) headers.set('X-Thozha-CSRF', csrf);
     if (key) headers.set('Idempotency-Key', key);
+    if (cursor) headers.set('Last-Event-ID', String(cursor));
     const controller = new AbortController();
     const abort = () => controller.abort(signal?.reason);
     if (signal?.aborted) abort();
@@ -184,11 +228,21 @@ export function createWebApi(fetcher: typeof fetch = globalThis.fetch.bind(globa
       }).catch(() => {
         throw controller.signal.aborted ? controller.signal.reason : new WebApiError('connection');
       });
-      if (!response.ok) throw new WebApiError('http', response.status);
+      if (!response.ok)
+        throw new WebApiError(
+          'http',
+          response.status,
+          explain ? await readControlError(response, controller.signal) : undefined
+        );
       if (response.headers.get('content-type')?.toLowerCase().startsWith('text/html')) {
         throw new WebApiError('html');
       }
-      if (response.status !== expectedStatus) throw new WebApiError('protocol');
+      if (
+        typeof expectedStatus === 'number'
+          ? response.status !== expectedStatus
+          : !expectedStatus.includes(response.status)
+      )
+        throw new WebApiError('protocol');
       if (stream) clearTimeout(timeout);
       return await consume(response, controller.signal);
     } finally {
@@ -199,7 +253,7 @@ export function createWebApi(fetcher: typeof fetch = globalThis.fetch.bind(globa
 
   function request<S extends z.ZodType>(
     path: string,
-    expectedStatus: number,
+    expectedStatus: ExpectedStatus,
     schema: S,
     options: Options = {}
   ): Promise<z.output<S>> {
@@ -232,6 +286,13 @@ export function createWebApi(fetcher: typeof fetch = globalThis.fetch.bind(globa
       }
       const mutation = { method: 'POST', csrf, body: {} } as const;
       return {
+        ...createControlApi(
+          (path, status, schema, options) =>
+            auth(request(path, status, schema, { ...options, explain: true })),
+          (path, status, options, consume) =>
+            auth(exchange(path, status, { ...options, explain: true }, consume)),
+          csrf
+        ),
         logout: () => request(logoutPath, 204, z.void(), mutation),
         list: (signal?: AbortSignal) =>
           auth(

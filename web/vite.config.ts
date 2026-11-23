@@ -14,7 +14,16 @@ if (
   );
 }
 const uuid = '[a-fA-F0-9-]{36}';
-const webPaths = `^/v1/web/(?:session(?:/login|/logout)?|conversations(?:/${uuid}(?:/archive|/messages(?:/stream|/${uuid}/cancel)?)?)?|memory(?:/search|/[a-f0-9]{32})?)(?:\\?|$)`;
+const id = '[a-f0-9]{32}';
+const webPaths = `^/v1/web/(?:${[
+  'session(?:/login|/logout)?',
+  `conversations(?:/${uuid}(?:/archive|/messages(?:/stream|/${uuid}/cancel)?)?)?`,
+  `memory(?:/search|/${id})?`,
+  `tasks(?:/${id}(?:/events(?:/stream)?|/cancel|/artifacts(?:/[a-f0-9]{64}/download)?)?)?`,
+  `approvals/(?:pending|${id}(?:/decision)?)`,
+  `devices(?:/${id}(?:/revoke)?)?`,
+  'automations(?:/capabilities|/[a-f0-9]{16}(?:/history|/enable|/disable|/pause|/trigger)?)?',
+].join('|')})(?:\\?|$)`;
 const proxy: Record<string, ProxyOptions> = {
   [webPaths]: {
     target: upstream.origin,

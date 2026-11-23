@@ -123,11 +123,13 @@ export default function ConversationWorkspace({
   active,
   connected,
   reduced,
+  onReviewTask,
 }: {
   api: WorkspaceApi;
   active: boolean;
   connected: boolean;
   reduced: boolean;
+  onReviewTask: (objective: string) => void;
 }) {
   const cache = useQueryClient();
   const [selection, setSelection] = useState<string | null>(null);
@@ -650,6 +652,18 @@ export default function ConversationWorkspace({
             <p className={`mt-2 ${muted}`}>
               Jarvis can use this conversation’s history. Browser chat cannot run Mac tools.
               Incremental replies require a streaming model.
+            </p>
+            <button
+              type="button"
+              className={`${outline} mt-3`}
+              disabled={!connected}
+              onClick={() => onReviewTask(draft.trim())}
+            >
+              Review as supervisor task
+            </button>
+            <p className={`mt-2 ${muted}`}>
+              Open a separate task form, optionally with your current draft. Nothing is submitted
+              automatically.
             </p>
           </div>
           {snapshot && (

@@ -59,3 +59,99 @@ describe('browser Web API', () => {
     await expect(api.session()).rejects.toEqual(new WebApiError('protocol'));
   });
 });
+
+describe('owner-scoped supervisor API', () => {
+  const taskId = '1'.repeat(32);
+  const deviceId = '2'.repeat(32);
+
+  it('accepts a completed idempotent replay without changing the original request', async () => {
+    const body = {
+      requester_device_id: deviceId,
+      objective: 'Read status only',
+      capability_scope: ['read_only'] as const,
+      idempotency_key: 'stable-original-task-key',
+    };
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
+      expect(url).toBe('/v1/web/tasks');
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(String(init?.body))).toEqual(body);
+      expect(new Headers(init?.headers).get('X-Thozha-CSRF')).toBe('test-csrf');
+      return Response.json(
+        {
+          task_id: taskId,
+          state: 'COMPLETED',
+          summary: 'saved',
+          idempotent_replay: true,
+        },
+        { status: 200 }
+      );
+    });
+    const api = createWebApi(fetcher).authorized('test-csrf', vi.fn());
+    await expect(
+      api.submitTask({ ...body, capability_scope: [...body.capability_scope] })
+    ).resolves.toMatchObject({
+      task_id: taskId,
+      state: 'COMPLETED',
+      idempotent_replay: true,
+    });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it('forwards only safe server errors for control routes, never validation input or login details', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ detail: 'Supervisor task worker is unavailable' }, { status: 503 })
+      )
+      .mockResolvedValueOnce(
+        Response.json({ detail: [{ input: 'private prompt' }] }, { status: 422 })
+      )
+      .mockResolvedValueOnce(
+        Response.json({ detail: 'private authentication error' }, { status: 401 })
+      );
+    const api = createWebApi(fetcher);
+    const control = api.authorized('test-csrf', vi.fn());
+    const body = {
+      requester_device_id: deviceId,
+      objective: 'Test',
+      capability_scope: ['read_only' as const],
+      idempotency_key: 'test-key-repeat',
+    };
+    await expect(control.submitTask(body)).rejects.toMatchObject({
+      status: 503,
+      detail: 'Supervisor task worker is unavailable',
+    });
+    await expect(control.submitTask(body)).rejects.toMatchObject({
+      status: 422,
+      detail: undefined,
+    });
+    await expect(api.login({ username: 'test', password: 'temporary' })).rejects.toMatchObject({
+      status: 401,
+      detail: undefined,
+    });
+  });
+
+  it('rejects a mismatched task event frame and resumes only past the saved sequence', async () => {
+    const event = {
+      seq: 9,
+      event_type: 'task.state',
+      created_at: '2026-11-23T00:00:00Z',
+      payload: { to: 'RUNNING' },
+    };
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (path, init) => {
+      expect(path).toBe(`/v1/web/tasks/${taskId}/events/stream?after_seq=7`);
+      expect(new Headers(init?.headers).get('Last-Event-ID')).toBe('7');
+      return new Response(
+        `: keep-alive\n\nid: 9\nevent: task.state\ndata: ${JSON.stringify(event)}\n\n` +
+          `id: 10\nevent: task.state\ndata: ${JSON.stringify(event)}\n\n`,
+        { headers: { 'Content-Type': 'text/event-stream' } }
+      );
+    });
+    const onEvent = vi.fn();
+    const api = createWebApi(fetcher).authorized('test-csrf', vi.fn());
+    await expect(
+      api.streamTaskEvents(taskId, 7, new AbortController().signal, vi.fn(), onEvent)
+    ).rejects.toMatchObject({ kind: 'protocol' });
+    expect(onEvent.mock.calls).toEqual([[event]]);
+  });
+});

@@ -3,20 +3,45 @@ import { Chip, Head, Line, Panel, Row, Stat, Unavailable } from '../components/u
 import { LiquidCard } from '../components/LiquidSurface';
 import { WaterSurface } from '../components/WaterSurface';
 import { field, formatDate, muted, outline, solid } from '../components/styles';
+import type { WorkspaceApi } from '../api/client';
+import { httpStatus, taskHref, useApprovals, useDevices, useTasks } from './controlState';
 
 export function Overview({
+  api,
   onChat,
   onDevices,
+  onSupervisor,
   onSettings,
   connected,
   reduced,
 }: {
+  api: WorkspaceApi;
   onChat: () => void;
   onDevices: () => void;
+  onSupervisor: () => void;
   onSettings: () => void;
   connected: boolean;
   reduced: boolean;
 }) {
+  const tasks = useTasks(api, 'active', connected);
+  const devices = useDevices(api, connected);
+  const approvals = useApprovals(api, connected);
+  const stats = (
+    query: typeof tasks | typeof devices | typeof approvals,
+    count: number | undefined,
+    caption: string
+  ) => ({
+    value: query.isSuccess && count !== undefined ? String(count) : '—',
+    detail: !connected
+      ? 'Connection unverified'
+      : query.isSuccess
+        ? caption
+        : [403, 404, 503].includes(httpStatus(query.error) ?? 0)
+          ? 'Unavailable for this owner'
+          : query.isError
+            ? 'Could not load from the backend'
+            : 'Checking Web API…',
+  });
   return (
     <>
       <Head
@@ -53,9 +78,18 @@ export function Overview({
         </div>
       </div>
       <div className="grid grid-cols-4 gap-3 max-xl:grid-cols-2 max-[360px]:grid-cols-1">
-        <Stat label="TASKS" value="—" detail="No browser task API" />
-        <Stat label="DEVICES" value="—" detail="No browser device API" />
-        <Stat label="APPROVALS" value="—" detail="Not exposed to Web" />
+        <Stat
+          label="TASKS"
+          {...stats(tasks, tasks.data?.tasks.length, 'Active tasks returned · up to 100')}
+        />
+        <Stat
+          label="DEVICES"
+          {...stats(devices, devices.data?.count, 'Active pairings mapped to you')}
+        />
+        <Stat
+          label="APPROVALS"
+          {...stats(approvals, approvals.data?.count, 'Pending approvals returned · up to 100')}
+        />
         <Stat
           label="WEB SESSION"
           value={connected ? 'Active' : 'Unverified'}
@@ -74,12 +108,38 @@ export function Overview({
           />
           <Line
             title="Task activity"
-            desc="Browser sessions do not have access to supervisor tasks or approvals."
-            flag="Unavailable"
+            desc={
+              tasks.isSuccess
+                ? tasks.data.tasks.length
+                  ? 'Recent active tasks saved by the supervisor.'
+                  : 'No active tasks were returned.'
+                : !connected
+                  ? 'Task activity will be checked after reconnection.'
+                  : 'See Developer Studio for task availability and approvals.'
+            }
           />
-          <button type="button" className={outline + ' mt-3'} onClick={onChat}>
-            Open conversations
-          </button>
+          {connected &&
+            tasks.isSuccess &&
+            tasks.data.tasks.slice(0, 3).map(task => (
+              <Row
+                key={task.task_id}
+                main={task.summary || `Task ${task.task_id.slice(0, 8)}`}
+                sub={task.state.replace(/_/g, ' ')}
+                right={
+                  <a className={`${outline} inline-block`} href={taskHref(task.task_id)}>
+                    Open task
+                  </a>
+                }
+              />
+            ))}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" className={outline} onClick={onChat}>
+              Open conversations
+            </button>
+            <button type="button" className={outline} onClick={onSupervisor}>
+              Open supervisor
+            </button>
+          </div>
         </Panel>
         <Panel cls="p-5">
           <div className="mb-2 flex justify-between gap-2">
@@ -92,8 +152,11 @@ export function Overview({
           />
           <Line
             title="Devices and pairing"
-            desc="The companion API is outside the browser authorization boundary."
-            flag="Unavailable"
+            desc={
+              devices.isSuccess
+                ? 'Device Hub lists active mapped pairings, not live device presence.'
+                : 'See Device Hub for the status of the browser-to-device mapping.'
+            }
           />
           <div className="mt-3 flex flex-wrap gap-2">
             <button type="button" className={outline} onClick={onDevices}>
@@ -116,7 +179,7 @@ const deviceExamples = [
   ['Smart speaker', 'An illustrative audio-device category.'],
 ] as const;
 
-export function DeviceHub() {
+export function DeviceExamples() {
   const [show, setShow] = useState(false);
   const [selected, select] = useState<(typeof deviceExamples)[number]>(deviceExamples[0]);
   return (
@@ -138,7 +201,7 @@ export function DeviceHub() {
       />
       <Unavailable
         title="Bring your devices together."
-        reason="The browser API does not expose discovery, pairing, status, permissions or revocation. This page never scans your network."
+        reason="This Web owner has no available device mapping. These examples are not paired devices. Web v1 never scans your network or enrolls devices."
       >
         <button type="button" className={outline} disabled>
           Discover devices
@@ -194,7 +257,7 @@ type Draft = {
   action: string;
   approval: boolean;
 };
-export function Blueprint() {
+export function AutomationDrafts() {
   const [builder, setBuilder] = useState(false);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   function saveDraft(event: FormEvent<HTMLFormElement>) {
@@ -241,7 +304,7 @@ export function Blueprint() {
       />
       <Unavailable
         title="Automation service unavailable"
-        reason="Web v1 has no mounted scheduler API. Drafts stay on this page until you leave; they are not saved, scheduled, enabled or run on your host."
+        reason="The Web automation feature is disabled or not mounted on this backend. Drafts stay on this page until you leave; they are not saved, scheduled, enabled or run on your host."
       />
       {builder && (
         <Panel cls="th-enter mt-5 max-w-[780px] p-6">
@@ -326,37 +389,6 @@ export function Blueprint() {
   );
 }
 
-export function DeveloperStudio() {
-  return (
-    <>
-      <Head
-        label="EXECUTION / EVIDENCE"
-        title="Developer Studio"
-        desc="Inspect which developer operations are available in this browser session."
-      />
-      <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
-        <Stat label="REPOSITORY" value="Thozha" detail="Workspace name; no GitHub connection" />
-        <Stat label="CI" value="—" detail="Build and test results not connected" />
-        <Stat label="SUPERVISOR TASKS" value="—" detail="No browser task API" />
-      </div>
-      <div className="mt-5 grid grid-cols-2 gap-4 max-lg:grid-cols-1">
-        <Unavailable
-          title="Task timeline"
-          reason="Development jobs, execution logs, builds and artifact delivery are not exposed to Web sessions. Chat responses are not Mac task execution."
-        >
-          <button type="button" className={outline} disabled>
-            Run project checks
-          </button>
-        </Unavailable>
-        <Unavailable
-          title="Review and approvals"
-          reason="This browser session cannot read or decide supervisor approvals. No Mac permission can be granted here."
-        />
-      </div>
-    </>
-  );
-}
-
 export function Settings({
   userId,
   expiresAt,
@@ -419,8 +451,12 @@ export function Settings({
             />
             <Row
               main="Device permissions"
-              sub="Managed through the separate companion authorization boundary."
-              right="Unavailable"
+              sub="Review and revoke explicitly mapped pairings. Enrollment and permissions policy are managed outside Web."
+              right={
+                <a className={`${outline} inline-block`} href="#/device-hub">
+                  Open Device Hub
+                </a>
+              }
             />
             <Row
               main="Notification preferences"

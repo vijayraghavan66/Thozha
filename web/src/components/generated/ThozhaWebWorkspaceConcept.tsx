@@ -1,12 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { WorkspaceApi } from '../../api/client';
-import {
-  Blueprint,
-  DeveloperStudio,
-  DeviceHub,
-  Overview,
-  Settings,
-} from '../../pages/WorkspacePages';
+import { Overview, Settings } from '../../pages/WorkspacePages';
 import { Chip, Crest, Loading, Modal, Notice } from '../ui';
 import { AnchoredSurface, NotificationPanel, TravelingSurface } from '../LiquidSurface';
 import { muted } from '../styles';
@@ -14,6 +8,9 @@ import { muted } from '../styles';
 const ConversationWorkspace = lazy(() => import('../../chat/ConversationWorkspace'));
 const TradingLab = lazy(() => import('../../trading/TradingLab'));
 const MemoryCenter = lazy(() => import('../../memory/MemoryCenter'));
+const DeveloperStudio = lazy(() => import('../../pages/DeveloperStudio'));
+const DeviceHub = lazy(() => import('../../pages/DeviceHub'));
+const AutomationStudio = lazy(() => import('../../pages/AutomationStudio'));
 const sections = [
   ['Overview', 'overview', '◫'],
   ['AI Workspace', 'ai-workspace', '◉'],
@@ -25,8 +22,8 @@ const sections = [
   ['Settings', 'settings', '⚙'],
 ] as const;
 type Section = (typeof sections)[number][0];
-const currentPage = () =>
-  sections.find(([, slug]) => window.location.hash === `#/${slug}`)?.[0] ?? 'Overview';
+const currentPage = (hash: string) =>
+  sections.find(([, slug]) => hash.split('?')[0] === `#/${slug}`)?.[0] ?? 'Overview';
 const motionKey = 'thozha-web.motion.v1';
 
 function SearchGlyph({ open }: { open: boolean }) {
@@ -139,8 +136,14 @@ export function ThozhaWebWorkspaceConcept({
   logout: () => void;
   checkSession: () => void;
 }) {
-  const [page, setPage] = useState<Section>(currentPage);
-  const [visitedChat, setVisitedChat] = useState(() => currentPage() === 'AI Workspace');
+  const [hash, setHash] = useState(() => window.location.hash);
+  const page = currentPage(hash);
+  const taskParam = new URLSearchParams(hash.split('?')[1]).get('task');
+  const taskId = taskParam && /^[0-9a-f]{32}$/.test(taskParam) ? taskParam : undefined;
+  const [taskDraft, setTaskDraft] = useState<string>();
+  const [visitedChat, setVisitedChat] = useState(
+    () => currentPage(window.location.hash) === 'AI Workspace'
+  );
   const [dialog, setDialog] = useState<'navigation' | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [drawerClosing, setDrawerClosing] = useState(false);
@@ -161,9 +164,9 @@ export function ThozhaWebWorkspaceConcept({
 
   useEffect(() => {
     function onNavigate() {
-      const next = currentPage();
+      const next = currentPage(window.location.hash);
       focusAfterNavigation.current = true;
-      setPage(next);
+      setHash(window.location.hash);
       if (next === 'AI Workspace') setVisitedChat(true);
       if (!drawerClosingRef.current) setDialog(null);
       setSearchOpen(false);
@@ -501,8 +504,10 @@ export function ThozhaWebWorkspaceConcept({
               <div key={page} className="th-enter">
                 {page === 'Overview' && (
                   <Overview
+                    api={api}
                     onChat={() => go('AI Workspace')}
                     onDevices={() => go('Device Hub')}
+                    onSupervisor={() => go('Developer Studio')}
                     onSettings={() => go('Settings')}
                     connected={!problem}
                     reduced={motion.reduced}
@@ -513,14 +518,32 @@ export function ThozhaWebWorkspaceConcept({
                     <TradingLab />
                   </Suspense>
                 )}
-                {page === 'Device Hub' && <DeviceHub />}
-                {page === 'Automations' && <Blueprint />}
+                {page === 'Device Hub' && (
+                  <Suspense fallback={<Loading label="Loading Device Hub…" />}>
+                    <DeviceHub api={api} connected={!problem} />
+                  </Suspense>
+                )}
+                {page === 'Automations' && (
+                  <Suspense fallback={<Loading label="Loading Automations…" />}>
+                    <AutomationStudio api={api} connected={!problem} />
+                  </Suspense>
+                )}
                 {page === 'Memory Center' && (
                   <Suspense fallback={<Loading label="Loading Memory Center…" />}>
                     <MemoryCenter api={api} connected={!problem} />
                   </Suspense>
                 )}
-                {page === 'Developer Studio' && <DeveloperStudio />}
+                {page === 'Developer Studio' && (
+                  <Suspense fallback={<Loading label="Loading Developer Studio…" />}>
+                    <DeveloperStudio
+                      api={api}
+                      connected={!problem}
+                      taskId={taskId}
+                      draft={taskDraft}
+                      clearDraft={() => setTaskDraft(undefined)}
+                    />
+                  </Suspense>
+                )}
                 {page === 'Settings' && (
                   <Settings
                     userId={userId}
@@ -544,6 +567,10 @@ export function ThozhaWebWorkspaceConcept({
                     active={page === 'AI Workspace'}
                     connected={!problem}
                     reduced={motion.reduced}
+                    onReviewTask={objective => {
+                      setTaskDraft(objective);
+                      go('Developer Studio');
+                    }}
                   />
                 </Suspense>
               </div>

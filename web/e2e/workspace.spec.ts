@@ -1,15 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { signIn } from './session';
 
-async function signIn(page: Page, path = '/') {
-  const password = process.env.THOZHA_E2E_PASSWORD;
-  if (!password) throw new Error('Playwright fixture password is missing');
-  await page.goto(path);
-  await page.getByLabel('Workspace ID').fill('web-e2e-owner');
-  await page.getByLabel('Password').fill(password);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByText('WEB ALPHA', { exact: true })).toBeVisible();
-}
 async function createConversation(page: Page, title: string) {
   await page.getByRole('button', { name: /New conversation/ }).click();
   await page.getByLabel('Conversation title (optional)').fill(title);
@@ -213,6 +205,9 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('link', { name: 'Developer Studio' }).click();
   await expect(page.getByRole('button', { name: 'Run project checks' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'New supervisor task' })).toBeDisabled();
+  expect((await page.request.get('/v1/web/tasks')).status()).toBe(403);
+  expect((await page.request.get('/v1/web/automations/capabilities')).status()).toBe(404);
   await page.getByTestId('search-trigger').click();
   await expect(page.getByRole('combobox', { name: 'Jump to page' })).toBeFocused();
   await page.keyboard.press('Escape');

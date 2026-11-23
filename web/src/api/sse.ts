@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { WebConversationSseEvent } from '../../../contracts/web-api/v1';
+import { WebApiError } from './errors';
 
 const response = { response_id: z.uuid() };
 const mode = z.enum(['engine_stream', 'buffered']);
@@ -35,47 +36,57 @@ const events = z.discriminatedUnion('event', [
 ]) satisfies z.ZodType<WebConversationSseEvent>;
 const maxEventSize = 1024 * 1024;
 
-export async function readConversationStream(
+type Frame = { event: string; id: string; data: unknown };
+
+export async function readEventStream(
   body: ReadableStream<Uint8Array>,
-  conversationId: string,
-  onEvent: (event: WebConversationSseEvent) => void
-): Promise<void> {
+  onFrame: (frame: Frame) => boolean | void,
+  idleTimeout?: number
+): Promise<boolean> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let acceptedId: string | undefined;
-  let finished = false;
+  async function read() {
+    if (!idleTimeout) return reader.read();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new WebApiError('timeout')), idleTimeout);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   try {
-    while (!finished) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error('The response stream ended before a terminal event.');
+    for (;;) {
+      const { value, done } = await read();
+      if (done) {
+        if (buffer.trim()) throw new Error('Incomplete SSE frame.');
+        return false;
+      }
       buffer += decoder.decode(value, { stream: true });
       let boundary: RegExpExecArray | null;
-      while (!finished && (boundary = /\r?\n\r?\n/.exec(buffer))) {
+      while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
         if (boundary.index > maxEventSize)
           throw new Error('Response stream event exceeds the size limit.');
         const block = buffer.slice(0, boundary.index);
         buffer = buffer.slice(boundary.index + boundary[0].length);
-        let eventName = '';
+        let event = '';
+        let id = '';
         const lines: string[] = [];
         for (const line of block.split(/\r?\n/)) {
-          if (line.startsWith('event:')) eventName = line.slice(6).trim();
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          if (line.startsWith('id:')) id = line.slice(3).trim();
           if (line.startsWith('data:')) lines.push(line.slice(5).replace(/^ /, ''));
         }
         if (!lines.length) continue;
         const data: unknown = JSON.parse(lines.join('\n'));
-        const event = events.parse({ event: eventName, data });
-        if (event.event === 'accepted') {
-          if (acceptedId || event.data.conversation_id !== conversationId)
-            throw new Error('Unexpected stream acceptance.');
-          acceptedId = event.data.response_id;
-        }
-        if (!acceptedId || event.data.response_id !== acceptedId)
-          throw new Error('Unexpected stream response ID.');
-        onEvent(event);
-        finished = event.event === 'done' || event.event === 'error';
+        if (onFrame({ event, id, data })) return true;
       }
-      if (!finished && buffer.length > maxEventSize)
+      if (buffer.length > maxEventSize)
         throw new Error('Response stream event exceeds the size limit.');
     }
   } finally {
@@ -85,4 +96,25 @@ export async function readConversationStream(
     });
     reader.releaseLock();
   }
+}
+
+export async function readConversationStream(
+  body: ReadableStream<Uint8Array>,
+  conversationId: string,
+  onEvent: (event: WebConversationSseEvent) => void
+): Promise<void> {
+  let acceptedId: string | undefined;
+  const finished = await readEventStream(body, ({ event: name, data }) => {
+    const event = events.parse({ event: name, data });
+    if (event.event === 'accepted') {
+      if (acceptedId || event.data.conversation_id !== conversationId)
+        throw new Error('Unexpected stream acceptance.');
+      acceptedId = event.data.response_id;
+    }
+    if (!acceptedId || event.data.response_id !== acceptedId)
+      throw new Error('Unexpected stream response ID.');
+    onEvent(event);
+    return event.event === 'done' || event.event === 'error';
+  });
+  if (!finished) throw new Error('The response stream ended before a terminal event.');
 }
