@@ -888,19 +888,22 @@ def create_web_conversations_router(
             ]
             mode = _engine_stream_mode(engine, model)
             parts: list[str] = []
-            yield _sse_event(
-                "accepted",
-                {
-                    "conversation_id": conversation_id,
-                    "message_id": result["user"]["id"],
-                    "response_id": response_id,
-                    "status": "running",
-                    "replayed": replay,
-                },
-            )
-            yield _sse_event("started", {"response_id": response_id})
-            yield _sse_event("stream_mode", {"response_id": response_id, "mode": mode})
+            finalized = False
             try:
+                yield _sse_event(
+                    "accepted",
+                    {
+                        "conversation_id": conversation_id,
+                        "message_id": result["user"]["id"],
+                        "response_id": response_id,
+                        "status": "running",
+                        "replayed": replay,
+                    },
+                )
+                yield _sse_event("started", {"response_id": response_id})
+                yield _sse_event(
+                    "stream_mode", {"response_id": response_id, "mode": mode}
+                )
                 stream_method = getattr(engine, "stream", None)
                 if callable(stream_method):
                     async for chunk in stream_method(
@@ -912,6 +915,7 @@ def create_web_conversations_router(
                     ):
                         if store.cancellation_requested(owner_id, response_id):
                             store.finish(owner_id, response_id, status="cancelled")
+                            finalized = True
                             yield _sse_event(
                                 "done",
                                 {"response_id": response_id, "status": "cancelled"},
@@ -961,6 +965,7 @@ def create_web_conversations_router(
                         status="completed",
                     )
                     final_status = "completed"
+                finalized = True
                 yield _sse_event(
                     "done",
                     {
@@ -972,6 +977,7 @@ def create_web_conversations_router(
             except asyncio.CancelledError:
                 store.cancel(owner_id, conversation_id, response_id)
                 store.finish(owner_id, response_id, status="cancelled")
+                finalized = True
                 raise
             except Exception as exc:
                 logger.warning(
@@ -987,10 +993,16 @@ def create_web_conversations_router(
                     status="failed",
                     error_code="generation_failed",
                 )
+                finalized = True
                 yield _sse_event(
                     "error",
                     {"response_id": response_id, "code": "generation_failed"},
                 )
+            finally:
+                # Covers GeneratorExit/disconnect as well as task cancellation.
+                if not finalized:
+                    store.cancel(owner_id, conversation_id, response_id)
+                    store.finish(owner_id, response_id, status="cancelled")
 
         return StreamingResponse(
             stream_events(),

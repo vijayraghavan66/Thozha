@@ -12,9 +12,11 @@ import httpx
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from starlette.requests import Request as StarletteRequest
 
 from openjarvis.server.thozha_web_conversations import (
     ConversationStore,
+    MessageCreate,
     _principal_owner,
     create_web_conversations_router,
 )
@@ -199,6 +201,54 @@ def test_stream_endpoint_marks_codex_output_buffered(tmp_path):
     assert response.status_code == 200
     assert '"mode":"buffered"' in response.text
     assert engine.stream_calls == 1
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_disconnected_sse_client_cancels_queued_response(tmp_path):
+    client, engine, store = make_client(tmp_path)
+    conversation_id = create_conversation(client)
+    route = next(
+        route
+        for route in client.app.routes
+        if getattr(route, "path", "").endswith("/messages/stream")
+    )
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": f"/v1/web/conversations/{conversation_id}/messages/stream",
+        "raw_path": b"/v1/web/conversations/stream",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 10000),
+        "server": ("test", 80),
+        "app": client.app,
+    }
+    request = StarletteRequest(scope)
+    response = await route.endpoint(
+        conversation_id,
+        MessageCreate(content="disconnect now"),
+        request,
+        "stream-disconnect-key-0001",
+        {
+            "user_id": "alice",
+            "session_id": "session",
+            "expires_at": int(time.time()) + 600,
+        },
+    )
+    iterator = response.body_iterator
+    first = await anext(iterator)
+    assert "event: accepted" in first
+    await iterator.aclose()
+
+    conversation = store.get("alice", conversation_id)
+    assistant = next(
+        item for item in conversation["messages"] if item["role"] == "assistant"
+    )
+    assert assistant["status"] == "cancelled"
+    assert engine.stream_calls == 0
     store.close()
 
 
