@@ -1,0 +1,37 @@
+# Android / Gradle
+.gradle/
+.kotlin/
+**/build/
+**/local.properties
+*.apk
+*.aab
+
+# Local configuration and secrets
+.env
+.env.*
+**/google-services.json
+**/*.jks
+**/*.keystore
+**/*.p12
+**/*.pfx
+**/*.pem
+**/*.key
+**/secrets/
+**/credentials/
+
+# Runtime state, logs, captures, and user data
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/.wrangler/
+**/logs/
+**/captures/
+**/screenshots/
+agent-evaluation/
+PROGRESS.md
+*.log
+
+# IDE / OS
+.idea/
+.DS_Store
+.migration-staging/
