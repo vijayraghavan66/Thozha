@@ -19,7 +19,7 @@ The monorepo imports each project's reachable branch history under its own direc
 
 ## Scan results
 
-A pattern scan covered all reachable text and binary blobs in the filtered Android, Link and OpenJarvis histories. It found zero home-path matches, AWS access-key shapes, Google API-key shapes, GitHub PAT shapes, JWT shapes, Telegram bot-token shapes, Slack token shapes, or private-key blocks. Eight private-key header strings remain in OpenJarvis documentation/security-test material; source review confirmed they are header-only scanner/test examples with no private-key payload.
+A pattern scan covered all reachable text and binary blobs in the filtered Android, Link and OpenJarvis histories. It found zero home-path matches, AWS access-key shapes, Google API-key shapes, GitHub PAT shapes, JWT shapes, Telegram bot-token shapes, or private-key blocks. Eight private-key header strings remain in OpenJarvis documentation/security-test material; source review confirmed they are header-only scanner/test examples with no private-key payload.
 
 The scan also found six Slack-token-shaped strings in OpenJarvis redaction/security tests and documentation; targeted review classified them as synthetic fixtures used to verify log sanitization, not account credentials.
 
