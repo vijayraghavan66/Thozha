@@ -1,0 +1,492 @@
+from __future__ import annotations
+
+import time
+import uuid
+
+import pytest
+
+from jarvis_link_host.crypto import (
+    DeviceIdentity, EnvelopeError, device_id_for_signing_key, encrypt_envelope,
+    issue_device_certificate, verify_device_certificate,
+)
+from jarvis_link_host.host import JarvisLinkHost, ReplayDetected, TaskEnvelopeError
+from jarvis_link_host.replay import ReplayCache
+from jarvis_link_host.supervisor import ApprovalRecord, MockSupervisor
+
+TENANT = "test-tenant"
+
+
+def setup_host():
+    host = DeviceIdentity.generate()
+    phone = DeviceIdentity.generate()
+    host_id = device_id_for_signing_key(host.signing_public_der)
+    phone_id = device_id_for_signing_key(phone.signing_public_der)
+    host_cert = issue_device_certificate(
+        host=host, tenant_id=TENANT, host_device_id=host_id,
+        signing_public_b64u=host.signing_public_b64u,
+        encryption_public_b64u=host.encryption_public_b64u, device_role="host",
+    )
+    phone_cert = issue_device_certificate(
+        host=host, tenant_id=TENANT, host_device_id=host_id,
+        signing_public_b64u=phone.signing_public_b64u,
+        encryption_public_b64u=phone.encryption_public_b64u,
+    )
+    supervisor = MockSupervisor()
+    processor = JarvisLinkHost(
+        tenant_id=TENANT, device_id=host_id, identity=host,
+        host_certificate=host_cert, supervisor=supervisor, replay_cache=ReplayCache(),
+    )
+    # Synthetic tests below model a single authorized companion.
+    processor.task_authorizer = lambda **_: True
+    return processor, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert
+
+
+def task_envelope(host, phone, host_id, phone_id, host_cert, payload, *, kind="task.submit", now=None, message_id=None):
+    issued = int(time.time() * 1000) if now is None else now
+    return encrypt_envelope(
+        sender=phone, recipient_certificate=host_cert,
+        trusted_host_signing_public_der=host.signing_public_der,
+        tenant_id=TENANT, message_id=message_id or uuid.uuid4().hex,
+        from_device_id=phone_id, to_device_id=host_id,
+        kind=kind, payload=payload,
+        issued_at_unix_ms=issued, expires_at_unix_ms=issued + 60_000,
+        expected_recipient_role="host",
+    )
+
+
+def test_encrypted_safe_task_uses_supervisor_port():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"objective": "summarize project state", "capability_scope": ["read_only"]})
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert result["status"] == "processed"
+    assert result["result"]["kind"] == "task.accepted"
+    assert supervisor.calls[0][0] == "submit_task"
+    assert "command" not in supervisor.calls[0][1]
+
+
+def test_typed_fast_mac_status_bypasses_task_submission():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"command": "mac.status", "version": 1}, kind="fast.command")
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert result["result"] == {"kind": "fast.result", "command": "mac.status", "state": "COMPLETED",
+                                 "executed": True, "success": True,
+                                 "summary": "Mac is online. AI is available.", "online": True, "ai_available": True}
+    assert [call[0] for call in supervisor.calls] == ["fast_command"]
+    assert supervisor.calls[0][1]["command"] == "mac.status"
+    assert supervisor.calls[0][1]["requester_device_id"] == phone_id
+
+
+def test_typed_mac_battery_returns_fresh_verified_status_without_task_or_approval():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"command": "mac.battery", "version": 1}, kind="fast.command")
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert result["result"] == {
+        "kind": "fast.result", "command": "mac.battery", "state": "COMPLETED",
+        "executed": True, "success": True, "battery_percent": 79,
+        "charging": False, "summary": "Battery level: 79%.",
+    }
+    assert supervisor.calls == [("fast_command", {"command": "mac.battery", "requester_device_id": phone_id})]
+
+
+def test_fast_command_rejects_extra_fields_and_unallowlisted_app():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    extra = task_envelope(host, phone, host_id, phone_id, host_cert,
+                          {"command": "mac.status", "version": 1, "shell": "anything"}, kind="fast.command")
+    with pytest.raises(TaskEnvelopeError, match="unsupported typed fast command"):
+        hostproc.receive(extra.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    for app in ("/Applications/Terminal.app", "Calculator; open /tmp", "Spotify --args hidden"):
+        idem = uuid.uuid4().hex
+        env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                            {"command": "app.open", "version": 1, "app": app,
+                             "idempotency_key": idem}, kind="fast.command", message_id=idem)
+        with pytest.raises(TaskEnvelopeError, match="plain application name"):
+            hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert supervisor.calls == []
+
+
+@pytest.mark.parametrize(("app", "bundle_id", "display_name"), [
+    ("Calculator", "com.apple.calculator", "Calculator"),
+    ("com.apple.calculator", "com.apple.calculator", "Calculator"),
+    ("Spotify", "com.spotify.client", "Spotify"),
+    ("com.spotify.client", "com.spotify.client", "Spotify"),
+])
+def test_trusted_app_alias_resolves_to_bundle_and_returns_verified_execution(app, bundle_id, display_name):
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    idem = uuid.uuid4().hex
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": app, "command": "app.open", "idempotency_key": idem, "version": 1},
+                        kind="fast.command", message_id=idem)
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert result["result"] == {
+        "kind": "fast.result", "command": "app.open", "state": "COMPLETED",
+        "bundle_id": bundle_id, "executed": True, "success": True,
+        "summary": f"{display_name} opened.",
+    }
+    assert [call[0] for call in supervisor.calls] == ["fast_command"]
+    assert supervisor.calls[0][1] == {
+        "command": "app.open", "app": bundle_id,
+        "requester_device_id": phone_id, "idempotency_key": idem,
+    }
+
+
+def test_unknown_plain_app_target_uses_normal_supervisor_task_path():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    idem = uuid.uuid4().hex
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": "Terminal", "command": "app.open", "idempotency_key": idem, "version": 1},
+                        kind="fast.command", message_id=idem)
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert result["result"]["kind"] == "task.accepted"
+    assert result["result"]["state"] == "RUNNING"
+    assert "normal supervisor review" in result["result"]["summary"]
+    assert [call[0] for call in supervisor.calls] == ["submit_task"]
+    call = supervisor.calls[0][1]
+    assert call["capability_scope"] == ["assistant"]
+    assert call["idempotency_key"] == idem
+    assert "Terminal" in call["objective"] and "require its normal exact-operation approval" in call["objective"]
+
+
+def test_trusted_app_failure_is_returned_without_claiming_completion():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    supervisor.app_open_result = {
+        "state": "FAILED", "executed": False, "success": False,
+        "bundle_id": "com.apple.calculator", "summary": "Calculator is not installed.",
+    }
+    idem = uuid.uuid4().hex
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": "Calculator", "command": "app.open", "idempotency_key": idem, "version": 1},
+                        kind="fast.command", message_id=idem)
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert result["result"]["state"] == "FAILED"
+    assert result["result"]["summary"] == "Calculator is not installed."
+    assert result["result"]["success"] is False
+
+
+def test_trusted_app_result_without_execution_proof_fails_closed():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    supervisor.app_open_result = {
+        "state": "COMPLETED", "executed": False, "success": True,
+        "bundle_id": "com.apple.calculator", "summary": "Calculator opened.",
+    }
+    idem = uuid.uuid4().hex
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": "Calculator", "command": "app.open", "idempotency_key": idem, "version": 1},
+                        kind="fast.command", message_id=idem)
+    with pytest.raises(TaskEnvelopeError, match="did not verify"):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+
+
+def test_trusted_app_approval_fallback_is_exact_and_sanitized():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    observed = []
+    hostproc.task_observer = lambda **kwargs: observed.append(kwargs)
+    supervisor.app_open_result = {
+        "state": "WAITING_APPROVAL",
+        "task_id": "b" * 32,
+        "summary": "Review the requested app activation.",
+        "approval": {
+            "approval_id": "a" * 32,
+            "task_id": "b" * 32,
+            "operation": "mcp:jarvis_mac:open_app",
+            "target": "com.apple.calculator",
+            "canonical_arguments_digest": "c" * 64,
+            "expires_at_unix_ms": 1_800_000_000_000,
+            "redacted_summary": "Open Calculator in the foreground.",
+            "private_extra": "must not reach the phone",
+        },
+    }
+    idem = uuid.uuid4().hex
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": "Calculator", "command": "app.open", "idempotency_key": idem, "version": 1},
+                        kind="fast.command", message_id=idem)
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    approval = result["result"]["approval"]
+    assert result["result"]["state"] == "WAITING_APPROVAL"
+    assert approval["target"] == "com.apple.calculator"
+    assert approval["operation"] == "mcp:jarvis_mac:open_app"
+    assert "private_extra" not in approval
+    assert observed == [{"task_id": "b" * 32, "idempotency_key": idem, "companion_id": phone_id}]
+
+
+@pytest.mark.parametrize("state", ["EXECUTION_PENDING", "RUNNING", "INDETERMINATE"])
+def test_inflight_app_result_is_preserved_and_observed_without_claiming_success(state):
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    observed = []
+    hostproc.task_observer = lambda **kwargs: observed.append(kwargs)
+    idem = uuid.uuid4().hex
+    supervisor.app_open_result = {
+        "state": state, "request_id": idem, "bundle_id": "com.apple.calculator",
+        "summary": "Jarvis is reconciling the Calculator activation.",
+    }
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": "Calculator", "command": "app.open", "idempotency_key": idem, "version": 1},
+                        kind="fast.command", message_id=idem)
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)["result"]
+    assert result["state"] == state
+    assert result["request_id"] == idem
+    assert result["bundle_id"] == "com.apple.calculator"
+    assert "executed" not in result and "success" not in result
+    assert observed == []  # a typed in-flight fast action has no supervisor task to observe
+
+
+def test_trusted_app_approval_with_mismatched_digest_or_target_fails_closed():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    supervisor.app_open_result = {
+        "state": "WAITING_APPROVAL", "task_id": "b" * 32,
+        "approval": {
+            "approval_id": "a" * 32, "task_id": "b" * 32,
+            "operation": "mcp:jarvis_mac:open_app", "target": "com.fake.app",
+            "canonical_arguments_digest": "c" * 64, "expires_at_unix_ms": 1_800_000_000_000,
+        },
+    }
+    idem = uuid.uuid4().hex
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": "Calculator", "command": "app.open", "idempotency_key": idem, "version": 1},
+                        kind="fast.command", message_id=idem)
+    with pytest.raises(TaskEnvelopeError, match="mismatched target"):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+
+
+def test_replay_of_trusted_app_request_cannot_activate_twice():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    idem = uuid.uuid4().hex
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": "Calculator", "command": "app.open", "idempotency_key": idem, "version": 1},
+                        kind="fast.command", message_id=idem)
+    hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    with pytest.raises(ReplayDetected):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert len([call for call in supervisor.calls if call[0] == "fast_command"]) == 1
+
+
+def test_calculator_idempotency_must_match_signed_envelope():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"app": "Calculator", "command": "app.open", "idempotency_key": "a" * 32, "version": 1},
+                        kind="fast.command", message_id="b" * 32)
+    with pytest.raises(TaskEnvelopeError, match="idempotency does not match"):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert supervisor.calls == []
+
+
+def test_assistant_scope_is_forwarded_to_supervisor_without_executable_fields():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(
+        host,
+        phone,
+        host_id,
+        phone_id,
+        host_cert,
+        {"objective": "Open TextEdit only after approval", "capability_scope": ["assistant"]},
+    )
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert result["result"]["kind"] == "task.accepted"
+    assert supervisor.tasks[result["result"]["task_id"]]["capability_scope"] == ["assistant"]
+    assert "command" not in supervisor.calls[0][1]
+
+
+def test_arbitrary_shell_field_is_rejected_before_supervisor():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"objective": "inspect", "capability_scope": ["read_only"], "command": "rm -rf /"})
+    with pytest.raises(TaskEnvelopeError, match="prohibited executable"):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert supervisor.calls == []
+
+
+def test_replay_and_expiry_are_rejected():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"objective": "inspect", "capability_scope": ["read_only"]}, now=now)
+    hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
+    with pytest.raises(EnvelopeError, match="processed"):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
+    expired = task_envelope(host, phone, host_id, phone_id, host_cert,
+                            {"objective": "inspect", "capability_scope": ["read_only"]}, now=now-120_000)
+    with pytest.raises(EnvelopeError, match="expired"):
+        hostproc.receive(expired.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
+    assert len(supervisor.calls) == 1
+
+
+def test_relay_substituted_device_certificate_is_rejected():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"objective": "inspect", "capability_scope": ["read_only"]})
+    substituted = phone_cert.to_dict()
+    substituted["encryption_public_key_b64url"] = DeviceIdentity.generate().encryption_public_b64u
+    with pytest.raises(EnvelopeError):
+        hostproc.receive(env.to_dict(), sender_certificate=substituted, expected_sender_id=phone_id)
+    assert supervisor.calls == []
+
+
+def test_approval_digest_mismatch_does_not_reach_supervisor():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "shell_exec", "/tmp", digest, now + 60_000))
+    supervisor.task_owners[task_id] = phone_id
+    payload = {"task_id": task_id, "approval_id": approval_id, "decision": "approve",
+               "operation_digest": "b" * 64, "idempotency_key": "decision-1"}
+    env = task_envelope(host, phone, host_id, phone_id, host_cert, payload, kind="approval.decision", now=now)
+    with pytest.raises(TaskEnvelopeError, match="digest"):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
+    assert supervisor.calls == []
+
+
+def test_valid_approval_decision_is_revalidated_and_forwarded():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "shell_exec", "/tmp", digest, now + 60_000))
+    supervisor.task_owners[task_id] = phone_id
+    payload = {"task_id": task_id, "approval_id": approval_id, "decision": "approve",
+               "operation_digest": digest, "idempotency_key": "decision-2"}
+    env = task_envelope(host, phone, host_id, phone_id, host_cert, payload, kind="approval.decision", now=now)
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
+    assert result["result"]["status"] == "APPROVED"
+    assert supervisor.calls[-1][0] == "decide_approval"
+    assert supervisor.calls[-1][1]["requester_device_id"] == phone_id
+
+
+def test_exact_approval_envelope_retry_reconciles_without_a_second_decision():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "shell_exec", "/tmp", digest, now + 60_000))
+    supervisor.task_owners[task_id] = phone_id
+    payload = {"task_id": task_id, "approval_id": approval_id, "decision": "approve",
+               "operation_digest": digest, "idempotency_key": "decision-exact-retry"}
+    env = task_envelope(host, phone, host_id, phone_id, host_cert, payload,
+                        kind="approval.decision", now=now, message_id="e" * 32)
+
+    first = hostproc.receive(env.to_dict(), sender_certificate=phone_cert,
+                             expected_sender_id=phone_id, now_ms=now)
+    replay = hostproc.receive(env.to_dict(), sender_certificate=phone_cert,
+                              expected_sender_id=phone_id, now_ms=now, allow_duplicate=True)
+
+    assert first["result"] == replay["result"]
+    assert [call[0] for call in supervisor.calls].count("decide_approval") == 1
+
+    altered_payloads = [
+        {**payload, "idempotency_key": "decision-different-key"},
+        {**payload, "decision": "reject"},
+    ]
+    for altered_payload in altered_payloads:
+        altered = task_envelope(host, phone, host_id, phone_id, host_cert, altered_payload,
+                               kind="approval.decision", now=now, message_id=env.message_id)
+        with pytest.raises(TaskEnvelopeError, match="decision envelope"):
+            hostproc.receive(altered.to_dict(), sender_certificate=phone_cert,
+                             expected_sender_id=phone_id, now_ms=now, allow_duplicate=True)
+    assert [call[0] for call in supervisor.calls].count("decide_approval") == 1
+
+
+def test_approval_decision_cannot_be_forwarded_under_another_device_owner():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "shell_exec", "/tmp", digest, now + 60_000))
+    supervisor.task_owners[task_id] = "e" * 32
+    payload = {"task_id": task_id, "approval_id": approval_id, "decision": "approve",
+               "operation_digest": digest, "idempotency_key": "decision-wrong-owner"}
+    env = task_envelope(host, phone, host_id, phone_id, host_cert, payload, kind="approval.decision", now=now)
+    with pytest.raises(ValueError, match="belongs to another companion"):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
+    assert supervisor.calls == []
+
+
+def test_approval_decision_binds_continuation_objective_to_encrypted_payload():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "mcp:jarvis_mac:open_app", "TextEdit", digest, now + 60_000))
+    supervisor.task_owners[task_id] = phone_id
+    objective = "Open TextEdit after I approve, then tell me it is open."
+    payload = {
+        "task_id": task_id,
+        "approval_id": approval_id,
+        "decision": "approve",
+        "operation_digest": digest,
+        "idempotency_key": "decision-continuation-1",
+        "continuation_objective": objective,
+    }
+    env = task_envelope(host, phone, host_id, phone_id, host_cert, payload, kind="approval.decision", now=now)
+    result = hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
+    assert result["result"]["kind"] == "approval.decision_result"
+    assert result["result"]["continuation_objective"] == objective
+    assert supervisor.calls[-1][1]["continuation_objective"] == objective
+
+
+def test_approval_continuation_objective_is_bounded():
+    hostproc, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "mcp:jarvis_mac:open_app", "TextEdit", digest, now + 60_000))
+    payload = {
+        "task_id": task_id,
+        "approval_id": approval_id,
+        "decision": "approve",
+        "operation_digest": digest,
+        "idempotency_key": "decision-continuation-2",
+        "continuation_objective": "x" * 4097,
+    }
+    env = task_envelope(host, phone, host_id, phone_id, host_cert, payload, kind="approval.decision", now=now)
+    with pytest.raises(TaskEnvelopeError, match="continuation"):
+        hostproc.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id, now_ms=now)
+    assert supervisor.calls == []
+
+
+def test_envelope_to_key_id_uses_verified_recipient_certificate():
+    _, _, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    now = int(time.time() * 1000)
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"objective": "inspect", "capability_scope": ["read_only"]}, now=now)
+    assert env.to_key_id == host_cert.certificate_id
+    verified = verify_device_certificate(
+        phone_cert, trusted_host_signing_public_der=host.signing_public_der,
+        expected_tenant_id=TENANT, expected_device_id=phone_id,
+        expected_role="companion", expected_issuer_device_id=host_id, now_ms=now,
+    )
+    assert verified == phone_cert
+
+
+def test_certified_other_companion_cannot_decide_or_cancel_owned_task():
+    processor, supervisor, host, owner, host_id, owner_id, host_cert, owner_cert = setup_host()
+    other = DeviceIdentity.generate()
+    other_id = device_id_for_signing_key(other.signing_public_der)
+    other_cert = issue_device_certificate(host=host, tenant_id=TENANT, host_device_id=host_id,
+        signing_public_b64u=other.signing_public_b64u, encryption_public_b64u=other.encryption_public_b64u)
+    task_id, approval_id, digest = uuid.uuid4().hex, uuid.uuid4().hex, "a" * 64
+    now = int(time.time() * 1000)
+    supervisor.tasks[task_id] = {"state": "RUNNING"}
+    supervisor.task_owners[task_id] = owner_id
+    supervisor.add_approval(ApprovalRecord(approval_id, task_id, "mcp:jarvis_mac:open_app", "Calculator", digest, now + 60_000))
+    processor.task_authorizer = lambda *, task_id, companion_id: companion_id == owner_id
+    decision = {"task_id": task_id, "approval_id": approval_id, "decision": "approve",
+                "operation_digest": digest, "idempotency_key": "decision-one"}
+    cancel = {"task_id": task_id, "idempotency_key": "cancel-one"}
+    for kind, payload in [("approval.decision", decision), ("task.cancel", cancel)]:
+        env = task_envelope(host, other, host_id, other_id, host_cert, payload, kind=kind)
+        with pytest.raises(TaskEnvelopeError, match="not owned"):
+            processor.receive(env.to_dict(), sender_certificate=other_cert, expected_sender_id=other_id)
+    assert supervisor.calls == []
+    assert supervisor.approvals[approval_id].status == "PENDING"
+    env = task_envelope(host, owner, host_id, owner_id, host_cert, decision, kind="approval.decision")
+    assert processor.receive(env.to_dict(), sender_certificate=owner_cert, expected_sender_id=owner_id)["result"]["status"] == "APPROVED"
+    env = task_envelope(host, owner, host_id, owner_id, host_cert, cancel, kind="task.cancel")
+    assert processor.receive(env.to_dict(), sender_certificate=owner_cert, expected_sender_id=owner_id)["result"]["state"] == "CANCELLED"
+
+
+def test_task_control_without_ownership_authorizer_fails_closed():
+    processor, supervisor, host, phone, host_id, phone_id, host_cert, phone_cert = setup_host()
+    del processor.task_authorizer
+    task_id = uuid.uuid4().hex
+    supervisor.tasks[task_id] = {"state": "RUNNING"}
+    env = task_envelope(host, phone, host_id, phone_id, host_cert,
+                        {"task_id": task_id, "idempotency_key": "cancel-one"}, kind="task.cancel")
+    with pytest.raises(TaskEnvelopeError, match="not owned"):
+        processor.receive(env.to_dict(), sender_certificate=phone_cert, expected_sender_id=phone_id)
+    assert supervisor.calls == []
