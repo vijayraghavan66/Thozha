@@ -524,6 +524,45 @@ def create_app(
     from openjarvis.server.supervisor_routes import router as supervisor_router
 
     app.include_router(supervisor_router)
+
+    # Browser APIs use their own password/session identity. They never accept
+    # paired Android bearer tokens. Login/session routes are always mounted
+    # but return 503 when browser auth is not explicitly configured; the
+    # conversation API (and its durable database) is only mounted when the
+    # complete browser-auth configuration is valid.
+    from openjarvis.server.thozha_web_auth import (
+        install_web_auth,
+        require_web_session,
+    )
+
+    web_auth_context = install_web_auth(app)
+    if web_auth_context.store is not None:
+        app.router.add_event_handler("shutdown", web_auth_context.store.close)
+    if web_auth_context.config is not None:
+        from openjarvis.server.thozha_web_conversations import (
+            create_web_conversations_router,
+        )
+
+        web_conversations_router = create_web_conversations_router(
+            require_web_session
+        )
+        app.include_router(web_conversations_router)
+        app.router.add_event_handler(
+            "shutdown", web_conversations_router.conversation_store.close
+        )
+    elif any(
+        os.environ.get(name)
+        for name in (
+            "THOZHA_WEB_OWNER_ID",
+            "THOZHA_WEB_PASSWORD_HASH",
+            "THOZHA_WEB_ORIGIN",
+        )
+    ):
+        logger.warning(
+            "Thozha Web conversation API disabled: browser authentication "
+            "configuration is incomplete or invalid"
+        )
+
     include_all_routes(app)
 
     # Restore SendBlue channel bindings from database on startup
