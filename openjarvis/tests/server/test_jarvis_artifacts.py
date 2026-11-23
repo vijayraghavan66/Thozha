@@ -28,6 +28,9 @@ class FakeSupervisor:
     def get_task(self, task_id):
         return self.task if task_id == TASK else None
 
+    def link_task_run(self, task_id):
+        return {} if task_id == TASK else None
+
 
 def export(files):
     manifest = [{"path": path, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()} for path, data in sorted(files.items())]
