@@ -202,6 +202,7 @@ class ToolExecutor:
         agent_id: str = "",
         boundary_guard: Optional[Any] = None,
         rate_limiter: Optional[Any] = None,
+        supervisor_store: Optional[Any] = None,
     ) -> None:
         self._tools: Dict[str, BaseTool] = {t.spec.name: t for t in tools}
         self._bus = bus
@@ -212,6 +213,7 @@ class ToolExecutor:
         self._agent_id = agent_id
         self._boundary_guard = boundary_guard
         self._rate_limiter = rate_limiter
+        self._supervisor_store = supervisor_store
         # Running taint accumulated across this executor's tool calls. Data
         # detected as PII/secret in one tool's output taints every later call,
         # so a sink-policy violation (e.g. secret -> http_request) is caught
@@ -248,6 +250,57 @@ class ToolExecutor:
             with self._taint_lock:
                 self._session_taint = None
 
+    def _link_scope_denial(self, tool: BaseTool) -> str | None:
+        """Fail closed at the executor boundary for supervisor-bound Link tasks."""
+        try:
+            from openjarvis.tasks.supervisor import (
+                LINK_SCOPE_CAPABILITIES,
+                current_task_context,
+                get_supervisor_store,
+            )
+
+            context = current_task_context()
+        except ImportError:
+            return None
+        if context is None or context.source != "jarvis_link":
+            return None
+        if context.scope not in LINK_SCOPE_CAPABILITIES or context.allowed_capabilities is None:
+            return "Link task scope is missing a verified capability set."
+        try:
+            store = self._supervisor_store or get_supervisor_store()
+            task = store.get_task(context.task_id)
+            if task is None or task.get("state") not in {"PLANNING", "RUNNING", "VERIFYING"}:
+                return "Link task is not active."
+            metadata = json.loads(task.get("recovery_json") or "{}")
+            persisted = set(json.loads(task.get("capabilities_json") or "[]"))
+            expected = set(LINK_SCOPE_CAPABILITIES[context.scope])
+            if (
+                metadata.get("source") != "jarvis_link"
+                or metadata.get("scope") != context.scope
+                or persisted != expected
+                or set(context.allowed_capabilities) != expected
+            ):
+                return "Link task capability scope does not match persisted supervisor state."
+        except Exception:
+            return "Link task supervisor scope could not be verified."
+
+        # Development file/test operations must use the isolated jarvis_dev MCP
+        # worker; generic in-process tools are never a development executor.
+        if context.scope == "development":
+            return "Development tasks must use the isolated VM worker."
+
+        try:
+            from openjarvis.security.capabilities import canonical_tool_capabilities
+
+            required = set(tool.spec.required_capabilities)
+            for capability in canonical_tool_capabilities(tool):
+                required.add(capability.value if hasattr(capability, "value") else str(capability))
+        except Exception:
+            return "Link task tool requirements could not be verified."
+        if not required.issubset(set(context.allowed_capabilities)):
+            return "Tool capability is outside the Link task scope."
+        return None
+
     def execute(self, tool_call: ToolCall) -> ToolResult:
         """Parse arguments, dispatch to tool, measure latency, emit events."""
         tool = self._tools.get(tool_call.name)
@@ -275,6 +328,15 @@ class ToolExecutor:
                     f"got {type(params).__name__}."
                 ),
                 success=False,
+            )
+
+        link_scope_error = self._link_scope_denial(tool)
+        if link_scope_error is not None:
+            return ToolResult(
+                tool_name=tool_call.name,
+                content=link_scope_error,
+                success=False,
+                metadata={"error_code": "LINK_SCOPE_DENIED"},
             )
 
         # Rate limiting — checked before any other gate so a hammering

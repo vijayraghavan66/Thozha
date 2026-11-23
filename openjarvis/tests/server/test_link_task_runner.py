@@ -739,6 +739,36 @@ def test_link_executor_denies_code_execution_outside_read_only_scope(tmp_path):
     store.close()
 
 
+def test_development_link_scope_cannot_fall_back_to_generic_shell_executor(tmp_path):
+    store = SupervisorStore(str(tmp_path / "supervisor.db"))
+    link = store.create_link_task(
+        "create a bounded project",
+        capability_scope=["development"],
+        idempotency_key="link-development-executor-test-001",
+    )
+    store.start_link_task(
+        link["task_id"],
+        objective_digest=link["objective_digest"],
+        objective_text_digest=link["objective_digest"],
+        capability_scope=["development"],
+        idempotency_key=link["idempotency_key"],
+    )
+    shell = FakeShell()
+    executor = ToolExecutor([shell], supervisor_store=store)
+    with bind_task(
+        link["task_id"],
+        source="jarvis_link",
+        scope="development",
+        allowed_capabilities=supervisor.LINK_SCOPE_CAPABILITIES["development"],
+    ):
+        result = executor.execute(ToolCall(id="link-dev-shell", name="shell_exec", arguments=json.dumps({"command": "echo unsafe"})))
+    assert not result.success
+    assert result.metadata["error_code"] == "LINK_SCOPE_DENIED"
+    assert "isolated VM worker" in result.content
+    assert shell.calls == []
+    store.close()
+
+
 def _install_control_agent(client, monkeypatch):
     agent = FakeMacControlAgent()
     client.app.state.agent = agent
