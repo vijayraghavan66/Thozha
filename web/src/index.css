@@ -543,6 +543,52 @@ button:disabled {
   }
 }
 
+.th-code-copy {
+  display: inline-grid;
+  white-space: nowrap;
+  transition:
+    background-color 180ms ease-out,
+    color 180ms ease-out;
+}
+.th-code-copy:hover {
+  background-color: rgb(255 255 255 / 10%);
+}
+.th-code-copy[data-state='copied'] {
+  color: #f1f0f5;
+  background-color: rgb(233 233 244 / 10%);
+}
+.th-code-copy[data-state='failed'] {
+  color: #f0d6d9;
+}
+.th-code-copy > span {
+  display: inline-flex;
+  grid-area: 1 / 1;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.3rem;
+  opacity: 0;
+  transform: translateY(2px);
+  transition:
+    opacity 180ms ease-out,
+    transform 180ms ease-out;
+}
+.th-code-copy[data-state='idle'] > [data-copy-label='idle'],
+.th-code-copy[data-state='copied'] > [data-copy-label='copied'],
+.th-code-copy[data-state='failed'] > [data-copy-label='failed'] {
+  opacity: 1;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .th-code-copy,
+  .th-code-copy > span {
+    transition: none;
+    transform: none;
+  }
+}
+.th-stop-motion .th-code-copy > span {
+  transform: none;
+}
+
 .th-markdown {
   overflow-wrap: anywhere;
   & p,

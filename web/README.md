@@ -77,6 +77,8 @@ The redesign kept the established request clients and query keys. [`SessionGate`
 
 Chat uses the existing authenticated Web v1 SSE endpoint. For `engine_stream`, ordered text deltas are painted as plain text at most once per animation frame; the saved completed message replaces the preview and renders as Markdown. `buffered` never replays the completed text character by character. If the connection drops after acceptance, the browser checks the saved response by ID without resending the prompt. The current endpoint does not resume a partially transmitted stream.
 
+Each Markdown code block confirms clipboard writes on its own **Copy code** button. If the browser denies access, retry from the same button or select and copy the code manually.
+
 | Destination            | Center workspace                                                                                                             | Context and authorized data                                                                                                                 |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | AI Workspace (landing) | Conversation reader, multiline composer, saved history and response states                                                   | Collapsible conversation events and draft-to-task review, active supervisor tasks and pending approval links; unavailable access is labeled |

@@ -453,10 +453,18 @@ test('renders the reported SSE mode, persists context, copies code and supports 
     await expect(page.getByLabel('Partial response')).toContainText('Fixture response');
   }
   await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
-  await page.getByRole('button', { name: 'Copy code' }).click();
+  const copy = page.locator('.th-code-copy');
+  const bounds = await copy.boundingBox();
+  await copy.focus();
+  await page.keyboard.press('Enter');
+  await expect(copy).toHaveAccessibleName('Copied!');
+  await expect(copy.locator('[data-copy-label="copied"]')).toHaveCSS('opacity', '1');
+  await expect(copy).toBeFocused();
+  expect(await copy.boundingBox()).toEqual(bounds);
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
     "const workspace = 'Thozha Alpha';"
   );
+  await expect(copy).toHaveAccessibleName('Copy code');
   await page.reload();
   await expect(
     page.getByText('Remember the name Thozha Alpha for context.', { exact: true })
@@ -481,6 +489,60 @@ test('renders the reported SSE mode, persists context, copies code and supports 
       .getByRole('region', { name: 'Conversation messages' })
       .getByText('No archived conversations.')
   ).toBeVisible();
+});
+
+test('code copy shows touch-friendly failure and retry without moving the block', async ({
+  browser,
+  baseURL,
+}, info) => {
+  const context = await browser.newContext({
+    baseURL,
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    permissions: ['clipboard-read', 'clipboard-write'],
+    reducedMotion: 'reduce',
+  });
+  try {
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+      const write = Clipboard.prototype.writeText;
+      let deny = true;
+      Clipboard.prototype.writeText = function (text) {
+        if (!deny) return write.call(this, text);
+        deny = false;
+        return Promise.reject(
+          new DOMException('Fixture denied clipboard access', 'NotAllowedError')
+        );
+      };
+    });
+    await signIn(page);
+    await createConversation(page, 'Clipboard feedback');
+    await send(page, 'Show a test response with a code block.');
+    const copy = page.getByRole('button', { name: 'Copy code' });
+    await expect(copy).toBeVisible();
+    const block = page.getByRole('region', { name: 'Conversation messages' }).locator('pre');
+    const bounds = await copy.boundingBox();
+    const blockBounds = await block.boundingBox();
+    await copy.screenshot({ path: info.outputPath('copy-default.png') });
+    await copy.tap();
+    const retry = page.getByRole('button', { name: "Couldn't copy" });
+    await expect(retry).toBeVisible();
+    await expect(retry.locator('[data-copy-label="failed"]')).toHaveCSS('opacity', '1');
+    await expect(retry.locator('[data-copy-label="failed"]')).toHaveCSS(
+      'transition-duration',
+      '0s'
+    );
+    expect(await retry.boundingBox()).toEqual(bounds);
+    await retry.screenshot({ path: info.outputPath('copy-failed.png') });
+    await retry.tap();
+    const copied = page.getByRole('button', { name: 'Copied!' });
+    await expect(copied).toBeVisible();
+    expect(await copied.boundingBox()).toEqual(bounds);
+    expect(await block.boundingBox()).toEqual(blockBounds);
+    await copied.screenshot({ path: info.outputPath('copy-success.png') });
+  } finally {
+    await context.close();
+  }
 });
 
 test('persists actual cancellation and exposes engine failure and prompt recovery', async ({
