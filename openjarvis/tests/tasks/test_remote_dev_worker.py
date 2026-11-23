@@ -11,6 +11,7 @@ import pytest
 
 from openjarvis.tasks.remote_dev_worker import (
     DEFAULT_WORKSPACE,
+    GUEST_HOST_SENTINEL_PATH,
     GuestWorkspace,
     RemoteMcpWorkerClient,
     RemoteWorkerConfig,
@@ -18,6 +19,12 @@ from openjarvis.tasks.remote_dev_worker import (
     RemoteWorkspace,
     worker_handle,
 )
+
+
+def test_remote_worker_defaults_follow_the_current_home_directory():
+    lab = Path.home() / "Documents/Jarvis-Lab"
+    assert Path(DEFAULT_WORKSPACE) == lab / "agent-evaluation/taskflow"
+    assert Path(GUEST_HOST_SENTINEL_PATH) == lab / "agent-evaluation/vm-run-20261121/host-only-canary.txt"
 
 
 def test_guest_workspace_reads_writes_and_reports_manifest(tmp_path):

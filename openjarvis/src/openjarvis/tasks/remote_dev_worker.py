@@ -28,9 +28,11 @@ from threading import Event
 from openjarvis.server.performance import PERF_LOGGER
 
 PROTOCOL = "2025-03-26"
-DEFAULT_WORKSPACE = "/Users/REDACTED/Documents/Jarvis-Lab/agent-evaluation/taskflow"
+DEFAULT_WORKSPACE = str(Path.home() / "Documents/Jarvis-Lab/agent-evaluation/taskflow")
 GUEST_WORKSPACE_ROOT = "/workspace/taskflow"
-GUEST_HOST_SENTINEL_PATH = "/Users/REDACTED/Documents/Jarvis-Lab/agent-evaluation/vm-run-20261121/host-only-canary.txt"
+GUEST_HOST_SENTINEL_PATH = str(
+    Path.home() / "Documents/Jarvis-Lab/agent-evaluation/vm-run-20261121/host-only-canary.txt"
+)
 DEFAULT_GUEST_WORKER = "/usr/local/libexec/jarvis-dev-worker.py"
 DEFAULT_SSH_TARGET = "vmadmin@127.0.0.1"
 DEFAULT_SSH_PORT = 2222
