@@ -218,6 +218,29 @@ test('works at mobile width with keyboard navigation and honest local previews',
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
 });
 
+test('Overview water moves by default and respects both reduced-motion settings', async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await signIn(page);
+  const water = page.locator('main .th-water');
+  const transforms = () =>
+    water.evaluateAll(layers => layers.map(layer => getComputedStyle(layer).transform));
+  const initial = await transforms();
+  await expect.poll(transforms).not.toEqual(initial);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(water.first()).toHaveCSS('animation-name', 'none');
+  await expect(water.last()).toHaveCSS('animation-name', 'none');
+
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await page.getByRole('link', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Reduce motion: off' }).click();
+  await page.getByRole('link', { name: 'Overview' }).click();
+  await page.reload();
+  await expect(water.first()).toHaveCSS('animation-name', 'none');
+  await expect(water.last()).toHaveCSS('animation-name', 'none');
+});
+
 test('captures the approved desktop and mobile design and checks accessibility', async ({
   page,
 }, info) => {

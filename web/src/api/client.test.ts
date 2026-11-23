@@ -55,7 +55,7 @@ describe('browser Web API', () => {
       )
       .mockResolvedValueOnce(Response.json({ user_id: 'example' }));
     const api = createWebApi(fetcher);
-    await expect(api.session()).rejects.toEqual(new WebApiError('protocol'));
+    await expect(api.session()).rejects.toEqual(new WebApiError('html'));
     await expect(api.session()).rejects.toEqual(new WebApiError('protocol'));
   });
 });

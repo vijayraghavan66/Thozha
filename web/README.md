@@ -11,6 +11,26 @@ The Web Workspace is a React, TypeScript, Vite, and Tailwind application in the 
 
 Use `Ctrl+K` / `⌘K` to jump to pages, `Escape` to close dialogs, and `Enter` / `Shift+Enter` to send / insert a newline. The workspace respects system and in-app reduced-motion preferences.
 
+### Run alongside an existing OpenJarvis service
+
+If `GET /v1/web/session` returns `200 text/html`, Vite may be proxying to an older OpenJarvis dashboard instead of the Web API. Don't restart the existing service or reuse its configuration. With `qwen3.5:4b` already installed in Ollama's default model directory, start these commands in three terminals from `web/`:
+
+```sh
+# Terminal 1: separate Ollama process; reuse downloaded model weights.
+umask 077
+mkdir -p "$HOME/.local/state/thozha-web/ollama"
+OLLAMA_HOST=127.0.0.1:45841 OLLAMA_MODELS="$HOME/.ollama/models" OLLAMA_NO_CLOUD=1 \
+  HOME="$HOME/.local/state/thozha-web/ollama" ollama serve
+
+# Terminal 2: use a Python interpreter with the OpenJarvis server extras installed.
+/path/to/venv/bin/python -B scripts/serve-local.py "$HOME/.local/state/thozha-web" 5174 45840 45841
+
+# Terminal 3: point Vite at the isolated Web backend, not the default port 8000.
+THOZHA_WEB_UPSTREAM=http://127.0.0.1:45840 npm run dev -- --port 5174
+```
+
+Open `http://127.0.0.1:5174`. Sign in as `thozha-local` with the password in `~/.local/state/thozha-web/owner-password` (generated once, mode `0600`). An unauthenticated `curl -i http://127.0.0.1:5174/v1/web/session` should return JSON with HTTP `401`. This profile has its own Web history, memory, and sessions; it does not import existing OpenJarvis data or Android pairing.
+
 ### Deployment boundary
 
 For an actual deployment, serve `dist/` and proxy **only the contracted browser Web v1 routes** under the same trusted HTTPS origin. Configure the backend with that exact external origin and leave insecure-loopback cookies disabled. A trusted proxy must preserve the original `Origin` and host, communicate the external HTTPS scheme through trusted proxy headers, leave cookies intact, prevent caching of all private API responses, and pass `text/event-stream` through without buffering. Do not log password bodies, cookies, CSRF headers, chat bodies, or memory search queries. Do not expose the raw OpenJarvis server, companion gateway, or general OpenJarvis APIs to the browser. Vite's proxy is for local development and test, not a production gateway.

@@ -90,7 +90,7 @@ export type WebMemory = z.infer<typeof memoryContract>;
 
 export class WebApiError extends Error {
   constructor(
-    readonly kind: 'http' | 'connection' | 'timeout' | 'protocol',
+    readonly kind: 'http' | 'connection' | 'timeout' | 'protocol' | 'html',
     readonly status?: number
   ) {
     super(kind === 'http' ? `Browser API returned HTTP ${status}` : `Browser API ${kind} error`);
@@ -108,6 +108,8 @@ export function mayHaveBeenAccepted(error: unknown) {
 
 export function errorText(error: unknown, action = 'complete this request'): string {
   if (!(error instanceof WebApiError)) return `Could not ${action}. Please try again.`;
+  if (error.kind === 'html')
+    return 'The workspace API returned a web page instead of JSON. Point THOZHA_WEB_UPSTREAM at an OpenJarvis instance with Web v1 enabled, then restart Vite.';
   if (error.kind === 'protocol')
     return 'The server returned an unexpected response. Check the Web v1 proxy and backend version.';
   if (error.kind === 'timeout') return `The server took too long to ${action}.`;
@@ -183,6 +185,9 @@ export function createWebApi(fetcher: typeof fetch = globalThis.fetch.bind(globa
         throw controller.signal.aborted ? controller.signal.reason : new WebApiError('connection');
       });
       if (!response.ok) throw new WebApiError('http', response.status);
+      if (response.headers.get('content-type')?.toLowerCase().startsWith('text/html')) {
+        throw new WebApiError('html');
+      }
       if (response.status !== expectedStatus) throw new WebApiError('protocol');
       if (stream) clearTimeout(timeout);
       return await consume(response, controller.signal);

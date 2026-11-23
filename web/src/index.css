@@ -182,7 +182,16 @@ button:disabled {
     transform: translate3d(0, 0, 0) rotate(0deg);
   }
   50% {
-    transform: translate3d(22px, -12px, 0) rotate(7deg);
+    transform: translate3d(-38px, 22px, 0) rotate(9deg);
+  }
+}
+@keyframes th-water-inner {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  50% {
+    transform: translate3d(24px, -15px, 0) rotate(-10deg);
   }
 }
 @keyframes th-rise {
@@ -196,7 +205,10 @@ button:disabled {
   }
 }
 .th-water {
-  animation: th-water 13s ease-in-out infinite alternate;
+  animation: th-water 9s ease-in-out -1s infinite;
+}
+.th-water-inner {
+  animation: th-water-inner 11s ease-in-out -2s infinite;
 }
 .th-enter {
   animation: th-rise 0.28s ease-out both;
@@ -214,16 +226,16 @@ button:disabled {
     transition: none !important;
     scroll-behavior: auto !important;
   }
+}
 
-  .th-markdown {
-    overflow-wrap: anywhere;
-    & p,
-    & ul,
-    & ol,
-    & table,
-    & blockquote {
-      margin-block: 0.45rem;
-    }
+.th-markdown {
+  overflow-wrap: anywhere;
+  & p,
+  & ul,
+  & ol,
+  & table,
+  & blockquote {
+    margin-block: 0.45rem;
     & h1,
     & h2,
     & h3,

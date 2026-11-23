@@ -149,7 +149,7 @@ export function Water() {
   return (
     <div aria-hidden="true">
       <div className="th-water pointer-events-none absolute -right-14 -top-40 h-[480px] w-[480px] rounded-[44%] border border-white/[.14] bg-[radial-gradient(ellipse_at_25%_20%,rgba(250,250,255,.33),rgba(130,132,143,.14)_28%,rgba(45,46,53,.04)_59%,transparent_70%)] blur-[1px]" />
-      <div className="th-water pointer-events-none absolute right-20 top-3 h-56 w-56 rounded-[42%] border border-white/[.13] bg-gradient-to-br from-white/[.13] to-transparent blur-[1px]" />
+      <div className="th-water th-water-inner pointer-events-none absolute -right-6 top-3 h-48 w-48 rounded-[42%] border border-white/[.18] bg-gradient-to-br from-white/[.16] to-transparent blur-[1px] sm:right-20 sm:h-56 sm:w-56" />
     </div>
   );
 }
