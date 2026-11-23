@@ -1772,10 +1772,31 @@ async def get_approval(approval_id: str, request: Request) -> dict[str, Any]:
 @router.post("/approvals/{approval_id}/decision")
 async def decide(approval_id: str, request: Request) -> dict[str, Any]:
     actor = authorize_supervisor_request(request)
-    try:
-        body = await request.json()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Expected JSON decision body") from exc
+    return await _decide_approval_for_actor(approval_id, request, actor)
+
+
+async def _decide_approval_for_actor(
+    approval_id: str,
+    request: Request,
+    actor: str,
+    *,
+    decision_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the canonical approval pipeline for an already authenticated actor.
+
+    The HTTP route above derives the actor from a device token or configured
+    supervisor key. Other server-owned routes may call this helper only after
+    independently proving that their authenticated principal maps to an
+    active paired-device actor. Exact digest, expiry, nonce, dispatch claim,
+    and continuation checks remain centralized below.
+    """
+    if decision_body is None:
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Expected JSON decision body") from exc
+    else:
+        body = decision_body
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected JSON object")
     allowed_fields = {
