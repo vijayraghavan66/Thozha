@@ -626,7 +626,8 @@ button:disabled {
 }
 .th-v4-history-link {
   display: block;
-  margin-top: 5px;
+  flex: 1;
+  min-width: 0;
   padding: 9px 10px;
   overflow: hidden;
   border-radius: 9px;
@@ -635,13 +636,156 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.th-v4-history-link:first-of-type {
-  margin-top: 12px;
-}
 .th-v4-history-link:hover,
 .th-v4-history-link[aria-current='page'] {
   color: #fff;
   background: rgb(255 255 255 / 9%);
+}
+.th-history-rows {
+  margin-top: 7px;
+}
+.th-history-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.th-history-filter,
+.th-history-more,
+.th-history-actions button {
+  border-radius: 8px;
+  color: #c3c4c9;
+  font-size: 11px;
+}
+.th-history-filter,
+.th-history-actions button {
+  min-height: 32px;
+  padding-inline: 9px;
+}
+.th-history-more {
+  flex: none;
+  width: 36px;
+  min-height: 36px;
+  font-size: 20px;
+  line-height: 1;
+}
+.th-history-filter:hover,
+.th-history-more:hover,
+.th-history-more[aria-expanded='true'],
+.th-history-actions button:hover {
+  background: rgb(255 255 255 / 9%);
+  color: #fff;
+}
+.th-history-actions:not([hidden]) {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 9px;
+}
+@media (pointer: coarse) {
+  .th-history-filter,
+  .th-history-more,
+  .th-history-actions button {
+    min-height: 44px;
+  }
+  .th-history-more {
+    width: 44px;
+  }
+}
+.th-conversation-notice {
+  position: fixed;
+  z-index: 40;
+  right: 16px;
+  bottom: 16px;
+  max-width: calc(100% - 32px);
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 10px;
+  background: #222328;
+  padding: 10px 14px;
+  color: #ececf0;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.th-startup {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  background: #0a0b0d;
+  color: #e6e7eb;
+  text-align: center;
+}
+.th-startup-content {
+  padding: 24px;
+}
+.th-pulse-mark {
+  display: block;
+  width: 84px;
+  height: 84px;
+  margin: 0 auto 18px;
+  stroke-linecap: round;
+}
+.th-startup-brand {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+}
+.th-startup-status {
+  margin-top: 6px;
+  color: #aaaeb7;
+  font-size: 12px;
+}
+.th-pulse-highlight {
+  opacity: 0;
+  stroke-dasharray: 0.17 0.83;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .th-startup-animate .th-pulse-ring {
+    animation: th-pulse-emerge 220ms ease-out both;
+  }
+  .th-startup-animate .th-pulse-primary,
+  .th-startup-animate .th-pulse-secondary {
+    stroke-dasharray: 1;
+    animation: th-pulse-draw 360ms ease-out 95ms both;
+  }
+  .th-startup-animate .th-pulse-secondary {
+    animation-delay: 260ms;
+    animation-duration: 300ms;
+  }
+  .th-startup-animate .th-pulse-highlight {
+    animation: th-pulse-sweep 440ms ease-in-out 510ms both;
+  }
+}
+@keyframes th-pulse-emerge {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes th-pulse-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes th-pulse-sweep {
+  0% {
+    opacity: 0;
+    stroke-dashoffset: 0.17;
+  }
+  22%,
+  70% {
+    opacity: 0.62;
+  }
+  100% {
+    opacity: 0;
+    stroke-dashoffset: -0.95;
+  }
 }
 .th-v4-inspector-toggle {
   min-height: 38px;

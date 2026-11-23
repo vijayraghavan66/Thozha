@@ -1,6 +1,7 @@
 import { skipToken, useQuery } from '@tanstack/react-query';
 import { mayHaveBeenAccepted, type ConversationDetail, type WorkspaceApi } from '../api/client';
 
+export const conversationListKey = ['conversations'] as const;
 export const detailKey = (id: string | null) => ['conversation', id] as const;
 export const isPendingResponse = (status: string) => status === 'queued' || status === 'running';
 

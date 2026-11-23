@@ -8,6 +8,12 @@ import { Approvals } from '../../pages/Approvals';
 import { Chip, Crest, Loading, Modal, Notice } from '../ui';
 import { AnchoredSurface, NotificationPanel, TravelingSurface } from '../LiquidSurface';
 import { muted } from '../styles';
+import {
+  ConversationConfirmation,
+  ConversationHistory,
+  type ConversationAction,
+} from '../../chat/ConversationActions';
+import { conversationListKey } from '../../chat/updates';
 
 const ConversationWorkspace = lazy(() => import('../../chat/ConversationWorkspace'));
 const TradingLab = lazy(() => import('../../trading/TradingLab'));
@@ -162,6 +168,10 @@ export function ThozhaWebWorkspaceConcept({
   const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 1023px)').matches);
   const [inspectorSlot, setInspectorSlot] = useState<HTMLDivElement | null>(null);
   const [dialog, setDialog] = useState<'navigation' | null>(null);
+  const [conversationAction, setConversationAction] = useState<ConversationAction | null>(null);
+  const [conversationNotice, setConversationNotice] = useState('');
+  const [changedConversationId, setChangedConversationId] = useState<string>();
+  const conversationFallback = useRef<HTMLElement | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [drawerClosing, setDrawerClosing] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -181,7 +191,7 @@ export function ThozhaWebWorkspaceConcept({
     name.toLowerCase().includes(query.trim().toLowerCase())
   );
   const conversations = useQuery({
-    queryKey: ['conversations'],
+    queryKey: conversationListKey,
     queryFn: ({ signal }) => api.list(signal),
     enabled: !problem,
   });
@@ -189,6 +199,44 @@ export function ThozhaWebWorkspaceConcept({
   const approvals = useApprovals(api, !problem && page === 'AI Workspace');
   const devices = useDevices(api, !problem && page === 'Approvals');
   const hasInspector = page === 'AI Workspace' || page === 'Tasks';
+  const historyProps = {
+    items: conversations.data?.items ?? [],
+    selectedId:
+      page === 'AI Workspace' ? new URLSearchParams(hash.split('?')[1]).get('conversation') : null,
+    loading: conversations.isPending && !problem,
+    error:
+      !problem && conversations.isError
+        ? errorText(conversations.error, 'load conversations')
+        : undefined,
+    connected: !problem,
+    onAction: openConversationAction,
+  };
+
+  function openConversationAction(action: ConversationAction, fallback: HTMLElement | null = null) {
+    conversationFallback.current = fallback;
+    setConversationNotice('');
+    setConversationAction(action);
+  }
+
+  function finishConversationAction(message: string) {
+    const changedId = conversationAction?.conversation.id;
+    const currentHash = window.location.hash;
+    if (
+      currentPage(currentHash) === 'AI Workspace' &&
+      new URLSearchParams(currentHash.split('?')[1]).get('conversation') === changedId
+    ) {
+      window.history.replaceState(window.history.state, '', '#/ai-workspace');
+      setHash(window.location.hash);
+    }
+    setChangedConversationId(changedId);
+    setConversationNotice(message);
+    setConversationAction(null);
+    requestAnimationFrame(() => {
+      if (document.activeElement !== document.body) return;
+      const fallback = conversationFallback.current;
+      (fallback?.isConnected ? fallback : main.current)?.focus({ preventScroll: true });
+    });
+  }
 
   useEffect(() => {
     function onNavigate() {
@@ -408,39 +456,7 @@ export function ThozhaWebWorkspaceConcept({
               onNavigate={() => setDialog(null)}
               collapsed={sidebarCollapsed}
             />
-            {!sidebarCollapsed && (
-              <div className="th-v4-history">
-                <p className="th-v4-eyebrow">RECENT CONVERSATIONS</p>
-                {conversations.isPending && !problem && <p className={muted}>Loading history…</p>}
-                {conversations.isError && (
-                  <p role="alert" className={muted}>
-                    {errorText(conversations.error, 'load conversations')}
-                  </p>
-                )}
-                {conversations.isSuccess &&
-                  !conversations.data.items.some(item => !item.archived_at) && (
-                    <p className={muted}>No conversations yet.</p>
-                  )}
-                {conversations.data?.items
-                  .filter(item => !item.archived_at)
-                  .slice(0, 12)
-                  .map(item => (
-                    <a
-                      key={item.id}
-                      href={`#/ai-workspace?conversation=${encodeURIComponent(item.id)}`}
-                      className="th-v4-history-link"
-                      aria-current={
-                        page === 'AI Workspace' &&
-                        new URLSearchParams(hash.split('?')[1]).get('conversation') === item.id
-                          ? 'page'
-                          : undefined
-                      }
-                    >
-                      <span className="truncate">{item.title}</span>
-                    </a>
-                  ))}
-              </div>
-            )}
+            {!sidebarCollapsed && <ConversationHistory {...historyProps} />}
           </div>
           <button
             type="button"
@@ -725,6 +741,8 @@ export function ThozhaWebWorkspaceConcept({
                         go('Tasks');
                       }}
                       inspector={inspectorSlot}
+                      onManageConversation={openConversationAction}
+                      changedConversationId={changedConversationId}
                     />
                   </Suspense>
                 </div>
@@ -836,23 +854,28 @@ export function ThozhaWebWorkspaceConcept({
             ＋ New conversation
           </button>
           <WorkspaceNavigation page={page} drawer onNavigate={closeNavigation} />
-          <div className="th-v4-history">
-            <p className="th-v4-eyebrow">RECENT CONVERSATIONS</p>
-            {conversations.data?.items
-              .filter(item => !item.archived_at)
-              .slice(0, 8)
-              .map(item => (
-                <a
-                  key={item.id}
-                  href={`#/ai-workspace?conversation=${encodeURIComponent(item.id)}`}
-                  onClick={closeNavigation}
-                  className="th-v4-history-link"
-                >
-                  {item.title}
-                </a>
-              ))}
-          </div>
+          <ConversationHistory {...historyProps} onSelect={closeNavigation} />
+          <p
+            role="status"
+            className={conversationNotice ? 'mt-3 text-xs text-[#c3c4c9]' : 'sr-only'}
+          >
+            {conversationNotice}
+          </p>
         </Modal>
+      )}
+      {dialog !== 'navigation' && (
+        <p role="status" className={conversationNotice ? 'th-conversation-notice' : 'sr-only'}>
+          {conversationNotice}
+        </p>
+      )}
+      {conversationAction && (
+        <ConversationConfirmation
+          api={api}
+          connected={!problem}
+          action={conversationAction}
+          close={() => setConversationAction(null)}
+          completed={finishConversationAction}
+        />
       )}
     </div>
   );

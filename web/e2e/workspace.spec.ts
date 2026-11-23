@@ -71,6 +71,242 @@ async function createConversation(page: Page, title: string) {
   await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toBeEditable();
 }
+
+test('sidebar actions survive reload and protect other conversations', async ({
+  page,
+}, testInfo) => {
+  await signIn(page);
+  const keep = 'Sidebar regression — keep';
+  const target = 'Sidebar regression — archive then delete';
+  await createConversation(page, keep);
+  await createConversation(page, target);
+  const history = page.getByRole('region', { name: 'Conversation history' });
+  const trigger = history.getByRole('button', { name: `Actions for ${target}` });
+  const assetDir = process.env.THOZHA_E2E_43_CAPTURE;
+  if (assetDir) {
+    expect(await page.evaluate(() => document.visibilityState)).toBe('visible');
+    await page.screencast.start({
+      path: join(assetDir, 'conversation-actions.webm'),
+      size: { width: 1200, height: 800 },
+    });
+  }
+  try {
+    await trigger.focus();
+    await trigger.press('Enter');
+    await page.keyboard.press('Tab');
+    await expect(history.getByRole('button', { name: 'Archive', exact: true })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(trigger).toBeFocused();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await trigger.press('Enter');
+    await history.getByRole('button', { name: 'Delete', exact: true }).click();
+    const confirmation = page.getByRole('dialog', { name: 'Delete conversation' });
+    await expect(confirmation).toContainText(target);
+    await expect(confirmation.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+    await confirmation.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(trigger).toBeFocused();
+
+    await trigger.click();
+    await history.getByRole('button', { name: 'Archive', exact: true }).click();
+    await page.getByRole('button', { name: 'Archive conversation', exact: true }).click();
+    await expect(page.getByRole('heading', { name: keep, exact: true })).toBeVisible();
+    await expect(history.getByRole('link', { name: target })).toHaveCount(0);
+    await history.getByRole('button', { name: 'Show archived conversations' }).click();
+    await history.getByRole('link', { name: target }).click();
+    await page.reload();
+    await expect(page.getByRole('heading', { name: target, exact: true })).toBeVisible();
+    await expect(page.getByText('Archived · read-only')).toBeVisible();
+    await history.getByRole('button', { name: 'Show archived conversations' }).click();
+    await trigger.click();
+    await history.getByRole('button', { name: 'Delete', exact: true }).click();
+    let writes = 0;
+    const detail = '**/v1/web/conversations/*';
+    await page.route(detail, async route => {
+      if (route.request().method() !== 'DELETE') return route.continue();
+      writes++;
+      if (writes === 1) return route.fulfill({ status: 503, json: { detail: 'Injected outage' } });
+      // Commit on the fixture server, then drop the response to exercise reconciliation.
+      const response = await route.fetch();
+      expect(response.status()).toBe(204);
+      await route.abort('failed');
+    });
+    if (assetDir) {
+      await page.screenshot({ path: join(assetDir, 'delete-confirmation.png') });
+      await page.screencast.showChapter('Confirm permanent deletion');
+    }
+    expect(
+      (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
+        .violations
+    ).toEqual([]);
+    await confirmation.getByRole('button', { name: 'Delete permanently' }).click();
+    await expect(confirmation.getByRole('alert')).toBeVisible();
+    // Duplicate form submission while the mutation is in flight is ignored.
+    await confirmation.locator('form').evaluate(form => {
+      if (!(form instanceof HTMLFormElement)) throw new Error('Missing confirmation form');
+      form.requestSubmit();
+      form.requestSubmit();
+    });
+    await expect(confirmation).toHaveCount(0);
+    expect(writes).toBe(2);
+    await expect(history.getByRole('link', { name: target })).toHaveCount(0);
+    await expect(history.getByRole('button', { name: 'Show active conversations' })).toBeFocused();
+    await page.reload();
+    await expect(history.getByRole('link', { name: keep })).toBeVisible();
+    await history.getByRole('button', { name: 'Show archived conversations' }).click();
+    await expect(history.getByRole('link', { name: target })).toHaveCount(0);
+    await testInfo.attach('sidebar-actions', {
+      body: await page.screenshot(),
+      contentType: 'image/png',
+    });
+  } finally {
+    if (assetDir) await page.screencast.stop();
+  }
+  await history.getByRole('button', { name: 'Show active conversations' }).click();
+  await history.getByRole('button', { name: `Actions for ${keep}` }).click();
+  await history.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.unroute('**/v1/web/conversations/*');
+  await page.getByRole('button', { name: 'Delete permanently' }).click();
+  await expect(history.getByRole('link', { name: keep })).toHaveCount(0);
+});
+
+test('touch drawer opens saved conversation actions and reconciles an already-deleted record', async ({
+  browser,
+  baseURL,
+}) => {
+  const context = await browser.newContext({
+    baseURL,
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  try {
+    const page = await context.newPage();
+    await signIn(page, '/#/settings');
+    const title = 'Touch drawer regression';
+    await createConversation(page, title);
+    await page.getByRole('button', { name: 'Open navigation' }).tap();
+    const drawer = page.getByRole('dialog', { name: 'Workspace navigation' });
+    await drawer.getByRole('button', { name: `Actions for ${title}` }).tap();
+    await drawer.getByRole('button', { name: 'Delete', exact: true }).tap();
+    const confirmation = page.getByRole('dialog', { name: 'Delete conversation' });
+    await expect(confirmation).toContainText(title);
+    const session = await (await page.request.get('/v1/web/session')).json();
+    const id = new URLSearchParams(new URL(page.url()).hash.split('?')[1]).get('conversation');
+    const concurrent = await page.request.delete(`/v1/web/conversations/${id}`, {
+      headers: {
+        Origin: new URL(page.url()).origin,
+        'X-Thozha-CSRF': session.csrf_token,
+        'Content-Type': 'application/json',
+      },
+    });
+    expect(concurrent.status()).toBe(204);
+    await confirmation.getByRole('button', { name: 'Delete permanently' }).tap();
+    await expect(drawer.getByRole('status')).toHaveText('Conversation is no longer on the server.');
+    await expect(drawer.getByRole('link', { name: title })).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test('startup waits for real session verification, settles and never replays on navigation', async ({
+  page,
+}) => {
+  await signIn(page);
+  await page.evaluate(() => sessionStorage.removeItem('thozha-web.startup-seen.v1'));
+  let release!: () => void;
+  const held = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  const endpoint = '**/v1/web/session';
+  await page.route(endpoint, async route => {
+    await held;
+    await route.continue();
+  });
+  const assetDir = process.env.THOZHA_E2E_43_CAPTURE;
+  if (assetDir) {
+    expect(await page.evaluate(() => document.visibilityState)).toBe('visible');
+    await page.screencast.start({
+      path: join(assetDir, 'living-pulse-startup.webm'),
+      size: { width: 1200, height: 800 },
+    });
+  }
+  try {
+    if (assetDir)
+      await page.screencast.showChapter('Session verification (response held by the test)');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    const startup = page.locator('.th-startup');
+    await expect(startup.getByRole('status')).toHaveText('Checking browser session…');
+    await expect(page.locator('.th-v4')).toHaveCount(0);
+    await expect
+      .poll(() =>
+        startup.evaluate(element =>
+          element
+            .getAnimations({ subtree: true })
+            .some(animation => animation.playState === 'running')
+        )
+      )
+      .toBe(true);
+    await expect
+      .poll(() =>
+        startup.evaluate(element =>
+          element
+            .getAnimations({ subtree: true })
+            .some(animation => animation.playState === 'running')
+        )
+      )
+      .toBe(false);
+    if (assetDir) await page.screenshot({ path: join(assetDir, 'living-pulse-startup.png') });
+    expect(
+      (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
+        .violations
+    ).toEqual([]);
+    release();
+    await expect(page.getByRole('heading', { name: 'AI Workspace', exact: true })).toBeVisible();
+    await expect(startup).toHaveCount(0);
+    await page.getByRole('link', { name: 'Settings', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Settings', exact: true }).last()).toBeVisible();
+    await expect(startup).toHaveCount(0);
+  } finally {
+    release();
+    if (assetDir) await page.screencast.stop();
+  }
+});
+
+for (const motion of ['system', 'application'] as const) {
+  test(`startup is static with ${motion} reduced motion and exits to retry on outage`, async ({
+    page,
+  }) => {
+    if (motion === 'system') await page.emulateMedia({ reducedMotion: 'reduce' });
+    else await page.addInitScript(() => localStorage.setItem('thozha-web.motion.v1', 'reduce'));
+    let release!: () => void;
+    const held = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const endpoint = '**/v1/web/session';
+    const outage = async (route: import('@playwright/test').Route) => {
+      await held;
+      await route.abort('failed');
+    };
+    await page.route(endpoint, outage);
+    try {
+      await page.goto('/', { waitUntil: 'domcontentloaded' });
+      const startup = page.locator('.th-startup');
+      await expect(startup).toBeVisible();
+      expect(
+        await startup.evaluate(element => element.getAnimations({ subtree: true }).length)
+      ).toBe(0);
+    } finally {
+      release();
+    }
+    await expect(page.getByRole('alert')).toContainText('could not reach');
+    await expect(page.locator('.th-startup')).toHaveCount(0);
+    await page.unroute(endpoint, outage);
+    await page.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(page.getByLabel('Workspace ID')).toBeVisible();
+    await expect(page.locator('.th-startup')).toHaveCount(0);
+  });
+}
+
 async function send(page: Page, content: string) {
   await page.getByRole('textbox', { name: 'Message Jarvis' }).fill(content);
   await page.getByRole('button', { name: /Send ↑/ }).click();

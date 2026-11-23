@@ -11,6 +11,14 @@ The Web Workspace is a React, TypeScript, Vite, and Tailwind application in the 
 
 Use `Ctrl+K` / `⌘K` to jump to pages, `Escape` to close dialogs and the mobile context sheet, and `Enter` / `Shift+Enter` to send / insert a newline. The workspace respects system and in-app reduced-motion preferences. AI Workspace opens first. On desktop the 252px rail can contract to 68px; the inspector can close to return space to the conversation. The header stays fixed while only the active view or message log scrolls. On smaller screens the rail becomes a focus-managed navigation drawer and the inspector a dismissible sheet. Settings and sign-out remain accessible when zoomed or on short screens.
 
+### Conversation history and startup
+
+The three-dot button beside each saved conversation opens its actions. Use Tab to reach the buttons and Escape to close the menu. **Archive** keeps the conversation readable under **Show archived conversations**. **Delete** requires a separate confirmation and removes server-saved history. If a delete is interrupted or returns `404`, the frontend checks the owner's history before treating the record as gone. Starting a conversation still needs no title: the first ordinary message supplies it automatically.
+
+The Living Pulse startup is shown while the first browser-session request is pending. The workspace opens as soon as the session is verified, independently of supervisor readiness; page modules keep their normal loading states. Slow requests settle on the static mark, and the existing request timeout leads to a retry state. Returning in the same tab, switching to a background tab, or choosing reduced motion skips or settles the animation. The existing workspace logo is unchanged.
+
+**Codex handoff — proposed, not implemented:** There is no title-update operation in Web v1. Add an owner-scoped `PATCH /v1/web/conversations/{conversation_id}` with `{ "title": "...", "expected_updated_at": "..." }`, using the existing browser session and mutation CSRF checks. Trim the title, reject empty or over-limit titles using the same limits as creation, and return updated `WebConversation` metadata (`200`) without changing `archived_at`, messages, or events. Return `404` for missing or other-owner IDs and `409` if the expected revision no longer matches; check the revision and apply the title in one transaction. No Rename action is exposed until this contract is versioned and implemented.
+
 ### Run alongside an existing OpenJarvis service
 
 If `GET /v1/web/session` returns `200 text/html`, Vite may be proxying to an older OpenJarvis dashboard instead of the Web API. Don't restart the existing service or reuse its configuration. With `qwen3.5:4b` already installed in Ollama's default model directory, start these commands in three terminals from `web/`:

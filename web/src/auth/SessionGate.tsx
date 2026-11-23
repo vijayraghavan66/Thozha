@@ -13,6 +13,7 @@ import { Chip, Crest, Loading, Notice, Panel } from '../components/ui';
 import { WaterSurface } from '../components/WaterSurface';
 import { field, muted, outline, solid } from '../components/styles';
 import { ThozhaWebWorkspaceConcept } from '../components/generated/ThozhaWebWorkspaceConcept';
+import { LivingPulseStartup } from './LivingPulseStartup';
 
 type Ready = {
   kind: 'ready';
@@ -22,13 +23,33 @@ type Ready = {
   problem?: string;
 };
 type State =
-  | { kind: 'checking' | 'signing-in' | 'signing-out' }
+  | { kind: 'startup' | 'checking' | 'signing-in' | 'signing-out' }
   | { kind: 'signed-out'; message?: string }
   | { kind: 'unavailable'; message: string }
   | { kind: 'logout-error'; session: WebSession; message: string }
   | Ready;
 
 const webApi = createWebApi();
+const startupKey = 'thozha-web.startup-seen.v1';
+
+function shouldAnimateStartup() {
+  try {
+    return (
+      !sessionStorage.getItem(startupKey) &&
+      localStorage.getItem('thozha-web.motion.v1') !== 'reduce'
+    );
+  } catch {
+    return false;
+  }
+}
+
+function markStartupSeen() {
+  try {
+    sessionStorage.setItem(startupKey, '1');
+  } catch {
+    // Storage is optional; it only controls decoration.
+  }
+}
 
 function SignedIn({
   state,
@@ -74,7 +95,7 @@ function SignedIn({
 }
 
 export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
-  const [state, setState] = useState<State>({ kind: 'checking' });
+  const [state, setState] = useState<State>({ kind: 'startup' });
   const current = useRef<State>(state);
   const request = useRef<AbortController | null>(null);
   const version = useRef(0);
@@ -94,7 +115,7 @@ export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
       return;
     const controller = new AbortController();
     request.current = controller;
-    if (previous.kind !== 'ready') commit({ kind: 'checking' });
+    if (previous.kind !== 'ready' && previous.kind !== 'startup') commit({ kind: 'checking' });
     try {
       const session = await backend.session(controller.signal);
       if (controller.signal.aborted) return;
@@ -126,6 +147,7 @@ export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
         );
       }
     } finally {
+      if (previous.kind === 'startup' && !controller.signal.aborted) markStartupSeen();
       if (request.current === controller) request.current = null;
     }
   }, [backend, commit]);
@@ -228,6 +250,9 @@ export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
       else commit({ kind: 'logout-error', session, message: errorText(error, 'sign out') });
     }
   }
+
+  if (state.kind === 'startup')
+    return <LivingPulseStartup animateOnMount={shouldAnimateStartup()} />;
 
   if (state.kind === 'ready') {
     return (
