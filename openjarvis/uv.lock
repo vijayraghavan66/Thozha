@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.10, <3.14"
 resolution-markers = [
     "python_full_version >= '3.13' and platform_machine == 's390x' and sys_platform == 'linux'",
@@ -2059,7 +2059,7 @@ dependencies = [
     { name = "av" },
     { name = "ctranslate2" },
     { name = "huggingface-hub" },
-    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (platform_machine != 's390x' and sys_platform == 'darwin')" },
+    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and platform_machine == 's390x') or (python_full_version < '3.11' and sys_platform != 'darwin') or (platform_machine != 's390x' and sys_platform == 'darwin')" },
     { name = "onnxruntime", version = "1.24.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and platform_machine == 's390x') or (python_full_version >= '3.11' and sys_platform != 'darwin')" },
     { name = "tokenizers" },
     { name = "tqdm" },
@@ -5220,6 +5220,7 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "croniter" },
+    { name = "cryptography" },
     { name = "datasets" },
     { name = "ddgs" },
     { name = "httpx" },
@@ -5301,7 +5302,7 @@ desktop = [
     { name = "fastapi" },
     { name = "faster-whisper" },
     { name = "numpy" },
-    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (platform_machine == 'x86_64' and sys_platform == 'darwin')" },
+    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin')" },
     { name = "pydantic" },
     { name = "python-multipart" },
     { name = "sounddevice" },
@@ -5420,6 +5421,7 @@ security-signing = [
 ]
 server = [
     { name = "fastapi" },
+    { name = "google-auth" },
     { name = "pydantic" },
     { name = "python-multipart" },
     { name = "uvicorn" },
@@ -5428,7 +5430,7 @@ speech = [
     { name = "av" },
     { name = "faster-whisper" },
     { name = "numpy" },
-    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (platform_machine == 'x86_64' and sys_platform == 'darwin')" },
+    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin') or (platform_machine == 'x86_64' and sys_platform == 'darwin')" },
     { name = "sounddevice" },
     { name = "soundfile" },
 ]
@@ -5466,6 +5468,7 @@ requires-dist = [
     { name = "colbert-ai", marker = "extra == 'memory-colbert'", specifier = ">=0.2" },
     { name = "croniter", specifier = ">=2.0" },
     { name = "croniter", marker = "extra == 'scheduler'", specifier = ">=2.0" },
+    { name = "cryptography", specifier = ">=42" },
     { name = "cryptography", marker = "extra == 'security-signing'", specifier = ">=43" },
     { name = "datasets", specifier = ">=4.5.0" },
     { name = "ddgs", specifier = ">=9.11.4" },
@@ -5483,6 +5486,7 @@ requires-dist = [
     { name = "gepa", marker = "extra == 'learning-gepa'", specifier = ">=0.1" },
     { name = "google-api-python-client", marker = "extra == 'channel-gmail'", specifier = ">=2.0" },
     { name = "google-auth", marker = "extra == 'eval-sheets'", specifier = ">=2.0" },
+    { name = "google-auth", marker = "extra == 'server'", specifier = ">=2.0" },
     { name = "google-auth-httplib2", marker = "extra == 'channel-gmail'", specifier = ">=0.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'channel-gmail'", specifier = ">=1.0" },
     { name = "google-genai", marker = "extra == 'inference-google'", specifier = ">=1.0" },
