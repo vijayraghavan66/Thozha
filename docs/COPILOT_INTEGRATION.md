@@ -18,7 +18,7 @@ OpenJarvis also has general chat routes: POST /v1/chat/completions (including SS
 - Any fixture must visibly say Preview or Sample; fixture values must never be labeled as live Mac state, real tasks, real approvals, or generated artifacts.
 - Build a typed API adapter that consumes only versioned contract types. Do not add hard-coded backend paths in screen components.
 - Do not put a paired-device bearer token, API key, certificate private key, or pairing secret in browser local/session storage, URLs, source maps, or mock data.
-- No Web authentication/token exchange exists in v1. Do not call loopback, the companion gateway, or the relay from a browser. Browser-to-backend wiring requires a separately reviewed auth and deployment design.
+- The proposed browser session interface is in contracts/web-auth/v1.md, but no Web authentication/token exchange exists in the implemented source. Do not call loopback, the companion gateway, or the relay from a browser. Browser-to-backend wiring requires a separately reviewed auth and deployment design.
 - Keep actions disabled in preview mode. Do not simulate approval decisions, task execution, push notifications, or artifact delivery.
 - After a future authenticated integration is approved, show truthful states: accepted is not completed; approval recorded is not execution completed; artifact bytes are not verified until size/hash checks pass.
 

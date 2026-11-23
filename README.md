@@ -20,6 +20,7 @@ The Jarvis Link v1 Worker contract is a prototype contract only; no production r
 ## Start here
 
 - Companion HTTP API v1: contracts/companion-api/v1.md
+- Proposed browser session API v1: contracts/web-auth/v1.md
 - Jarvis Link wire protocol v1: contracts/jarvis-link/v1.md
 - Copilot integration guide: docs/COPILOT_INTEGRATION.md
 - Ownership and merge rules: OWNERSHIP.md
