@@ -1,0 +1,616 @@
+openapi: 3.1.0
+info:
+  title: Thozha and OpenJarvis APIs
+  version: 1.0.0
+  description: >
+    Source-derived contract for implemented local APIs. This is not a public Internet API.
+    Companion-specific routes are distinguished from general OpenJarvis server routes;
+    the strict companion gateway exposes only operations marked x-companion-gateway: true.
+servers:
+  - url: http://127.0.0.1:8000
+    description: OpenJarvis loopback API. Do not expose directly.
+security:
+  - BearerAuth: []
+tags:
+  - name: companion
+  - name: conversation
+  - name: memory
+  - name: session
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      security: []
+      tags: [companion]
+      responses:
+        '200':
+          description: OpenJarvis health
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+  /v1/jarvis/system/info:
+    get:
+      operationId: getMacSystemInfo
+      x-companion-gateway: true
+      tags: [companion]
+      responses:
+        '200':
+          description: Fixed, read-only Mac facts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MacSystemInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/jarvis/tasks:
+    get:
+      operationId: listTasks
+      x-companion-gateway: true
+      tags: [companion]
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, enum: [active, completed, all], default: active }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        '200':
+          description: Persisted tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tasks]
+                properties:
+                  tasks:
+                    type: array
+                    items: { $ref: '#/components/schemas/Task' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+  /v1/jarvis/tasks/{task_id}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: getTask
+      x-companion-gateway: true
+      tags: [companion]
+      responses:
+        '200':
+          description: Persisted task and recorded events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task: { $ref: '#/components/schemas/Task' }
+                  events:
+                    type: array
+                    items: { $ref: '#/components/schemas/TaskEvent' }
+                additionalProperties: true
+        '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/jarvis/link/tasks:
+    post:
+      operationId: submitLinkTask
+      x-companion-gateway: true
+      tags: [companion]
+      parameters:
+        - name: mode
+          in: query
+          schema: { type: string, enum: [async] }
+          description: Omit for synchronous server behavior; Android uses async.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LinkTaskRequest' }
+      responses:
+        '200':
+          description: Completed result or idempotent completed replay
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LinkTaskResult' }
+        '202':
+          description: Accepted or queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LinkTaskResult' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/jarvis/link/tasks/{idempotency_key}:
+    parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+    get:
+      operationId: getLinkTaskStatus
+      x-companion-gateway: true
+      tags: [companion]
+      responses:
+        '200':
+          description: Current durable state and terminal result when available
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LinkTaskResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/jarvis/link/tasks/{idempotency_key}/events:
+    parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - name: after_seq
+        in: query
+        schema: { type: integer, minimum: 0, default: 0 }
+      - name: limit
+        in: query
+        schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+    get:
+      operationId: getLinkTaskEvents
+      x-companion-gateway: false
+      tags: [companion]
+      description: Direct loopback API only; paginated polling, not SSE or WebSocket.
+      responses:
+        '200':
+          description: Owner-authorized persisted event page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskEventPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/jarvis/link/tasks/{idempotency_key}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      operationId: cancelLinkTask
+      x-companion-gateway: true
+      tags: [companion]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200':
+          description: Actual cancellation state, including whether an operation may already have started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LinkTaskResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/jarvis/approvals/pending:
+    get:
+      operationId: listPendingApprovals
+      x-companion-gateway: true
+      tags: [companion]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        '200':
+          description: Pending exact-operation approvals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approvals:
+                    type: array
+                    items: { $ref: '#/components/schemas/Approval' }
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Approval' }
+                  count: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/jarvis/approvals/{approval_id}:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalId'
+    get:
+      operationId: getApproval
+      x-companion-gateway: true
+      tags: [companion]
+      responses:
+        '200':
+          description: Exact approval fields
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Approval' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/jarvis/approvals/{approval_id}/decision:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalId'
+    post:
+      operationId: decideApproval
+      x-companion-gateway: true
+      tags: [companion]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalDecision' }
+      responses:
+        '200':
+          description: Decision accepted; this alone does not prove tool execution completed
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Unavailable' }
+  /v1/jarvis/tasks/{task_id}/artifacts:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: listTaskArtifacts
+      x-companion-gateway: false
+      tags: [companion]
+      description: Direct API only; not in the strict companion gateway allowlist.
+      responses:
+        '200':
+          description: Artifacts for the paired device's completed development task
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: { type: string }
+                  artifacts:
+                    type: array
+                    items: { $ref: '#/components/schemas/Artifact' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/jarvis/tasks/{task_id}/artifacts/{artifact_id}/download:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+      - name: artifact_id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+    get:
+      operationId: downloadTaskArtifact
+      x-companion-gateway: false
+      tags: [companion]
+      description: Direct API only. Verify Content-Length and X-Content-SHA256 before opening.
+      responses:
+        '200':
+          description: ZIP archive
+          headers:
+            X-Content-SHA256: { schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+            ETag: { schema: { type: string } }
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/jarvis/devices/fcm-token:
+    post:
+      operationId: registerFcmToken
+      x-companion-gateway: true
+      tags: [companion]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, minLength: 20, maxLength: 4096 }
+      responses:
+        '200':
+          description: Registration stored encrypted at rest
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: registered }
+    delete:
+      operationId: revokeFcmToken
+      x-companion-gateway: true
+      tags: [companion]
+      responses:
+        '200':
+          description: Current device registration revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: revoked }
+  /v1/chat/completions:
+    post:
+      operationId: openJarvisChatCompletion
+      x-companion-gateway: false
+      tags: [conversation]
+      description: General OpenJarvis API, not a Web Workspace authentication route. Tools/agent behavior follows the configured server policy. No request idempotency key is defined.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatCompletionRequest' }
+      responses:
+        '200':
+          description: JSON completion or Server-Sent Events when stream is true and the selected engine supports streaming
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+            text/event-stream:
+              schema: { type: string }
+  /v1/memory/store:
+    post:
+      operationId: storeOpenJarvisMemory
+      x-companion-gateway: false
+      tags: [memory]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemoryStoreRequest' }
+      responses:
+        '200': { description: Stored }
+        '503': { description: Memory backend is not configured }
+  /v1/memory/search:
+    post:
+      operationId: searchOpenJarvisMemory
+      x-companion-gateway: false
+      tags: [memory]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemorySearchRequest' }
+      responses:
+        '200':
+          description: Results; empty when no memory backend is configured
+          content:
+            application/json:
+              schema: { type: object, properties: { results: { type: array, items: { type: object } } } }
+  /v1/sessions:
+    get:
+      operationId: listOpenJarvisSessions
+      x-companion-gateway: false
+      tags: [session]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: Server SessionStore records, not per-device conversation history
+          content:
+            application/json:
+              schema: { type: object, properties: { sessions: { type: array, items: { type: object } } } }
+  /v1/sessions/{session_id}:
+    parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getOpenJarvisSession
+      x-companion-gateway: false
+      tags: [session]
+      responses:
+        '200':
+          description: Session record from the server SessionStore
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '404': { $ref: '#/components/responses/NotFound' }
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Server/device credential for direct API only; never place in a browser.
+  parameters:
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+    IdempotencyKey:
+      name: idempotency_key
+      in: path
+      required: true
+      schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' }
+    ApprovalId:
+      name: approval_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+  schemas:
+    MacSystemInfo:
+      type: object
+      required: [online, uptime]
+      properties:
+        online: { type: boolean, const: true }
+        battery_percent: { type: [integer, 'null'], minimum: 0, maximum: 100 }
+        charging: { type: [boolean, 'null'] }
+        uptime_seconds: { type: integer, minimum: 0 }
+        uptime: { type: string }
+        checked_at: { type: string, format: date-time }
+    Task:
+      type: object
+      required: [id, state]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        state: { type: string }
+        title: { type: string }
+        current_step: { type: string }
+        created_at: { type: string }
+        updated_at: { type: string }
+        events: { type: array, items: { $ref: '#/components/schemas/TaskEvent' } }
+      additionalProperties: true
+    TaskEvent:
+      type: object
+      properties:
+        seq: { type: integer }
+        event_type: { type: string }
+        created_at: { type: string, format: date-time }
+        payload: { type: object, additionalProperties: true }
+    TaskEventPage:
+      type: object
+      required: [task_id, events, next_seq]
+      properties:
+        task_id: { type: string }
+        events: { type: array, items: { $ref: '#/components/schemas/TaskEvent' } }
+        next_seq: { type: integer, minimum: 0 }
+    LinkTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [objective, capability_scope, idempotency_key, requester_device_id]
+      properties:
+        objective: { type: string, minLength: 1, maxLength: 20000 }
+        capability_scope:
+          type: array
+          items: { type: string, enum: [read_only, assistant, development] }
+        idempotency_key: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' }
+        requester_device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+    LinkTaskResult:
+      type: object
+      required: [task_id, state, summary]
+      properties:
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        state: { type: string }
+        summary: { type: string }
+        result_text: { type: [string, 'null'] }
+        result_digest: { type: [string, 'null'], pattern: '^[0-9a-f]{64}$' }
+        idempotent_replay: { type: boolean }
+    Approval:
+      type: object
+      required: [id, task_id, operation, target_resource, operation_digest, status, created_at, expires_at]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        operation: { type: string }
+        target_resource: { type: string }
+        canonical_arguments: { type: object, additionalProperties: true }
+        operation_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    ApprovalDecision:
+      type: object
+      additionalProperties: false
+      required: [decision, expected_operation_digest]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        expected_operation_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        requester_device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        idempotency_key: { type: string, minLength: 1, maxLength: 128 }
+        continuation_objective: { type: string, maxLength: 4096 }
+    Artifact:
+      type: object
+      required: [artifact_id, task_id, file_name, size_bytes, archive_sha256, manifest_sha256, files, download_path]
+      properties:
+        artifact_id: { type: string, pattern: '^[0-9a-f]{64}$' }
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        file_name: { type: string }
+        size_bytes: { type: integer, minimum: 1 }
+        archive_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        manifest_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        files: { type: array, items: { type: object, additionalProperties: true } }
+        download_path: { type: string }
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model: { type: string }
+        messages:
+          type: array
+          items:
+            type: object
+            required: [role]
+            properties:
+              role: { type: string }
+              content: { type: string }
+              name: { type: [string, 'null'] }
+              tool_calls: { type: [array, 'null'], items: { type: object } }
+              tool_call_id: { type: [string, 'null'] }
+        temperature: { type: number, default: 0.7 }
+        max_tokens: { type: integer, default: 1024 }
+        stream: { type: boolean, default: false }
+        tools: { type: [array, 'null'], items: { type: object } }
+    MemoryStoreRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+        metadata: { type: object, additionalProperties: true }
+    MemorySearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        top_k: { type: integer, default: 5 }
+  responses:
+    Unauthorized:
+      description: Missing, invalid, or expired credential
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Authenticated caller is not authorized for this resource
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: State, ownership, digest, expiry, or idempotency conflict
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InvalidRequest:
+      description: Request validation failure
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: Backend, engine, or resource unavailable
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  x-thozha-not-implemented:
+    - browser login/session/CSRF endpoints
+    - device-bound web conversation history
+    - authenticated web task SSE/WebSocket
+    - event replay and resume contract for browsers
+    - artifact relay through the companion gateway
+    - per-user memory scopes and memory deletion
+    - automation schedule CRUD API
+    - notification history/read state API
+    - FCM delivery through verified project credentials
+    - Trading Lab broker integration (paper-trading only remains the boundary)
+x-websocket:
+  /v1/chat/stream:
+    status: implemented in general OpenJarvis API; not companion-gateway allowlisted
+    auth: existing OpenJarvis WebSocket subprotocol/API-key check, not a browser session
+    request:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        model: { type: string, description: Optional configured model identifier. }
+        agent: { type: string, description: Optional configured agent identifier. }
+        transient: { type: boolean, default: false }
+    events:
+      - type: object
+        required: [type, content]
+        properties:
+          type: { type: string, const: chunk }
+          content: { type: string }
+      - type: object
+        required: [type, content]
+        properties:
+          type: { type: string, const: done }
+          content: { type: string }
+      - type: object
+        required: [type, detail]
+        properties:
+          type: { type: string, const: error }
+          detail: { type: string }
