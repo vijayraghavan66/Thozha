@@ -2,7 +2,7 @@
 
 ## Codex
 
-Codex owns:
+Codex owns branch codex/core and:
 
 - `openjarvis/`: Mac API, supervisor, task execution, approval enforcement, notifications, and service reliability.
 - `android-companion/`: Android API client, authentication, task state, approvals, voice transport, and native integration.
@@ -13,7 +13,7 @@ Codex reviews contract changes that affect Android or Web consumers.
 
 ## Copilot
 
-Copilot owns the Web Workspace frontend under `web/` after the owner approves its design. Until approval:
+Copilot owns branch copilot/web and the Web Workspace frontend under web/ after the owner approves its design. Until approval:
 
 - Keep the interactive Web mockup in its separate prototype workspace.
 - Do not add or replace the approved Web design in this repository.
