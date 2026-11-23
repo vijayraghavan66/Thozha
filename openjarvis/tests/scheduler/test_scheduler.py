@@ -263,13 +263,15 @@ class TestExecuteTask:
 
     def test_execute_without_system(self, store):
         sched = TaskScheduler(store, poll_interval=1)
-        task = sched.create_task("dry run", "once", "2026-01-01T00:00:00+00:00")
+        task = sched.create_task("store-only task", "once", "2026-01-01T00:00:00+00:00")
         sched._execute_task(task)
 
         logs = store.get_run_logs(task.id)
         assert len(logs) == 1
-        assert logs[0]["success"] == 1
-        assert "dry-run" in logs[0]["result"]
+        assert logs[0]["success"] == 0
+        assert logs[0]["state"] == "completed"
+        assert logs[0]["error"] == "scheduler execution engine is not configured"
+        assert "dry-run" not in logs[0]["result"]
 
     def test_execute_with_error(self, store):
         mock_system = MagicMock()

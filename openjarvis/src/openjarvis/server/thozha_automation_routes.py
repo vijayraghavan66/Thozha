@@ -15,13 +15,16 @@ workflow TOOL nodes, MCP tools, or shell commands itself.
 from __future__ import annotations
 
 import inspect
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from openjarvis.scheduler.scheduler import WebScheduleConflict
 
 _OWNER_METADATA_KEY = "thozha_web_owner_id"
 _SOURCE_METADATA_KEY = "thozha_web_source"
@@ -37,6 +40,7 @@ class AutomationCreate(BaseModel):
     schedule_type: str
     schedule_value: str = Field(min_length=1, max_length=200)
     timezone: Optional[str] = Field(default=None, max_length=80)
+    device_id: str = Field(pattern=r"^[0-9a-f]{32}$")
 
     model_config = ConfigDict(extra="forbid")
 
@@ -50,6 +54,15 @@ class AutomationUpdate(BaseModel):
     timezone: Optional[str] = Field(default=None, max_length=80)
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator(
+        "prompt", "schedule_type", "schedule_value", "timezone", mode="before"
+    )
+    @classmethod
+    def reject_explicit_null(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("update fields cannot be null; omit unchanged fields")
+        return value
 
 
 def validate_schedule(
@@ -117,14 +130,16 @@ def scheduler_state_for_create(
 ) -> bool:
     return (
         supervised_action is not None
-        and callable(getattr(scheduler, "create_task", None))
-        and (not hasattr(scheduler, "_system") or scheduler._system is not None)
+        and callable(getattr(scheduler, "create_web_task", None))
+        and bool(getattr(scheduler, "web_supervisor_dispatcher_ready", False))
     )
 
 
 def scheduler_unavailable_reasons(
     scheduler: Any,
     supervised_action: Optional[Callable[..., Any]],
+    *,
+    web_identity_ready: bool = False,
 ) -> Dict[str, str]:
     reasons: Dict[str, str] = {}
     methods = {
@@ -146,8 +161,22 @@ def scheduler_unavailable_reasons(
     for operation, method in methods.items():
         if not callable(getattr(scheduler, method, None)):
             reasons[operation] = f"scheduler has no public {method} method"
-    if hasattr(scheduler, "_system") and scheduler._system is None:
-        reasons["create"] = "scheduler is store-only and cannot execute automations"
+    if not getattr(scheduler, "web_supervisor_dispatcher_ready", False):
+        reasons["create"] = "normal Link supervisor dispatcher is not configured"
+        reasons["manual_trigger"] = (
+            "normal Link supervisor dispatcher is not configured"
+        )
+    if not web_identity_ready:
+        for operation in (
+            "create",
+            "update",
+            "enable",
+            "disable",
+            "pause",
+            "delete",
+            "manual_trigger",
+        ):
+            reasons[operation] = "browser-to-active-device mapping is unavailable"
     return reasons
 
 
@@ -156,6 +185,9 @@ def create_automation_router(
     require_web_session: Callable[..., Any],
     scheduler_provider: Optional[Callable[..., Any]] = None,
     supervised_action: Optional[Callable[..., Any]] = None,
+    resolve_web_device_ids: Optional[Callable[[Any], set[str]]] = None,
+    is_web_device_active: Optional[Callable[[str, str], bool]] = None,
+    supervisor_store_provider: Optional[Callable[[Request], Any]] = None,
 ) -> APIRouter:
     """Create the versioned Web automation router.
 
@@ -165,7 +197,8 @@ def create_automation_router(
     action_dict)``. It must apply the existing supervisor/capability policy and
     perform the operation through the established scheduler integration. For
     create, it must persist owner/source/idempotency metadata on the scheduler
-    row and return its task ID. No request body can set the owner.
+    row and return its task ID. Device IDs are checked against an injected
+    owner-to-active-paired-device mapping; callers cannot set actor metadata.
     """
     router = APIRouter(prefix="/v1/web/automations", tags=["web-automations"])
 
@@ -183,8 +216,10 @@ def create_automation_router(
         if scheduler_provider is not None:
             scheduler = scheduler_provider(request)
         else:
-            system = getattr(request.app.state, "system", None)
-            scheduler = getattr(system, "scheduler", None)
+            scheduler = getattr(request.app.state, "web_automation_scheduler", None)
+            if scheduler is None:
+                system = getattr(request.app.state, "system", None)
+                scheduler = getattr(system, "scheduler", None)
         if scheduler is None or not hasattr(scheduler, "list_tasks"):
             raise HTTPException(
                 503,
@@ -194,6 +229,93 @@ def create_automation_router(
                 },
             )
         return scheduler
+
+    def require_active_mapped_device(
+        principal: Any, user_id: str, device_id: str
+    ) -> None:
+        if resolve_web_device_ids is None or is_web_device_active is None:
+            raise HTTPException(
+                503,
+                detail={
+                    "status": "unavailable",
+                    "reason": "browser-to-paired-device mapping is not configured",
+                },
+            )
+        try:
+            allowed = resolve_web_device_ids(principal)
+            if device_id not in allowed or not is_web_device_active(user_id, device_id):
+                # Do not reveal whether another user's device ID exists.
+                raise HTTPException(404, "automation not found")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(503, "browser-to-device mapping lookup failed") from exc
+
+    def web_identity_ready(principal: Any) -> bool:
+        if resolve_web_device_ids is None or is_web_device_active is None:
+            return False
+        user_id = owner(principal)
+        try:
+            return any(
+                is_web_device_active(user_id, device_id)
+                for device_id in resolve_web_device_ids(principal)
+            )
+        except Exception:
+            return False
+
+    def supervisor_snapshot(
+        request: Request, automation: Dict[str, Any], run: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Read state only when the supervisor task matches this Web owner/device."""
+        task_id = run.get("supervisor_task_id")
+        if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
+            return None
+        if supervisor_store_provider is None:
+            return {"status": "unavailable", "task_id": task_id}
+        try:
+            store = supervisor_store_provider(request)
+            task = store.get_task(task_id)
+            if task is None:
+                return {"status": "not_found", "task_id": task_id}
+            metadata = json.loads(task.get("recovery_json") or "{}")
+            expected_device = (automation.get("metadata") or {}).get(
+                "thozha_web_device_id"
+            )
+            if (
+                metadata.get("source") != "jarvis_link"
+                or metadata.get("owner_actor") != f"device:{expected_device}"
+            ):
+                # Do not disclose cross-owner task state, even if a run row was altered.
+                return None
+            link_run = store.link_task_run(task_id) or {}
+            events = []
+            for event in store.events_after(task_id, 0, 50):
+                payload = event.get("payload") or {}
+                events.append(
+                    {
+                        "seq": event.get("seq"),
+                        "type": event.get("event_type"),
+                        "created_at": event.get("created_at"),
+                        "state": payload.get("state")
+                        if isinstance(payload.get("state"), str)
+                        else None,
+                    }
+                )
+            result_text = link_run.get("result_text")
+            return {
+                "task_id": task_id,
+                "state": task.get("state"),
+                "link_state": link_run.get("status"),
+                "result_summary": link_run.get("result_summary"),
+                "result_text": result_text[:20_000]
+                if isinstance(result_text, str)
+                else None,
+                "result_truncated": isinstance(result_text, str)
+                and len(result_text) > 20_000,
+                "events": events,
+            }
+        except Exception as exc:
+            raise HTTPException(503, "supervisor task status is unavailable") from exc
 
     def unavailable() -> None:
         raise HTTPException(
@@ -206,7 +328,7 @@ def create_automation_router(
 
     def require_scheduler_operation(scheduler: Any, operation: str) -> None:
         methods = {
-            "create": "create_task",
+            "create": "create_web_task",
             "update": "update_task",
             "delete": "delete_task",
             "enable": "resume_task",
@@ -227,16 +349,14 @@ def create_automation_router(
         # The production TaskScheduler created by SystemBuilder currently has
         # _system=None, causing its due-task loop to persist a fake dry-run as
         # successful. Refuse creation against that known non-executing runner.
-        if (
-            operation == "create"
-            and hasattr(scheduler, "_system")
-            and scheduler._system is None
+        if operation in {"create", "manual_trigger"} and not getattr(
+            scheduler, "web_supervisor_dispatcher_ready", False
         ):
             raise HTTPException(
                 503,
                 detail={
                     "status": "unavailable",
-                    "reason": "scheduler is store-only and cannot execute automations",
+                    "reason": "normal Link supervisor dispatcher is not configured",
                 },
             )
 
@@ -254,6 +374,8 @@ def create_automation_router(
             raise HTTPException(403, "supervisor denied automation operation") from exc
         except KeyError as exc:
             raise HTTPException(404, "automation not found") from exc
+        except WebScheduleConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         except NotImplementedError as exc:
@@ -270,7 +392,7 @@ def create_automation_router(
         idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         try:
-            task = scheduler._store.get_task(task_id)
+            task = scheduler.get_task(task_id)
         except Exception as exc:
             raise HTTPException(503, "scheduler persistence is unavailable") from exc
         metadata = (task or {}).get("metadata") or {}
@@ -298,6 +420,7 @@ def create_automation_router(
             "status": task["status"],
             "next_run": task.get("next_run"),
             "last_run": task.get("last_run"),
+            "last_supervisor_task_id": metadata.get("last_supervisor_task_id"),
         }
 
     async def perform_mutation(
@@ -318,7 +441,13 @@ def create_automation_router(
         if isinstance(result, dict):
             safe_result = {
                 key: result[key]
-                for key in ("status", "approval_id")
+                for key in (
+                    "status",
+                    "approval_id",
+                    "task_id",
+                    "supervisor_task_id",
+                    "state",
+                )
                 if key in result
                 and isinstance(result[key], (str, int, bool, type(None)))
             }
@@ -360,30 +489,39 @@ def create_automation_router(
     ):
         owner(principal)
         scheduler = scheduler_from(request)
+        identity_ready = web_identity_ready(principal)
         return {
             "status": "available",
             "operations": {
                 "list": True,
                 "get": True,
-                "history": callable(
-                    getattr(getattr(scheduler, "_store", None), "get_run_logs", None)
-                ),
-                "create": scheduler_state_for_create(scheduler, supervised_action),
+                "history": callable(getattr(scheduler, "get_run_logs", None)),
+                "create": scheduler_state_for_create(scheduler, supervised_action)
+                and identity_ready,
                 "update": callable(getattr(scheduler, "update_task", None))
-                and supervised_action is not None,
+                and supervised_action is not None
+                and identity_ready,
                 "enable": callable(getattr(scheduler, "resume_task", None))
-                and supervised_action is not None,
+                and supervised_action is not None
+                and identity_ready,
                 "disable": callable(getattr(scheduler, "pause_task", None))
-                and supervised_action is not None,
+                and supervised_action is not None
+                and identity_ready,
                 "pause": callable(getattr(scheduler, "pause_task", None))
-                and supervised_action is not None,
+                and supervised_action is not None
+                and identity_ready,
                 "delete": callable(getattr(scheduler, "delete_task", None))
-                and supervised_action is not None,
+                and supervised_action is not None
+                and identity_ready,
                 "manual_trigger": callable(getattr(scheduler, "run_task_once", None))
-                and supervised_action is not None,
+                and supervised_action is not None
+                and identity_ready
+                and bool(getattr(scheduler, "web_supervisor_dispatcher_ready", False)),
             },
             "unavailable_reasons": scheduler_unavailable_reasons(
-                scheduler, supervised_action
+                scheduler,
+                supervised_action,
+                web_identity_ready=identity_ready,
             ),
         }
 
@@ -398,6 +536,7 @@ def create_automation_router(
             raise HTTPException(400, "a valid Idempotency-Key header is required")
         validate_schedule(body.schedule_type, body.schedule_value, body.timezone)
         user_id = owner(principal)
+        require_active_mapped_device(principal, user_id, body.device_id)
         scheduler = scheduler_from(request)
         require_scheduler_operation(scheduler, "create")
         if supervised_action is None:
@@ -411,10 +550,13 @@ def create_automation_router(
                 # No caller-controlled tools, agent, owner, or status fields.
                 "agent": "simple",
                 "tools": [],
+                "capability_scope": ["read_only"],
                 "metadata": {
                     _OWNER_METADATA_KEY: user_id,
                     _SOURCE_METADATA_KEY: "web",
                     _IDEMPOTENCY_METADATA_KEY: idempotency_key,
+                    "thozha_web_device_id": body.device_id,
+                    "capability_scope": ["read_only"],
                     **({"timezone": body.timezone} if body.timezone else {}),
                 },
             },
@@ -439,8 +581,11 @@ def create_automation_router(
         request: Request,
         principal: Any = Depends(require_web_session),
     ):
-        task = owned_task(scheduler_from(request), automation_id, owner(principal))
-        return {"automation": public_task(task)}
+        scheduler = scheduler_from(request)
+        task = owned_task(scheduler, automation_id, owner(principal))
+        logs = scheduler.get_run_logs(automation_id, limit=1)
+        latest = supervisor_snapshot(request, task, logs[0]) if logs else None
+        return {"automation": public_task(task), "latest_supervisor_task": latest}
 
     @router.get("/{automation_id}/history")
     async def automation_history(
@@ -450,9 +595,9 @@ def create_automation_router(
         limit: int = Query(default=20, ge=1, le=100),
     ):
         scheduler = scheduler_from(request)
-        owned_task(scheduler, automation_id, owner(principal))
+        task = owned_task(scheduler, automation_id, owner(principal))
         try:
-            logs = scheduler._store.get_run_logs(automation_id, limit=limit)
+            logs = scheduler.get_run_logs(automation_id, limit=limit)
         except Exception as exc:
             raise HTTPException(503, "scheduler history is unavailable") from exc
         return {
@@ -461,8 +606,12 @@ def create_automation_router(
                     "started_at": row["started_at"],
                     "finished_at": row["finished_at"],
                     "success": bool(row["success"]),
+                    "state": row.get("state", "completed"),
+                    "supervisor_task_id": row.get("supervisor_task_id"),
+                    "idempotency_key": row.get("idempotency_key"),
                     "result": row["result"],
                     "error": row["error"],
+                    "supervisor_task": supervisor_snapshot(request, task, row),
                 }
                 for row in logs
             ]
@@ -477,13 +626,18 @@ def create_automation_router(
     ):
         user_id = owner(principal)
         scheduler = scheduler_from(request)
-        owned_task(scheduler, automation_id, user_id)
+        current = owned_task(scheduler, automation_id, user_id)
+        require_active_mapped_device(
+            principal,
+            user_id,
+            str((current.get("metadata") or {}).get("thozha_web_device_id") or ""),
+        )
         patch = body.model_dump(exclude_unset=True)
         if not any(value is not None for value in patch.values()):
             raise HTTPException(422, "at least one update field is required")
         require_scheduler_operation(scheduler, "update")
         if "schedule_type" in patch or "schedule_value" in patch or "timezone" in patch:
-            current = scheduler._store.get_task(automation_id)
+            current = scheduler.get_task(automation_id)
             schedule_type = patch.get("schedule_type", current["schedule_type"])
             schedule_value = patch.get("schedule_value", current["schedule_value"])
             timezone_name = patch.get(
@@ -502,11 +656,21 @@ def create_automation_router(
         )
 
     async def lifecycle_action(
-        automation_id: str, request: Request, principal: Any, operation: str
+        automation_id: str,
+        request: Request,
+        principal: Any,
+        operation: str,
+        *,
+        idempotency_key: str | None = None,
     ):
         user_id = owner(principal)
         scheduler = scheduler_from(request)
-        owned_task(scheduler, automation_id, user_id)
+        current = owned_task(scheduler, automation_id, user_id)
+        require_active_mapped_device(
+            principal,
+            user_id,
+            str((current.get("metadata") or {}).get("thozha_web_device_id") or ""),
+        )
         require_scheduler_operation(scheduler, operation)
         return await perform_mutation(
             principal,
@@ -514,6 +678,7 @@ def create_automation_router(
                 "operation": operation,
                 "owner_id": user_id,
                 "automation_id": automation_id,
+                **({"idempotency_key": idempotency_key} if idempotency_key else {}),
             },
             scheduler=scheduler,
         )
@@ -546,10 +711,17 @@ def create_automation_router(
     async def trigger_automation(
         automation_id: str,
         request: Request,
+        idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
         principal: Any = Depends(require_web_session),
     ):
+        if not idempotency_key or not _IDEMPOTENCY_RE.fullmatch(idempotency_key):
+            raise HTTPException(400, "a valid Idempotency-Key header is required")
         return await lifecycle_action(
-            automation_id, request, principal, "manual_trigger"
+            automation_id,
+            request,
+            principal,
+            "manual_trigger",
+            idempotency_key=idempotency_key,
         )
 
     @router.delete("/{automation_id}")
