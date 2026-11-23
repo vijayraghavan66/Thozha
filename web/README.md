@@ -49,6 +49,14 @@ THOZHA_E2E_PYTHON=/path/to/venv/bin/python THOZHA_E2E_MODE=buffered \
 
 Playwright opens the production bundle on loopback ports `45837`/`45838` using the **real** repository `create_app`, auth/CSRF, conversations, and memory stores. It creates temporary owner-only storage and a randomized test credential, supplies a deterministic engine to exercise streamed/buffered delivery, and uses no provider account, existing store, or production credential. The fallback and replay tests deliberately interrupt delivery at the browser boundary. This verifies local browser-to-backend integration, not a deployment or live inference service. This suite uses Chromium and checks WCAG 2.x A/AA rules with axe on sign-in, Overview and chat.
 
+### Alpha verification results
+
+- Strict TypeScript, ESLint, formatting, and production build passed; 9 Vitest unit/component tests passed.
+- 8 Chromium integration tests passed against the real Web API with the streaming fixture, plus a separate buffered-mode browser test. The scanned screens had no axe violations.
+- Production entry assets measured 116.46 kB JavaScript and 7.68 kB CSS gzipped. One warm Chromium loopback navigation measured 6 ms to `DOMContentLoaded`; none of the AI Workspace, Trading Lab, or Memory Center chunks loaded on Overview. This is not a deployment or model latency benchmark.
+
+Playwright screenshots (the conversation uses the labeled test engine): [Sign-in](./docs/alpha-visuals/sign-in.png) · [Desktop Overview](./docs/alpha-visuals/desktop-overview.png) · [Desktop conversation](./docs/alpha-visuals/desktop-conversation.png) · [Mobile conversation](./docs/alpha-visuals/mobile-conversation.png).
+
 ## Contract handoff
 
 Runtime wiring is based on `codex/core` at `90927d50` and the OpenAPI v1 on `codex/openapi-contracts` at `e7ae0cd2`. See the [official Web types](../contracts/web-api/v1.ts) and [integration guide](../docs/COPILOT_INTEGRATION.md). `npm run contract:generate` generates browser-only types from that pinned Git object; fetch `codex/openapi-contracts` if needed, or pass a reviewed local spec as an argument. The published spec references an undefined generic `Error` schema; generation excludes just that error payload shape and the client uses HTTP status messages. There are no changes to the shared specs.
