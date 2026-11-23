@@ -28,3 +28,5 @@ A separate read-only review of the unfiltered OpenJarvis history found no establ
 ## Scope and limitations
 
 This is a source/history scan and targeted review, not a query against external credential providers. The Web mockup and standalone Thozha visual-review prototype are not included. The remote repository was confirmed private and empty before migration; no push has occurred in this checkpoint. Re-run the scan against the final staged tree immediately before pushing.
+
+Git authorship metadata was preserved to retain the imported histories. A metadata-only scan found 125 unique author email identities; some commits use personal-mail-provider domains and some use GitHub noreply addresses. No addresses or author records are printed here. This metadata is ordinary commit attribution, not an API credential; because the destination is private, it will be visible to repository collaborators. The original local histories remain unchanged.
