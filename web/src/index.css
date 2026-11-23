@@ -884,6 +884,53 @@ button:disabled {
   padding-bottom: 19px;
   border-bottom: 1px solid rgb(255 255 255 / 9%);
 }
+
+.th-task-workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.5fr);
+  align-items: start;
+  gap: 1rem;
+}
+.th-task-composer {
+  border-color: rgb(255 255 255 / 14%);
+  background: #17181c;
+}
+.th-task-detail > section {
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+.th-trading-layout {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr) 255px;
+  align-items: start;
+  gap: 1rem;
+}
+.th-trading-watchlist {
+  min-width: 0;
+}
+.th-market-chart {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 12px;
+}
+@media (max-width: 1180px) {
+  .th-trading-layout {
+    grid-template-columns: 190px minmax(0, 1fr);
+  }
+  .th-trading-layout > aside:last-child {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 860px) {
+  .th-task-workspace,
+  .th-trading-layout {
+    grid-template-columns: 1fr;
+  }
+  .th-trading-layout > aside:last-child {
+    grid-column: auto;
+  }
+}
 .th-v4-inspector-section {
   padding: 18px 0;
   border-bottom: 1px solid rgb(255 255 255 / 9%);

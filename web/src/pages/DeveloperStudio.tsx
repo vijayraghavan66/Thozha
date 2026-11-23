@@ -3,14 +3,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { mayHaveBeenAccepted, type WorkspaceApi } from '../api/client';
 import { type PairedDevice, type TaskInput, type TaskScope } from '../api/control';
 import { field, muted, outline, solid } from '../components/styles';
-import { Chip, Head, Loading, Notice, Panel, Row } from '../components/ui';
+import { Chip, Head, Loading, Notice, Panel } from '../components/ui';
 import { Approvals } from './Approvals';
 import { controlError, taskHref, tasksKey, useDevices, useTasks } from './controlState';
 import { DevicePicker } from './DevicePicker';
 import { TaskDetail } from './TaskDetail';
 import { readinessError, taskReadinessBlocker } from './supervisorReadiness';
 
-function TaskForm({
+function TaskComposer({
   api,
   devices,
   prefill,
@@ -27,16 +27,22 @@ function TaskForm({
   const [objective, setObjective] = useState(prefill);
   const [selection, setSelection] = useState('');
   const [scope, setScope] = useState<TaskScope>('read_only');
+  const [reviewing, setReviewing] = useState(Boolean(prefill));
   const [checking, setChecking] = useState(false);
   const [preflightError, setPreflightError] = useState('');
   const submitLock = useRef(false);
-  const eligible = useRef(false);
+  const composer = useRef<HTMLTextAreaElement>(null);
+  const alive = useRef(true);
+  useEffect(
+    () => () => {
+      alive.current = false;
+    },
+    []
+  );
   useEffect(() => {
-    eligible.current = connected;
-    return () => {
-      eligible.current = false;
-    };
-  }, [connected]);
+    setObjective(prefill);
+    if (prefill) setReviewing(true);
+  }, [prefill]);
   const readiness = useQuery({
     queryKey: ['task-form-readiness'],
     queryFn: ({ signal }) => api.supervisorReadiness(signal),
@@ -44,15 +50,13 @@ function TaskForm({
     retry: false,
   });
   const blocker = readiness.isSuccess ? taskReadinessBlocker(readiness.data) : undefined;
-  const readinessVerified = readiness.isSuccess && !readiness.isFetching && !blocker;
+  const verified = readiness.isSuccess && !readiness.isFetching && !blocker;
   const submit = useMutation({
     mutationFn: (body: TaskInput) => api.submitTask(body),
     onSettled: () => {
       submitLock.current = false;
     },
-    onSuccess: () => {
-      void cache.invalidateQueries({ queryKey: tasksKey });
-    },
+    onSuccess: () => void cache.invalidateQueries({ queryKey: tasksKey }),
   });
   const deviceId = devices.some(item => item.device_id === selection)
     ? selection
@@ -61,18 +65,13 @@ function TaskForm({
       : '';
   const unavailable =
     submit.isError &&
-    submit.error instanceof Error &&
     controlError(submit.error, 'submit') === 'Supervisor task worker is unavailable';
   const uncertain = submit.isError && !unavailable && mayHaveBeenAccepted(submit.error);
+  const selectedDevice = devices.find(device => device.device_id === deviceId);
 
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!connected || !deviceId || !objective.trim() || !readinessVerified || submitLock.current)
-      return;
-    const accepted = {
-      onSuccess: (data: Awaited<ReturnType<WorkspaceApi['submitTask']>>) =>
-        onAccepted(data.task_id),
-    };
+    if (!connected || !deviceId || !objective.trim() || !verified || submitLock.current) return;
     const body = uncertain
       ? submit.variables?.requester_device_id === deviceId
         ? submit.variables
@@ -88,11 +87,7 @@ function TaskForm({
     setChecking(true);
     setPreflightError('');
     const fresh = await readiness.refetch();
-    if (!eligible.current) {
-      submitLock.current = false;
-      setChecking(false);
-      return;
-    }
+    if (!alive.current) return;
     const problem = fresh.isSuccess
       ? taskReadinessBlocker(fresh.data)
       : readinessError(fresh.error);
@@ -102,104 +97,145 @@ function TaskForm({
       submitLock.current = false;
       return;
     }
-    submit.mutate(body, accepted);
+    submit.mutate(body, { onSuccess: data => onAccepted(data.task_id) });
   }
 
   return (
-    <Panel cls="th-enter mb-5 max-w-[780px] p-6">
-      <h2 className="font-semibold">Submit a supervisor task</h2>
-      <p className={`mt-2 ${muted}`}>
-        This is separate from chat. The host decides which capabilities and exact operations are
-        authorized. Submission does not grant an approval.
-      </p>
-      <form className="mt-4 space-y-4" onSubmit={send}>
-        <fieldset
-          className="min-w-0 space-y-4"
-          disabled={!connected || checking || submit.isPending || uncertain}
-        >
-          <label className="block text-xs">
-            Objective
-            <textarea
-              required
-              maxLength={20_000}
-              rows={3}
-              className={field + ' mt-2'}
-              value={objective}
-              onChange={event => setObjective(event.target.value)}
-            />
-          </label>
-          <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
-            <DevicePicker devices={devices} value={deviceId} change={setSelection} />
-            <label className="block text-xs">
-              Capability scope
-              <select
-                className={field + ' mt-2'}
-                value={scope}
-                onChange={event => {
-                  const next = event.target.value;
-                  if (next === 'read_only' || next === 'assistant' || next === 'development')
-                    setScope(next);
-                }}
-              >
-                <option value="read_only">Read-only</option>
-                <option value="assistant">Assistant (supervisor-gated)</option>
-                <option value="development">Development (allowlisted)</option>
-              </select>
-            </label>
-          </div>
-        </fieldset>
-        {devices.length === 0 && (
-          <p className={muted}>
-            An active mapped pairing is required. Check Device Hub for details.
-          </p>
-        )}
-        {connected && readiness.isFetching && !submit.isPending && (
-          <p role="status" className={muted}>
-            Checking supervisor readiness…
-          </p>
-        )}
-        {connected && (readiness.isError || blocker || preflightError) && (
-          <Notice
-            error
-            retry={() => {
-              setPreflightError('');
-              void readiness.refetch();
+    <Panel cls="th-task-composer mb-5 p-4">
+      <form onSubmit={send}>
+        <label className="block text-xs font-medium" htmlFor="task-objective">
+          What should Thozha do?
+        </label>
+        <div className="mt-2 flex items-end gap-3 max-md:flex-col max-md:items-stretch">
+          <textarea
+            ref={composer}
+            id="task-objective"
+            required
+            maxLength={20_000}
+            rows={2}
+            className={`${field} flex-1 resize-y`}
+            value={objective}
+            placeholder="Check my Mac's disk space"
+            onChange={event => setObjective(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
             }}
+          />
+          <button
+            type="button"
+            className={outline}
+            aria-expanded={reviewing}
+            onClick={() => setReviewing(open => !open)}
           >
-            {blocker ?? (readiness.isError ? readinessError(readiness.error) : preflightError)}
-          </Notice>
+            {reviewing ? 'Hide review' : 'Review & submit'}
+          </button>
+        </div>
+        <p className={`mt-2 ${muted}`}>
+          ⌘/Ctrl+Enter submits after authorization review. A task is never submitted just by writing
+          or navigating here.
+        </p>
+        {reviewing && (
+          <div className="mt-4 border-t border-white/10 pt-4">
+            <div className="grid grid-cols-[minmax(0,1fr)_220px] gap-4 max-lg:grid-cols-1">
+              <div>
+                <p className="text-xs font-medium">Exact instruction</p>
+                <blockquote className="mt-2 whitespace-pre-wrap rounded-lg bg-white/[.04] p-3 text-xs">
+                  {objective.trim() || 'Add an instruction above.'}
+                </blockquote>
+              </div>
+              <div className="space-y-3">
+                <DevicePicker devices={devices} value={deviceId} change={setSelection} />
+                <label className="block text-xs">
+                  Capability scope
+                  <select
+                    className={`${field} mt-2`}
+                    value={scope}
+                    onChange={event => {
+                      const next = event.target.value;
+                      if (next === 'read_only' || next === 'assistant' || next === 'development')
+                        setScope(next);
+                    }}
+                  >
+                    <option value="read_only">Read-only</option>
+                    <option value="assistant">Assistant — approval gated</option>
+                    <option value="development">Development — allowlisted</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Chip>{selectedDevice ? selectedDevice.device_name : 'DEVICE REQUIRED'}</Chip>
+              <Chip>{scope.replace(/_/g, ' ')}</Chip>
+              <Chip>{verified ? 'PRECHECK READY' : 'PRECHECK INCOMPLETE'}</Chip>
+            </div>
+            <p className={`mt-3 ${muted}`}>
+              The host still authorizes every operation. Sensitive or unapproved actions can pause
+              for your explicit decision.
+            </p>
+            {connected && (readiness.isFetching || checking) && (
+              <p role="status" className={`mt-3 ${muted}`}>
+                {checking
+                  ? 'Rechecking readiness before submission…'
+                  : 'Checking supervisor readiness…'}
+              </p>
+            )}
+            {connected && (readiness.isError || blocker || preflightError) && (
+              <div className="mt-3">
+                <Notice
+                  error
+                  retry={() => {
+                    setPreflightError('');
+                    void readiness.refetch();
+                  }}
+                >
+                  {preflightError || blocker || readinessError(readiness.error)}
+                </Notice>
+              </div>
+            )}
+            {submit.isError && (
+              <div className="mt-3">
+                <Notice error>
+                  {controlError(submit.error, 'submit the task')}
+                  {uncertain &&
+                    ' Acceptance is unconfirmed. Retry uses the original key; check history before starting another request.'}
+                </Notice>
+              </div>
+            )}
+            <button
+              type="submit"
+              className={`${solid} mt-4`}
+              disabled={
+                !connected ||
+                !deviceId ||
+                !objective.trim() ||
+                !verified ||
+                checking ||
+                submit.isPending
+              }
+            >
+              {checking
+                ? 'Checking readiness…'
+                : submit.isPending
+                  ? 'Submitting…'
+                  : uncertain
+                    ? 'Retry same task'
+                    : 'Submit reviewed task'}
+            </button>
+          </div>
         )}
-        {submit.isError && (
-          <Notice error>
-            {controlError(submit.error, 'submit the task')}
-            {uncertain &&
-              ' Acceptance is unconfirmed. Retry with the original key, or check task history before starting a new request.'}
-          </Notice>
-        )}
-        <button
-          type="submit"
-          className={solid}
-          disabled={
-            !connected ||
-            !deviceId ||
-            !objective.trim() ||
-            !readinessVerified ||
-            checking ||
-            submit.isPending ||
-            (uncertain && submit.variables?.requester_device_id !== deviceId)
-          }
-        >
-          {checking
-            ? 'Checking readiness…'
-            : submit.isPending
-              ? 'Submitting…'
-              : uncertain
-                ? 'Retry same task'
-                : 'Submit task'}
-        </button>
       </form>
     </Panel>
   );
+}
+
+function taskGroup(state: string) {
+  if (state === 'WAITING_APPROVAL') return 'Approvals';
+  if (state === 'FAILED') return 'Failed';
+  if (state === 'COMPLETED' || state === 'CANCELLED') return 'Completed';
+  return 'Active';
 }
 
 export default function DeveloperStudio({
@@ -217,126 +253,166 @@ export default function DeveloperStudio({
   clearDraft: () => void;
   view?: 'tasks' | 'developer';
 }) {
-  const [builder, setBuilder] = useState(false);
   const [filter, setFilter] = useState<'active' | 'completed' | 'all'>('all');
   const devices = useDevices(api, connected);
   const tasks = useTasks(api, filter, connected);
+  const approvals = useQuery({
+    queryKey: ['web-control', 'approvals'],
+    queryFn: ({ signal }) => api.listApprovals(signal),
+    enabled: connected && view === 'tasks',
+  });
   const mapped = devices.isSuccess ? devices.data.devices : [];
-  const showForm = builder || draft !== undefined;
+  const rows = tasks.data?.tasks ?? [];
+  const counts = rows.reduce<Record<string, number>>((result, item) => {
+    result[taskGroup(item.state)] = (result[taskGroup(item.state)] ?? 0) + 1;
+    return result;
+  }, {});
+  const accepted = (id: string) => {
+    clearDraft();
+    window.location.hash = taskHref(id);
+  };
+
   return (
     <>
       <Head
-        label={view === 'tasks' ? 'SUPERVISOR / HISTORY' : 'EXECUTION / EVIDENCE'}
+        label={view === 'tasks' ? 'SUPERVISOR / AUTHORIZED WORK' : 'EXECUTION / EVIDENCE'}
         title={view === 'tasks' ? 'Tasks' : 'Developer Studio'}
         desc={
           view === 'tasks'
-            ? 'Submit, follow, and review authorized work on your Thozha host.'
-            : 'Inspect supervisor activity, execution evidence, and available development diagnostics.'
+            ? 'Start useful work, follow server-saved execution, and review results.'
+            : 'Inspect persisted supervisor activity and execution evidence.'
         }
         action={
           <button
             type="button"
             className={solid}
-            aria-expanded={showForm}
-            disabled={!showForm && (!connected || mapped.length === 0)}
-            onClick={() => {
-              if (showForm) clearDraft();
-              setBuilder(!showForm);
-            }}
+            onClick={() => document.getElementById('task-objective')?.focus()}
           >
-            {showForm ? 'Close task form' : 'New supervisor task'}
+            New task
           </button>
         }
       />
-      {showForm && (
-        <TaskForm
-          api={api}
-          devices={mapped}
-          connected={connected}
-          prefill={draft ?? ''}
-          onAccepted={id => {
-            clearDraft();
-            setBuilder(false);
-            window.location.hash = taskHref(id);
-          }}
-        />
-      )}
+      <TaskComposer
+        api={api}
+        devices={mapped}
+        connected={connected}
+        prefill={draft ?? ''}
+        onAccepted={accepted}
+      />
       {view === 'developer' && (
         <p className={`${muted} th-v4-diagnostics-note`}>
-          GitHub and CI are not connected in Web v1. The supervisor timeline below contains only
-          server-saved tasks; it is not a fabricated build feed.
+          GitHub and CI are not connected in Web v1. The timeline contains only server-saved
+          supervisor work.
         </p>
       )}
+      {view === 'tasks' && (
+        <div className="mb-4 grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
+          {[
+            ['Active', counts.Active ?? 0],
+            ['Pending approvals', approvals.data?.count ?? 0],
+            ['Completed / cancelled', counts.Completed ?? 0],
+            ['Failed', counts.Failed ?? 0],
+          ].map(([label, value]) => (
+            <Panel key={label} cls="p-4">
+              <p className={muted}>{label}</p>
+              <p className="mt-2 text-2xl font-semibold">{value}</p>
+            </Panel>
+          ))}
+        </div>
+      )}
       <div
-        className={`mt-5 grid items-start gap-4 ${view === 'tasks' ? 'grid-cols-1' : 'grid-cols-[minmax(0,1.5fr)_minmax(280px,1fr)] max-lg:grid-cols-1'}`}
+        className={
+          view === 'tasks'
+            ? 'th-task-workspace'
+            : 'grid grid-cols-[minmax(0,1.5fr)_minmax(280px,1fr)] gap-4 max-lg:grid-cols-1'
+        }
       >
-        <Panel cls="min-w-0 p-5">
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <h2 className="font-semibold">Task timeline</h2>
-            <button
-              type="button"
-              className={outline}
-              disabled={!connected || tasks.isFetching}
-              onClick={() => void tasks.refetch()}
-            >
-              Refresh tasks
-            </button>
+        <Panel cls="min-w-0 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-semibold">Task history</h2>
+            <div className="flex items-center gap-2">
+              <label className="sr-only" htmlFor="task-filter">
+                Task history filter
+              </label>
+              <select
+                id="task-filter"
+                className={`${field} !py-2`}
+                value={filter}
+                onChange={event => {
+                  const next = event.target.value;
+                  if (next === 'active' || next === 'completed' || next === 'all') setFilter(next);
+                }}
+              >
+                <option value="all">All recent</option>
+                <option value="active">Active</option>
+                <option value="completed">Completed / failed / cancelled</option>
+              </select>
+              <button
+                type="button"
+                className={outline}
+                disabled={!connected || tasks.isFetching}
+                onClick={() => void tasks.refetch()}
+              >
+                Refresh
+              </button>
+            </div>
           </div>
-          {taskId && <TaskDetail key={taskId} api={api} taskId={taskId} connected={connected} />}
-          <label className="mt-3 block text-xs">
-            Task history filter
-            <select
-              className={field + ' mt-2'}
-              value={filter}
-              onChange={event => {
-                const next = event.target.value;
-                if (next === 'active' || next === 'completed' || next === 'all') setFilter(next);
-              }}
-            >
-              <option value="all">All recent tasks</option>
-              <option value="active">Active</option>
-              <option value="completed">Completed, failed or cancelled</option>
-            </select>
-          </label>
           {tasks.isPending && connected && <Loading label="Loading persisted tasks…" />}
           {tasks.isError && (
             <div className="mt-3">
-              <Notice error>{controlError(tasks.error, 'list supervisor tasks')}</Notice>
+              <Notice error retry={connected ? () => void tasks.refetch() : undefined}>
+                {controlError(tasks.error, 'list supervisor tasks')}
+              </Notice>
             </div>
           )}
-          {tasks.isSuccess && !tasks.data.tasks.length && (
-            <p className={`mt-3 ${muted}`}>No saved tasks in this view.</p>
-          )}
-          {tasks.isSuccess &&
-            tasks.data.tasks.map(item => (
-              <Row
-                key={item.task_id}
-                main={item.summary || `Task ${item.task_id.slice(0, 8)}`}
-                sub={item.task_id}
-                right={
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Chip>{item.state.replace(/_/g, ' ')}</Chip>
-                    <a
-                      href={taskHref(item.task_id)}
-                      className={`${outline} inline-block`}
-                      aria-current={item.task_id === taskId ? 'true' : undefined}
-                    >
-                      View task {item.task_id.slice(0, 8)}
-                    </a>
-                  </div>
-                }
-              />
-            ))}
-          {mapped.length === 0 && (
-            <p className={`mt-3 ${muted}`}>
-              Task submission requires an active paired device explicitly mapped to this Web owner.
+          {tasks.isSuccess && !rows.length && (
+            <p className={`py-10 text-center ${muted}`}>
+              No saved tasks in this view. Submitted tasks will appear here.
             </p>
           )}
-          <button type="button" className={`${outline} mt-3`} disabled>
-            Run project checks
-          </button>
+          <ul className="mt-3 divide-y divide-white/[.07]">
+            {rows.map(item => (
+              <li key={item.task_id} className={item.task_id === taskId ? 'bg-white/[.05]' : ''}>
+                <a
+                  href={taskHref(item.task_id)}
+                  className="block rounded-lg px-2 py-3"
+                  aria-current={item.task_id === taskId ? 'true' : undefined}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <b className="block truncate text-xs">
+                        {item.summary || `Task ${item.task_id.slice(0, 8)}`}
+                      </b>
+                      <span className={`mt-1 block break-all ${muted}`}>{item.task_id}</span>
+                    </div>
+                    <Chip>
+                      {taskGroup(item.state)} · {item.state.replace(/_/g, ' ')}
+                    </Chip>
+                  </div>
+                </a>
+              </li>
+            ))}
+          </ul>
         </Panel>
-        {view === 'developer' && <Approvals api={api} devices={mapped} connected={connected} />}
+        {view === 'tasks' ? (
+          <Panel cls="th-task-detail min-w-0 p-4">
+            {taskId ? (
+              <TaskDetail key={taskId} api={api} taskId={taskId} connected={connected} />
+            ) : (
+              <div className="grid min-h-60 place-items-center text-center">
+                <div>
+                  <h2 className="font-semibold">Execution detail</h2>
+                  <p className={`mt-2 ${muted}`}>
+                    Select a saved task to see only the milestones, output and artifacts reported by
+                    the host.
+                  </p>
+                </div>
+              </div>
+            )}
+          </Panel>
+        ) : (
+          <Approvals api={api} devices={mapped} connected={connected} />
+        )}
       </div>
     </>
   );

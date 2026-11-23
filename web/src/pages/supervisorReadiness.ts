@@ -9,6 +9,9 @@ const reasonLabels: Record<string, string> = {
   codex_auth_not_verified_this_process:
     'Codex authentication has not been verified by a model turn in this process.',
   codex_auth_missing: 'Codex SDK credentials are missing on the host.',
+  codex_sdk_unavailable: 'The configured Codex SDK is unavailable on the host.',
+  codex_cli_unavailable: 'The Codex CLI required by the configured engine is unavailable.',
+  codex_sdk_preflight_failed: 'The configured model failed its supervisor preflight check.',
   automation_disabled: 'Scheduling is disabled on the host.',
 };
 
@@ -24,6 +27,11 @@ export function taskReadinessBlocker({ components }: SupervisorReadiness) {
     return `Supervisor worker is not ready. Ask the host administrator to check the worker, then retry.${worker.reason ? ` Host: ${readinessReason(worker.reason)}` : ''}`;
   if (components.engine.state === 'unavailable')
     return `The host model is unavailable. Ask the host administrator to check the model configuration.${components.engine.reason ? ` Host: ${readinessReason(components.engine.reason)}` : ''}`;
+  if (
+    components.engine.state === 'unknown' ||
+    components.authentication.codex_sdk === 'credential_present_unverified'
+  )
+    return `Model authentication has not been verified in this host process. No task will be submitted from this unverified state.${components.engine.reason ? ` Host: ${readinessReason(components.engine.reason)}` : ''}`;
   return undefined;
 }
 

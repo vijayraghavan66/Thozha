@@ -1,150 +1,188 @@
-import { useState, type FormEvent } from 'react';
-import { Chip, Head, Modal, Notice, Panel, Row, Stat, Unavailable } from '../components/ui';
-import { LiquidCard } from '../components/LiquidSurface';
+import { useMemo, useRef, useState, type FormEvent } from 'react';
+import { Chip, Head, Modal, Notice, Panel, Row } from '../components/ui';
 import { field, formatDate, muted, outline, solid } from '../components/styles';
+import { MarketChart } from './MarketChart';
 import {
+  demoInstruments,
+  demoProvider,
+  missingMarketData,
+  type MarketInstrument,
+  type MarketInterval,
+} from './marketData';
+import { signals, volumeAverage } from './indicators';
+import {
+  cancelOrder,
   formatInr,
-  instruments,
-  loadFills,
-  makeFill,
+  freshLedger,
+  loadLedger,
   paperFee,
-  paperQuotes,
-  replayFills,
+  refreshLimitOrders,
+  replayLedger,
+  saveLedger,
   startingCash,
   storageKey,
-  type Fill,
+  submitPaperOrder,
   type Instrument,
-  type Ticket,
+  type PaperLedger,
 } from './paperLedger';
 
-const tabs = ['Portfolio', 'Paper order', 'Orders', 'Strategies', 'Backtests'] as const;
-type Tab = (typeof tabs)[number];
-function readSandbox() {
+function readLedger() {
   try {
-    return { fills: loadFills(localStorage), storageError: '' };
+    return { ledger: loadLedger(localStorage), error: '' };
   } catch {
     return {
-      fills: [] as Fill[],
-      storageError:
-        'The saved paper ledger could not be read. Reset or place an order to start a new local ledger.',
+      ledger: freshLedger(),
+      error: 'The saved paper ledger could not be read. Reset it before continuing.',
     };
   }
 }
 
-function EquityChart({ series }: { series: number[] }) {
-  if (series.length < 2)
-    return (
-      <p className={`py-9 text-center ${muted}`}>
-        Place a paper order to chart virtual equity after each fill.
-      </p>
-    );
-  const values = series.slice(-24);
+function EquityLine({ values }: { values: number[] }) {
+  if (values.length < 2)
+    return <p className={`py-8 text-center ${muted}`}>No fill history to chart yet.</p>;
   const lower = Math.min(...values);
   const range = Math.max(...values) - lower || 1;
-  const coordinates = values
-    .map(
-      (value, index) =>
-        `${8 + (index * 284) / (values.length - 1)},${84 - ((value - lower) * 68) / range}`
-    )
-    .join(' ');
   return (
-    <figure className="mt-3">
+    <figure>
       <svg
+        viewBox="0 0 300 100"
         role="img"
-        aria-label={`Simulated equity fell from ${formatInr(values[0])} to ${formatInr(values.at(-1) ?? startingCash)} over recent local fills`}
-        viewBox="0 0 300 96"
+        aria-label={`Virtual equity from ${formatInr(values[0])} to ${formatInr(values.at(-1)!)}`}
         className="h-28 w-full"
       >
-        <path
-          d="M8 16H292 M8 50H292 M8 84H292"
-          fill="none"
-          stroke="#44454c"
-          strokeDasharray="3 5"
-        />
         <polyline
-          points={coordinates}
+          points={values
+            .map(
+              (value, index) =>
+                `${6 + (index * 288) / (values.length - 1)},${88 - ((value - lower) * 74) / range}`
+            )
+            .join(' ')}
           fill="none"
-          stroke="#d6d7dd"
+          stroke="#d8d9de"
           strokeWidth="2"
           strokeLinejoin="round"
         />
       </svg>
       <figcaption className={muted}>
-        Virtual equity after recent fills. With fixed fictional quotes, changes reflect simulated
-        fees only.
+        Equity reconstructed from saved fills and their execution snapshots.
       </figcaption>
     </figure>
   );
 }
 
 export default function TradingLab() {
-  const [sandbox, setSandbox] = useState(readSandbox);
-  const [tab, setTab] = useState<Tab>('Portfolio');
-  const [instrument, setInstrument] = useState<Instrument>('NIFTYBEES');
-  const [side, setSide] = useState<Ticket['side']>('Buy');
-  const [quantity, setQuantity] = useState('5');
+  const [instrument, setInstrument] = useState<MarketInstrument>(demoInstruments[0]);
+  const [interval, setInterval] = useState<MarketInterval>('1d');
+  const [data, setData] = useState(() => missingMarketData(demoInstruments[0], '1d'));
+  const [demo, setDemo] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState('');
+  const [side, setSide] = useState<'Buy' | 'Sell'>('Buy');
+  const [orderType, setOrderType] = useState<'Market' | 'Limit'>('Market');
+  const [quantity, setQuantity] = useState('1');
+  const [limit, setLimit] = useState('');
+  const [showSma, setShowSma] = useState(true);
+  const [showEma, setShowEma] = useState(false);
+  const [store, setStore] = useState(readLedger);
   const [feedback, setFeedback] = useState<{ text: string; error?: boolean }>();
   const [resetting, setResetting] = useState(false);
-  const ledger = replayFills(sandbox.fills);
-  const equityChange = ledger.equity - startingCash;
+  const request = useRef(0);
+  const latest = data.candles.at(-1);
+  const mark = latest ? Math.round(latest.close * 100) : undefined;
+  const marks = mark ? { [instrument.symbol as Instrument]: mark } : {};
+  const portfolio = replayLedger(store.ledger, marks);
+  const openOrders = store.ledger.orders.filter(order => order.status === 'Open');
+  const marketSignals = useMemo(() => signals(data.candles), [data.candles]);
+  const filtered = demoInstruments.filter(item =>
+    `${item.symbol} ${item.name}`.toLowerCase().includes(search.toLowerCase())
+  );
+  const volumeTrend = volumeAverage(data.candles);
+  const latestAverageVolume = volumeTrend.at(-1);
 
-  function keep(fills: Fill[]) {
+  async function choose(next: MarketInstrument, nextInterval = interval, explicitDemo = demo) {
+    setInstrument(next);
+    setInterval(nextInterval);
+    if (!explicitDemo) {
+      setData(missingMarketData(next, nextInterval));
+      return;
+    }
+    const id = ++request.current;
+    setLoading(true);
     try {
-      if (fills.length) localStorage.setItem(storageKey, JSON.stringify(fills));
-      else localStorage.removeItem(storageKey);
-      setSandbox({ fills, storageError: '' });
+      const series = await demoProvider.candles(next, nextInterval);
+      if (id !== request.current) return;
+      const refreshed = refreshLimitOrders(store.ledger, series);
+      if (refreshed !== store.ledger) persist(refreshed);
+      setData(series);
+    } finally {
+      if (id === request.current) setLoading(false);
+    }
+  }
+
+  function persist(ledger: PaperLedger) {
+    try {
+      saveLedger(localStorage, ledger);
+      setStore({ ledger, error: '' });
     } catch {
-      setSandbox({
-        fills,
-        storageError:
-          'Browser storage is unavailable. These changes apply only while this page is open.',
+      setStore({
+        ledger,
+        error: 'Browser storage is unavailable. This ledger lasts only for this visit.',
       });
     }
   }
-  function fill(event: FormEvent<HTMLFormElement>) {
+
+  function place(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     try {
-      const order = makeFill({ instrument, side, quantity: Number(quantity) }, sandbox.fills);
-      keep([...sandbox.fills, order]);
-      setTab('Orders');
-      setFeedback({ text: 'Paper order recorded locally. No broker order was placed.' });
+      const next = submitPaperOrder(
+        store.ledger,
+        {
+          instrument: instrument.symbol as Instrument,
+          side,
+          type: orderType,
+          quantity: Number(quantity),
+          limit: orderType === 'Limit' ? Number(limit) : undefined,
+        },
+        data
+      );
+      persist(next);
+      setFeedback({
+        text:
+          next.orders.at(-1)?.status === 'Open'
+            ? 'Limit order saved as open. No broker order was placed.'
+            : 'Paper fill recorded locally. No broker order was placed.',
+      });
     } catch (error) {
       setFeedback({
-        text: error instanceof Error ? error.message : 'The paper order could not be recorded.',
+        text: error instanceof Error ? error.message : 'The paper order was rejected.',
         error: true,
       });
     }
   }
 
+  function equityValues() {
+    return [startingCash, ...portfolio.entries.map(entry => entry.equity)];
+  }
+
   return (
     <>
       <Head
-        label="TRADING LAB / NO REAL MONEY"
+        label="RESEARCH / PAPER TRADING"
         title="Trading Lab"
-        desc="Try a browser-local paper ledger at fixed fictional prices. Market data and brokerage are unavailable."
-        action={<Chip>SIMULATION ONLY</Chip>}
+        desc="Inspect price history, transparent signals and a virtual ledger. No real-money execution is available."
+        action={
+          <Chip>
+            {data.available
+              ? data.mode === 'demo'
+                ? 'SYNTHETIC DEMO'
+                : data.mode.toUpperCase()
+              : 'OFFLINE'}
+          </Chip>
+        }
       />
-      <nav
-        aria-label="Trading views"
-        className="mb-6 flex flex-wrap gap-x-5 gap-y-2 border-b border-white/10"
-      >
-        {tabs.map(name => (
-          <LiquidCard
-            key={name}
-            aria-pressed={tab === name}
-            onClick={() => {
-              setFeedback(undefined);
-              setTab(name);
-            }}
-            className={`border-b-2 pb-3 text-xs ${tab === name ? 'border-white text-white' : 'border-transparent text-[#a4a5ad]'}`}
-          >
-            {name}
-          </LiquidCard>
-        ))}
-      </nav>
-      {sandbox.storageError && (
+      {store.error && (
         <div className="mb-4">
-          <Notice error>{sandbox.storageError}</Notice>
+          <Notice error>{store.error}</Notice>
         </div>
       )}
       {feedback && (
@@ -152,198 +190,391 @@ export default function TradingLab() {
           <Notice error={feedback.error}>{feedback.text}</Notice>
         </div>
       )}
-      {tab === 'Portfolio' && (
-        <>
-          <div className="grid grid-cols-3 gap-3 max-lg:grid-cols-1">
-            <Stat
-              label="VIRTUAL EQUITY"
-              value={formatInr(ledger.equity)}
-              detail="Marked at fixed fictional prices"
-            />
-            <Stat
-              label="AVAILABLE CASH"
-              value={formatInr(ledger.cash)}
-              detail="Virtual funds only"
-            />
-            <Stat
-              label="SIMULATED P&L"
-              value={formatInr(equityChange)}
-              detail="Change from starting equity, including fees"
-            />
-          </div>
-          <div className="mt-5 grid grid-cols-2 gap-4 max-lg:grid-cols-1">
-            <Panel cls="p-6">
-              <h2 className="font-semibold">Paper positions</h2>
-              {instruments
-                .filter(symbol => ledger.units[symbol] > 0)
-                .map(symbol => (
-                  <Row
-                    key={symbol}
-                    main={symbol}
-                    sub={`${ledger.units[symbol]} simulated units`}
-                    right={formatInr(ledger.units[symbol] * paperQuotes[symbol])}
-                  />
-                ))}
-              {instruments.every(symbol => ledger.units[symbol] === 0) && (
-                <p className={`py-10 text-center ${muted}`}>
-                  No positions. Place a paper buy to see it here.
-                </p>
-              )}
-            </Panel>
-            <Panel cls="p-6">
-              <h2 className="font-semibold">Portfolio research</h2>
-              <EquityChart series={[startingCash, ...ledger.entries.map(entry => entry.equity)]} />
-              <button
-                type="button"
-                className={solid + ' mt-4'}
-                onClick={() => setTab('Paper order')}
-              >
-                New paper order
-              </button>
-            </Panel>
-          </div>
-        </>
-      )}
-      {tab === 'Paper order' && (
-        <div className="grid max-w-[890px] grid-cols-2 gap-4 max-lg:grid-cols-1">
-          <Panel cls="p-6">
-            <h2 className="font-semibold">Simulated order ticket</h2>
-            <form className="mt-5 space-y-4" onSubmit={fill}>
-              <label className="block text-xs">
-                Instrument
-                <select
-                  className={field + ' mt-2'}
-                  value={instrument}
-                  onChange={event => {
-                    const selected = instruments.find(symbol => symbol === event.target.value);
-                    if (selected) setInstrument(selected);
+      <div className="th-trading-layout">
+        <aside className="th-trading-watchlist" aria-label="Instrument search and watchlist">
+          <Panel cls="p-4">
+            <label className="block text-xs">
+              Instrument search
+              <input
+                className={`${field} mt-2`}
+                type="search"
+                value={search}
+                onChange={event => setSearch(event.target.value)}
+                placeholder="Symbol or name"
+              />
+            </label>
+            <ul className="mt-3">
+              {filtered.map(item => (
+                <li key={item.symbol}>
+                  <button
+                    className={`w-full rounded-lg px-3 py-3 text-left hover:bg-white/5 ${instrument.symbol === item.symbol ? 'bg-white/10' : ''}`}
+                    type="button"
+                    aria-pressed={instrument.symbol === item.symbol}
+                    onClick={() => void choose(item)}
+                  >
+                    <b className="text-xs">{item.symbol}</b>
+                    <span className={`mt-1 block ${muted}`}>
+                      {item.exchange} ·{' '}
+                      {data.available && item.symbol === instrument.symbol
+                        ? latest!.close.toFixed(2)
+                        : 'No quote loaded'}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {!demo && (
+              <div className="mt-3 border-t border-white/10 pt-3">
+                <p className={muted}>No market-data contract is available in Web v1.</p>
+                <button
+                  type="button"
+                  className={`${outline} mt-3 w-full`}
+                  onClick={() => {
+                    setDemo(true);
+                    void choose(instrument, interval, true);
                   }}
                 >
-                  {instruments.map(symbol => (
-                    <option key={symbol}>{symbol}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="block text-xs">
-                Order side
-                <select
-                  className={field + ' mt-2'}
-                  value={side}
-                  onChange={event => setSide(event.target.value === 'Sell' ? 'Sell' : 'Buy')}
-                >
-                  <option>Buy</option>
-                  <option>Sell</option>
-                </select>
-              </label>
-              <label className="block text-xs">
-                Units
+                  Load synthetic demo
+                </button>
+              </div>
+            )}
+            {demo && (
+              <button
+                type="button"
+                className={`${outline} mt-3 w-full`}
+                onClick={() => {
+                  setDemo(false);
+                  setData(missingMarketData(instrument, interval));
+                }}
+              >
+                Return to offline
+              </button>
+            )}
+          </Panel>
+        </aside>
+
+        <section className="min-w-0" aria-label="Market research">
+          <Panel cls="p-5">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold">{instrument.symbol}</h2>
+                <p className={muted}>
+                  {instrument.name} · {instrument.exchange}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {(['15m', '1h', '1d'] as const).map(value => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={outline}
+                    aria-pressed={interval === value}
+                    onClick={() => void choose(instrument, value)}
+                    disabled={loading}
+                  >
+                    {value}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 text-xs text-[#c4c5cb]">
+              <span>Source: {data.source}</span>
+              <span>Exchange: {instrument.exchange}</span>
+              <span>
+                Delay:{' '}
+                {data.mode === 'demo'
+                  ? 'Synthetic / not market data'
+                  : data.available
+                    ? data.mode
+                    : 'Unavailable'}
+              </span>
+              <span>Market state: unavailable</span>
+              <span>Zone: {data.timezone}</span>
+              <span>Updated: {data.available ? formatDate(data.updatedAt) : 'Never'}</span>
+            </div>
+            <div className="mt-4 flex flex-wrap gap-4 text-xs">
+              <label className="flex items-center gap-2">
                 <input
-                  className={field + ' mt-2'}
+                  type="checkbox"
+                  checked={showSma}
+                  onChange={event => setShowSma(event.target.checked)}
+                />{' '}
+                SMA 20
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={showEma}
+                  onChange={event => setShowEma(event.target.checked)}
+                />{' '}
+                EMA 12
+              </label>
+            </div>
+            <div className="mt-3" aria-busy={loading}>
+              {loading && (
+                <p role="status" className={muted}>
+                  Generating the explicitly selected synthetic series…
+                </p>
+              )}
+              <MarketChart data={data} showSma={showSma} showEma={showEma} />
+            </div>
+          </Panel>
+        </section>
+
+        <aside aria-label="Paper order ticket">
+          <Panel cls="p-4">
+            <h2 className="font-semibold">Paper order</h2>
+            <form className="mt-4 space-y-3" onSubmit={place}>
+              <div className="grid grid-cols-2 gap-2">
+                {(['Buy', 'Sell'] as const).map(value => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={`${outline} ${side === value ? 'bg-white/15' : ''}`}
+                    aria-pressed={side === value}
+                    onClick={() => setSide(value)}
+                  >
+                    {value}
+                  </button>
+                ))}
+              </div>
+              <label className="block text-xs">
+                Order type
+                <select
+                  className={`${field} mt-2`}
+                  value={orderType}
+                  onChange={event =>
+                    setOrderType(event.target.value === 'Limit' ? 'Limit' : 'Market')
+                  }
+                >
+                  <option>Market</option>
+                  <option>Limit</option>
+                </select>
+              </label>
+              <label className="block text-xs">
+                Quantity
+                <input
                   required
+                  className={`${field} mt-2`}
                   type="number"
                   min="1"
-                  max="500"
+                  max="10000"
                   step="1"
                   value={quantity}
                   onChange={event => setQuantity(event.target.value)}
                 />
               </label>
-              <button type="submit" className={solid + ' w-full'}>
-                Simulate {side.toLowerCase()}
+              {orderType === 'Limit' && (
+                <label className="block text-xs">
+                  Limit price (INR)
+                  <input
+                    required
+                    className={`${field} mt-2`}
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={limit}
+                    onChange={event => setLimit(event.target.value)}
+                  />
+                </label>
+              )}
+              <Row
+                main="Selected mark"
+                sub={data.available ? data.source : 'Offline'}
+                right={latest ? latest.close.toFixed(2) : '—'}
+              />
+              <Row main="Paper fee" sub="Assumption per fill" right={formatInr(paperFee)} />
+              <button type="submit" className={`${solid} w-full`} disabled={!data.available}>
+                Place virtual {side.toLowerCase()}
               </button>
             </form>
           </Panel>
-          <Panel cls="h-fit p-6">
-            <h2 className="font-semibold">Execution preview</h2>
-            <Row
-              main="Reference price"
-              sub="Fixed, fictional quote"
-              right={formatInr(paperQuotes[instrument])}
-            />
-            <Row
-              main="Gross total"
-              sub="Before simulated fees"
-              right={
-                Number(quantity) >= 1 && Number(quantity) <= 500
-                  ? formatInr(Number(quantity) * paperQuotes[instrument])
-                  : '—'
-              }
-            />
-            <Row main="Example charge" sub="Not official brokerage" right={formatInr(paperFee)} />
-            <Row main="Virtual cash" sub="Your simulation balance" right={formatInr(ledger.cash)} />
-            <p className={`mt-4 ${muted}`}>
-              No live, delayed or historical market feed is connected. Nothing is sent to Paytm
-              Money.
+        </aside>
+      </div>
+
+      <div className="mt-4 grid grid-cols-4 gap-3 max-xl:grid-cols-2 max-md:grid-cols-1">
+        <Panel cls="p-4">
+          <p className={muted}>Virtual equity</p>
+          <p className="mt-2 text-xl font-semibold">{formatInr(portfolio.equity)}</p>
+          {!portfolio.fullyMarked && (
+            <p className={`mt-2 ${muted}`}>
+              Cost-basis fallback used where a current mark is unavailable.
             </p>
-          </Panel>
-        </div>
-      )}
-      {tab === 'Orders' && (
-        <Panel cls="max-w-[950px] p-6">
-          <h2 className="font-semibold">Simulated fills &amp; virtual cash ledger</h2>
-          {!ledger.entries.length && (
-            <p className={`py-10 text-center ${muted}`}>No paper trades yet.</p>
           )}
-          {ledger.entries
-            .slice()
-            .reverse()
-            .map(({ fill: order, cash, delta }) => (
+        </Panel>
+        <Panel cls="p-4">
+          <p className={muted}>Virtual cash</p>
+          <p className="mt-2 text-xl font-semibold">{formatInr(portfolio.cash)}</p>
+        </Panel>
+        <Panel cls="p-4">
+          <p className={muted}>Invested / market value</p>
+          <p className="mt-2 text-xl font-semibold">
+            {formatInr(portfolio.invested)} / {formatInr(portfolio.marketValue)}
+          </p>
+        </Panel>
+        <Panel cls="p-4">
+          <p className={muted}>Realized / unrealized</p>
+          <p className="mt-2 text-xl font-semibold">
+            {formatInr(portfolio.realized)} / {formatInr(portfolio.unrealized)}
+          </p>
+        </Panel>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-4 max-lg:grid-cols-1">
+        <Panel cls="p-5">
+          <h2 className="font-semibold">Positions & allocation</h2>
+          {!portfolio.positions.length ? (
+            <p className={`py-8 text-center ${muted}`}>No simulated holdings.</p>
+          ) : (
+            portfolio.positions.map(position => (
+              <Row
+                key={position.instrument}
+                main={`${position.instrument} · ${position.quantity} units`}
+                sub={`Avg ${formatInr(position.averageCost)} · ${position.markAvailable ? `Mark ${formatInr(position.mark)}` : 'No current mark; cost-basis fallback'}`}
+                right={`${formatInr(position.unrealized)} · ${(((position.quantity * position.mark) / portfolio.equity) * 100).toFixed(1)}%`}
+              />
+            ))
+          )}
+        </Panel>
+        <Panel cls="p-5">
+          <h2 className="font-semibold">Persisted paper equity</h2>
+          <EquityLine values={equityValues()} />
+        </Panel>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-4 max-lg:grid-cols-1">
+        <Panel cls="p-5">
+          <h2 className="font-semibold">Transparent signals</h2>
+          {!data.available || !marketSignals.length ? (
+            <p className={`py-8 text-center ${muted}`}>
+              Signals require explicitly loaded candle data.
+            </p>
+          ) : (
+            marketSignals.map(signal => (
+              <Row
+                key={signal.name}
+                main={`${signal.name} · ${signal.bias}`}
+                sub={`${signal.rule} ${signal.value} · ${formatDate(new Date(signal.timestamp * 1000).toISOString())} · ${data.source} · ${interval}`}
+              />
+            ))
+          )}
+          <p className={`mt-3 ${muted}`}>
+            {latestAverageVolume == null
+              ? 'Volume average is warming up.'
+              : `Volume SMA 20: ${Math.round(latestAverageVolume).toLocaleString('en-IN')}`}
+          </p>
+          <p className={`mt-2 ${muted}`}>
+            These deterministic rules describe the loaded series. They do not predict returns or
+            guarantee profitability.
+          </p>
+        </Panel>
+        <Panel cls="p-5">
+          <h2 className="font-semibold">Open paper orders</h2>
+          {!openOrders.length ? (
+            <p className={`py-8 text-center ${muted}`}>No open orders.</p>
+          ) : (
+            openOrders.map(order => (
               <Row
                 key={order.id}
                 main={`${order.side} ${order.quantity} ${order.instrument}`}
-                sub={`${formatDate(order.time)} · ${formatInr(paperQuotes[order.instrument])}/unit`}
+                sub={`${order.type} · limit ${order.limit ?? '—'} · ${order.source}`}
                 right={
-                  <div className="text-right">
-                    <b>
-                      {delta > 0 ? '+' : ''}
-                      {formatInr(delta)}
-                    </b>
-                    <p className="mt-1">Cash: {formatInr(cash)}</p>
-                  </div>
+                  <button
+                    type="button"
+                    className={outline}
+                    onClick={() => {
+                      try {
+                        persist(cancelOrder(store.ledger, order.id));
+                        setFeedback({ text: 'Open paper order cancelled locally.' });
+                      } catch (error) {
+                        setFeedback({
+                          text: error instanceof Error ? error.message : 'Could not cancel order.',
+                          error: true,
+                        });
+                      }
+                    }}
+                  >
+                    Cancel
+                  </button>
                 }
               />
-            ))}
+            ))
+          )}
         </Panel>
-      )}
-      {(tab === 'Strategies' || tab === 'Backtests') && (
-        <Unavailable
-          title={tab}
-          reason="The browser API does not provide a strategy library, historical data, backtest runs, risk analytics, watchlists or a server trading journal. No historical returns are fabricated."
-        >
-          <button type="button" disabled className={outline}>
-            {tab === 'Strategies' ? 'Save strategy' : 'Run backtest'}
-          </button>
-        </Unavailable>
-      )}
-      <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+      </div>
+
+      <Panel cls="mt-4 p-5">
+        <h2 className="font-semibold">Orders & simulated trade ledger</h2>
+        {!store.ledger.orders.length ? (
+          <p className={`py-8 text-center ${muted}`}>No paper orders yet.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="mt-3 w-full min-w-[720px] text-left text-xs">
+              <thead>
+                <tr className="border-b border-white/10 text-[#a4a5af]">
+                  <th className="py-3">Time</th>
+                  <th>Instrument</th>
+                  <th>Side / type</th>
+                  <th>Qty</th>
+                  <th>Fill</th>
+                  <th>Fee</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {store.ledger.orders
+                  .slice()
+                  .reverse()
+                  .map(order => (
+                    <tr key={order.id} className="border-b border-white/[.07]">
+                      <td className="py-3">{formatDate(order.filledAt ?? order.submittedAt)}</td>
+                      <td>{order.instrument}</td>
+                      <td>
+                        {order.side} / {order.type}
+                      </td>
+                      <td>{order.quantity}</td>
+                      <td>{order.fillPrice == null ? '—' : formatInr(order.fillPrice)}</td>
+                      <td>{formatInr(order.fees)}</td>
+                      <td>{order.status}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
         <p className={muted}>
-          This fictional ledger is stored in this browser only. It is not part of your account.
+          Virtual funds only. This ledger is stored in this browser and can be cleared by the
+          browser. Backend persistence and provider feeds are not contracted.
         </p>
         <button
           type="button"
           className={outline}
-          disabled={!sandbox.fills.length && !sandbox.storageError}
+          disabled={!store.ledger.orders.length && !store.error}
           onClick={() => setResetting(true)}
         >
-          Reset paper sandbox
+          Reset paper ledger
         </button>
       </div>
       {resetting && (
-        <Modal title="Reset paper sandbox" close={() => setResetting(false)}>
+        <Modal title="Reset paper ledger?" close={() => setResetting(false)}>
           <p className={muted}>
-            Clear this browser’s simulated orders and restore the starting virtual cash? This does
-            not affect server data.
+            Clear local virtual orders and restore ₹100,000 of starting cash? No server or brokerage
+            data is affected.
           </p>
           <button
+            className={`${solid} mt-4`}
             type="button"
-            className={solid + ' mt-4'}
             onClick={() => {
-              keep([]);
+              persist(freshLedger());
+              localStorage.removeItem(storageKey);
               setResetting(false);
-              setFeedback({ text: 'The displayed paper ledger has been cleared.' });
+              setFeedback({ text: 'Local paper ledger reset.' });
             }}
           >
-            Clear local paper ledger
+            Reset local ledger
           </button>
         </Modal>
       )}

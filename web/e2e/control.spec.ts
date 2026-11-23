@@ -25,15 +25,16 @@ const pairedDevice = async (page: Page) => {
 
 async function submitTask(page: Page, objective?: string, scope = 'read_only') {
   if (objective) {
-    await page.getByRole('button', { name: 'New supervisor task' }).click();
-    await page.getByLabel('Objective').fill(objective);
+    await page.getByRole('button', { name: 'New task', exact: true }).click();
+    await page.getByLabel('What should Thozha do?').fill(objective);
+    await page.getByRole('button', { name: 'Review & submit' }).click();
   }
   await pairedDevice(page);
   await page.getByLabel('Capability scope').selectOption(scope);
   const accepted = page.waitForResponse(
     response => response.url().endsWith(taskPath) && response.request().method() === 'POST'
   );
-  await page.getByRole('button', { name: 'Submit task', exact: true }).click();
+  await page.getByRole('button', { name: 'Submit reviewed task', exact: true }).click();
   const response = await accepted;
   expect(response.status()).toBe(202);
   expect(response.request().headers()).not.toHaveProperty('authorization');
@@ -54,7 +55,7 @@ test('prefills without execution, resumes real supervisor SSE, and reloads the v
     if (request.method() === 'POST') writes.push(new URL(request.url()).pathname);
   });
   await page.getByRole('button', { name: 'Review task', exact: true }).click();
-  await expect(page.getByLabel('Objective')).toHaveValue('Fixture slow task');
+  await expect(page.getByLabel('What should Thozha do?')).toHaveValue('Fixture slow task');
   expect(writes).toEqual([]);
 
   const requests: { cursor: string | null; header?: string }[] = [];
@@ -111,7 +112,7 @@ test('does not post a slash task if the mapped worker becomes unavailable after 
   await page.getByRole('textbox', { name: 'Message Jarvis' }).fill('/task Read host status');
   await page.getByRole('button', { name: 'Review task', exact: true }).click();
   await pairedDevice(page);
-  const submit = page.getByRole('button', { name: 'Submit task', exact: true });
+  const submit = page.getByRole('button', { name: 'Submit reviewed task', exact: true });
   await expect(submit).toBeEnabled();
   await page.route(`**${readinessPath}`, async route => {
     const response = await route.fetch();
@@ -245,8 +246,7 @@ test('downloads only verified archives from authorized task endpoints', async ({
   request,
 }) => {
   await signIn(page, studio);
-  const archive = page.getByText('Synthetic archive fixture', { exact: true }).locator('../..');
-  await archive.getByRole('link', { name: /View task/ }).click();
+  await page.getByRole('link').filter({ hasText: 'Synthetic archive fixture' }).click();
   const listed = page.waitForResponse(response => response.url().endsWith('/artifacts'));
   await page.getByRole('button', { name: 'Check task artifacts' }).click();
   const list = await listed;

@@ -120,9 +120,11 @@ test('mobile slash commands stay local and refuse tasks without verified readine
   await expect(page.getByRole('alert')).toContainText('Unknown command');
   await composer.fill('/task Read host status');
   await composer.press('Enter');
-  await expect(page.getByLabel('Objective')).toHaveValue('Read host status');
+  await expect(page.getByLabel('What should Thozha do?')).toHaveValue('Read host status');
   await expect(page.getByText(/No active device mapping was verified/)).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Submit task', exact: true })).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'Submit reviewed task', exact: true })
+  ).toBeDisabled();
   expect(writes).toEqual([]);
 });
 
@@ -299,11 +301,15 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('link', { name: 'Trading Lab' }).click();
   await expect(page.getByRole('heading', { name: 'Trading Lab' })).toBeVisible();
-  await page.getByRole('button', { name: 'Paper order', exact: true }).click();
-  await page.getByRole('button', { name: 'Simulate buy' }).click();
-  await expect(page.getByText('Buy 5 NIFTYBEES')).toBeVisible();
-  await page.getByRole('button', { name: 'Backtests' }).click();
-  await expect(page.getByRole('button', { name: 'Run backtest' })).toBeDisabled();
+  await expect(page.getByText('SYNTHETIC DEMO', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Load synthetic demo' }).click();
+  await expect(page.getByText('SYNTHETIC DEMO', { exact: true })).toBeVisible();
+  await expect(page.locator('.th-market-chart canvas').first()).toBeVisible();
+  await page.getByRole('button', { name: 'Place virtual buy' }).click();
+  await expect(page.getByRole('cell', { name: 'Buy / Market' })).toBeVisible();
+  await page.reload();
+  await page.getByRole('button', { name: 'Load synthetic demo' }).click();
+  await expect(page.getByRole('cell', { name: 'Buy / Market' })).toBeVisible();
   await page.keyboard.press('Control+k');
   await page.getByRole('combobox', { name: 'Jump to page' }).fill('automations');
   await page.keyboard.press('Enter');
@@ -318,8 +324,9 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await expect(page.getByRole('button', { name: 'Pair device' })).toBeDisabled();
   await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('link', { name: 'Developer Studio' }).click();
-  await expect(page.getByRole('button', { name: 'Run project checks' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'New supervisor task' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Review & submit' }).click();
+  await expect(page.getByText(/No active device mapping was verified/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Submit reviewed task' })).toBeDisabled();
   expect((await page.request.get('/v1/web/tasks')).status()).toBe(403);
   expect((await page.request.get('/v1/web/automations/capabilities')).status()).toBe(404);
   await page.getByTestId('search-trigger').click();
@@ -936,6 +943,15 @@ test.describe('Thozha 4 product walkthrough', () => {
         for (const [slug, heading] of destinations) {
           await page.goto(`/#/${slug}`);
           await expect(page.locator('#main-content h1:visible')).toHaveText(heading);
+          if (slug === 'tasks') {
+            await page.getByLabel('What should Thozha do?').fill('Check my Mac disk space');
+            await page.getByRole('button', { name: 'Review & submit' }).click();
+          }
+          if (slug === 'trading-lab') {
+            await page.getByRole('button', { name: 'Load synthetic demo' }).click();
+            await expect(page.getByText('SYNTHETIC DEMO', { exact: true })).toBeVisible();
+            await expect(page.locator('.th-market-chart canvas').first()).toBeVisible();
+          }
           await page.waitForTimeout(320);
           expect(
             await page.evaluate(() => document.documentElement.scrollWidth)

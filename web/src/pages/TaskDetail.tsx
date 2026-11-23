@@ -8,6 +8,40 @@ import { Chip, Loading, Modal, Notice, Row } from '../components/ui';
 import { approvalsKey, controlError, httpStatus, tasksKey } from './controlState';
 import { isTerminalTask, useTaskProgress } from './useTaskProgress';
 
+function actualMilestones(events: SupervisorEvent[], state?: string) {
+  const transitions = events
+    .filter(item => item.event_type === 'task.state')
+    .flatMap(item =>
+      typeof item.payload.to === 'string' ? [{ state: item.payload.to, at: item.created_at }] : []
+    );
+  const reached = new Set(transitions.map(item => item.state));
+  if (state) reached.add(state);
+  return [
+    ['Submitted', reached.has('CREATED'), transitions.find(item => item.state === 'CREATED')?.at],
+    [
+      'Authorization checked',
+      reached.has('PLANNING'),
+      transitions.find(item => item.state === 'PLANNING')?.at,
+    ],
+    [
+      'Queued',
+      reached.has('CREATED') && reached.has('RUNNING'),
+      transitions.find(item => item.state === 'CREATED')?.at,
+    ],
+    ['Running', reached.has('RUNNING'), transitions.find(item => item.state === 'RUNNING')?.at],
+    [
+      'Awaiting approval',
+      reached.has('WAITING_APPROVAL'),
+      transitions.find(item => item.state === 'WAITING_APPROVAL')?.at,
+    ],
+    [
+      'Terminal',
+      reached.has('COMPLETED') || reached.has('FAILED') || reached.has('CANCELLED'),
+      transitions.find(item => ['COMPLETED', 'FAILED', 'CANCELLED'].includes(item.state))?.at,
+    ],
+  ] as const;
+}
+
 function TaskResult({ text, digest }: { text: string; digest?: string | null }) {
   const [verification, setVerification] = useState<{
     text: string;
@@ -202,6 +236,17 @@ export function TaskDetail({
           ? 'Recorded history'
           : null;
   const terminal = task && isTerminalTask(task.state);
+  const milestones = actualMilestones(timeline.events, task?.state);
+  const duration =
+    timeline.events.length > 1
+      ? Math.max(
+          0,
+          Date.parse(timeline.events.at(-1)!.created_at) - Date.parse(timeline.events[0].created_at)
+        )
+      : undefined;
+  const evidence = timeline.events.filter(item =>
+    /tool|approval|operation|artifact|result|error/i.test(item.event_type)
+  );
   return (
     <section
       aria-label="Supervisor task detail"
@@ -221,6 +266,35 @@ export function TaskDetail({
           {progress}
         </p>
       )}
+      {task && (
+        <div className="mt-2">
+          <h4 className="text-xs font-semibold">Verified lifecycle</h4>
+          <ol
+            className="mt-2 grid grid-cols-3 gap-2 max-sm:grid-cols-2"
+            aria-label="Task lifecycle milestones"
+          >
+            {milestones.map(([label, reached, at]) => (
+              <li
+                key={label}
+                className={`rounded-lg border p-3 text-xs ${reached ? 'border-white/25 bg-white/[.06]' : 'border-white/[.07] text-[#7f818b]'}`}
+              >
+                <b>
+                  {reached ? '✓' : '○'} {label}
+                </b>
+                <span className="mt-1 block">
+                  {at ? formatDate(at) : reached ? task.state.replace(/_/g, ' ') : 'Not reported'}
+                </span>
+              </li>
+            ))}
+          </ol>
+          <p className={`mt-2 ${muted}`}>
+            {duration == null
+              ? 'Duration is unavailable.'
+              : `Observed event duration: ${(duration / 1000).toFixed(1)} seconds.`}{' '}
+            No progress percentage is inferred.
+          </p>
+        </div>
+      )}
       {!task && !error && connected && <Loading label="Loading saved task…" />}
       {Boolean(error) && (
         <Notice error retry={connected ? retry : undefined}>
@@ -234,8 +308,11 @@ export function TaskDetail({
       )}
       {task?.state === 'WAITING_APPROVAL' && (
         <p className={muted}>
-          Review the pending request in Review and approvals. No action is authorized by this
-          timeline.
+          Review the pending request in{' '}
+          <a className="underline" href="#/approvals">
+            Approvals
+          </a>
+          . No action is authorized by this timeline.
         </p>
       )}
       {task?.state === 'PAUSED' && (
@@ -291,6 +368,24 @@ export function TaskDetail({
       )}
       {task && (
         <div>
+          {evidence.length > 0 && (
+            <div className="mb-4">
+              <h4 className="text-xs font-semibold">Tool and authorization evidence</h4>
+              <ul className="mt-2 space-y-2">
+                {evidence.slice(-10).map(item => (
+                  <li
+                    key={item.seq}
+                    className="rounded-lg border border-white/10 bg-white/[.03] p-3 text-xs"
+                  >
+                    <b>{item.event_type}</b>
+                    <p className={`mt-1 ${muted}`}>
+                      {eventDetail(item) || 'Saved event contained no displayable evidence.'}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <h4 className="text-xs font-semibold">Supervisor events</h4>
           {timeline.total === 0 && <p className={muted}>No events loaded yet.</p>}
           {timeline.total > timeline.events.length && (
