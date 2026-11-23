@@ -82,17 +82,43 @@ Playwright serves the production bundle on loopback. The `workspace` project (po
 
 A separate Chromium attempt against the unmodified backend with its actual Ollama engine (no fixture worker) signed in, received one active isolated test pairing from `/v1/web/devices`, and submitted a read-only macOS version and uptime task. `POST /v1/web/tasks` returned **503: `Supervisor task worker is unavailable`** and history was still empty after reload. The clean test profile had no Codex SDK credentials. No Mac command ran and no result was fabricated.
 
-### Functional integration verification
+### Latest verification
 
-- Strict TypeScript, ESLint, and the production build passed, as did all 12 Vitest unit/component tests.
-- All 20 Chromium tests passed (14 workspace, 6 supervisor control), plus a separate buffered-chat case. Axe found no violations on the scanned screens, including the schedule history view.
-- The production build reported 125.08 kB of entry JavaScript and 9.07 kB of CSS gzipped. One warm Chromium loopback navigation measured 6 ms to `DOMContentLoaded`; none of the AI Workspace, Trading Lab, or Memory Center chunks loaded on Overview. This is not a deployment or model latency benchmark.
+- Strict TypeScript, ESLint, the production build, and all 15 Vitest unit/component tests passed.
+- All 22 Chromium tests passed (16 workspace, 6 supervisor control), plus a separate buffered-chat case. Axe found no violations on the scanned screens, including the schedule history view.
+- The production build reported 124.12 kB of entry JavaScript and 9.23 kB of CSS gzipped. One warm Chromium loopback navigation measured 6 ms to `DOMContentLoaded`; none of the AI Workspace, Trading Lab, or Memory Center chunks loaded on Overview. This is not a deployment or model latency benchmark.
 
-Playwright screenshots (the conversation uses the labeled test engine): [Sign-in](./docs/alpha-visuals/sign-in.png) · [Desktop Overview](./docs/alpha-visuals/desktop-overview.png) · [Desktop conversation](./docs/alpha-visuals/desktop-conversation.png) · [Mobile conversation](./docs/alpha-visuals/mobile-conversation.png).
+Archival Alpha screenshots (the conversation uses the labeled test engine): [Sign-in](./docs/alpha-visuals/sign-in.png) · [Desktop Overview](./docs/alpha-visuals/desktop-overview.png) · [Desktop conversation](./docs/alpha-visuals/desktop-conversation.png) · [Mobile conversation](./docs/alpha-visuals/mobile-conversation.png).
 
-### Workspace layout and motion refinement
+## Water Lab integration
 
-The approved monochrome surfaces and navigation are preserved. The Overview liquid scene now uses lightweight layered SVG wave contours, pearl/silver shading and slow transform/opacity animation, with a small pointer parallax on fine-pointer devices. It does not create simulated data, fetch motion assets, or use WebGL. System and in-app reduced-motion settings disable ambient movement and dialog/page transitions. Header search expands left from its fixed magnifier/X button; the results are verified workspace destinations only. `Ctrl+K` / `⌘K`, Escape, arrows, Enter, clear, outside click, and focus restoration are supported. The mobile menu lines morph to a close state, while a native modal drawer handles focus, Escape and backdrop dismissal with a matching reverse close transition. Desktop navigation uses one sliding active surface. Shared CSS motion tokens govern press, icon, search, navigation, drawer, and page transitions.
+**Source:** `~/Documents/Jarvis-Water-Lab`, standalone private local Git repository (`dev/water-material`, verified at `906ca1465c6fea01553b275fa4c4a2b063ceaf9d`, no configured remote). The reused `water.glsl`, `main.mjs`, and `simulation.mjs` originate at `2dcf244817368a2cf8b86e5f737fa40ddcc91678`. Run `npm start` in Water Lab and open `http://127.0.0.1:8947/`, or use a free loopback `PORT`. Its three original unit tests passed. The source checkout was left unchanged.
+
+The lab uses a Node static server, JavaScript springs, WebGL 2 / GLSL ES 3.00, and a Canvas2D offscreen texture for editable scene text. Chromium verified actual lobe separation and settling as well as refraction of edited background text. The ray-marched volume has the strongest optical depth but takes more GPU time and visibly distorts text. GPU particles are cheaper to draw but break the surface into beads. The continuous height field was the practical fit for a shallow workspace surface. In contrast, the previous Thozha hero redrew SVG paths on the main thread and did not have optical shading.
+
+- [`water.frag.glsl`](./src/water/water.frag.glsl) adapts the lab's height function, traveling damped ripple equation, water IOR, Schlick Fresnel, and thickness attenuation. Thozha adds crossing waves, slope-derived normals, and silver reflections in a single pass over a graphite scene; it does not refract the actual page. Foreground text is normal DOM over a fixed scrim.
+- [`motion.ts`](./src/water/motion.ts) adapts the lab's damped 240 Hz spring substeps and frame-delta clamp for pointer response. Four packed ripple sources replace the lab's lobe and particle state. The production effect does not simulate detached droplets, volume conservation or physical caustics.
+- [`renderer.ts`](./src/water/renderer.ts) uses the lab's fullscreen triangle, without ray marching, floating-point render targets, or a per-frame scene upload. [`engine.ts`](./src/water/engine.ts) owns resizing, scheduling, input and context loss/recovery. It creates one visible canvas on demand. Balanced mode targets 30 draws/s with at most 260,000 backing pixels; economy targets 24 with at most 96,000 pixels and no pointer ripples. DPR and buffer edge length are capped. Sustained missed frame deadlines step down to economy and then to the still. No package dependency or third-party reference code was added.
+- Offscreen and hidden tabs stop scheduling draws. Either reduced-motion preference, lack of accelerated WebGL 2, or context loss shows the same locally rendered [still frame](./src/water/water-still.webp). On navigation the engine releases the program and vertex array and detaches observers and listeners. Sign-in uses the still without a canvas.
+- The same damped easing guides the reversible search and notification surfaces, one traveling navigation highlight and tactile button feedback. Search reveals a fixed-width field from the stationary magnifier/X without animating width. Notifications deform only their background. The rail, header and scroll ownership stay fixed; keyboard focus and dismissal behavior are retained. No other surface runs a fluid simulation.
+
+### Measured on this Mac
+
+Headless Chromium 159 on Apple M5 / ANGLE Metal, 1280×800 at 1×. Recording was off during measurements. The Thozha rows use the production builds with the same pointer sweep over approximately six seconds; lab rows are short ambient samples of the original fullscreen demos.
+
+| Case                              | Browser frame interval p95 | Browser intervals > 25 ms | Main-thread task time per elapsed second | GPU draw p95 |
+| --------------------------------- | -------------------------: | ------------------------: | ---------------------------------------: | -----------: |
+| Original Water Lab, 3D volume     |                    16.7 ms |                         0 |                                   8.1 ms |      8.87 ms |
+| Original Water Lab, height field  |                    16.8 ms |                         0 |                                  12.1 ms |      5.48 ms |
+| Original Water Lab, GPU particles |                    16.7 ms |                         0 |                                 112.2 ms |      0.97 ms |
+| Thozha at `3d3bd43d`, SVG hero    |                    16.7 ms |                         2 |                                  73.8 ms |    Not timed |
+| Thozha with Water Lab, WebGL hero |                    16.7 ms |                         0 |                                  18.7 ms |      0.35 ms |
+
+The integrated hero rendered into an 883×294 buffer for a 943×314 CSS-pixel area. The separate GPU timer sample recorded 89 timings across 90 draws in 3 seconds. Browser frame intervals are not the hero draw rate; the SVG sample had one 103 ms long task and the final sample had none. In these runs, renderer-process RSS rose from 230.36 to 283.70 MiB and GPU-process RSS from 78.22 to 94.89 MiB. These are Chromium process totals, not memory attributed solely to the shader. JS heap snapshots were 6.97 and 6.31 MiB respectively. The lazy engine is 3.77 kB gzipped and the still is 15.42 kB. These short Mac samples do not establish mobile GPU timing, battery use, or 120 Hz behavior.
+
+### Workspace layout and motion history
+
+The approved monochrome surfaces and navigation were retained. The first refinement used layered SVG wave contours and pointer parallax. Header search expanded left from its fixed magnifier/X, and the mobile drawer retained native focus and dismissal. Desktop navigation used one sliding active surface.
 
 Chromium layout checks cover all eight routes at 1440×900, 1280×800, 1024×768, 768×1024, 390×844, and a 720×450 CSS-pixel viewport at 2× device scale (the effective viewport of a 1440×900 window at 200% zoom). They verify fixed shell and header geometry, 237px desktop rail, scrollable content/chat, reachable Settings controls, no document or horizontal overflow, drawer focus restoration, and mobile Settings accessibility. Separate interaction tests verify the search anchor stays put as the field expands left, keyboard destination selection, focus return, hamburger state, active navigation highlight geometry, and outside-click/Escape drawer dismissal. Axe has no WCAG 2.x A/AA violations on Overview, search, mobile navigation, and chat. Before refinement, Settings made the document 1,131px high at 1280×800; afterward the document stays 800px, with 829px of Settings content scrolling inside its 704px main pane. A 1.2-second local Chromium requestAnimationFrame sample observed 73 frames (median and p95 interval 16.7ms); this measures browser pacing only, not GPU cost or low-end-device performance. Two hero captures 2 seconds apart changed 24,102 pixels above a 5-level RGB threshold; computed water transforms changed while both reduced-motion modes set animation to `none`.
 
@@ -100,13 +126,13 @@ Chromium layout checks cover all eight routes at 1440×900, 1280×800, 1024×768
 
 Search and drawer interaction captures: [Anchored search](./docs/alpha-visuals/refinement/anchored-search.png) · [Mobile navigation drawer](./docs/alpha-visuals/refinement/mobile-navigation-drawer.png).
 
-### Liquid interaction milestone
+### Previous liquid interaction milestone
 
 The pre-change Playwright recording showed that the hero translated fixed paths, notifications opened a centered modal, and search results vanished immediately on close. The desktop rail already used a moving shared highlight; the drawer and page used entrance/exit or entrance-only motion. The device cards only changed fill at selection.
 
-Notifications and search results now share a reversible, trigger-aligned surface. A rounded clip reveals the panel while its background changes scale and elevation independently of the text. Notifications still report that Web v1 has no notification API. The same search handle stroke extends into the first diagonal of the X; the other diagonal emerges as the lens recedes. The rail retains a single traveling highlight. Tactile lighting is limited to actionable device, conversation, memory, and paper-trading controls; ordinary cards and unavailable developer actions remain static. Automation draft controls and Settings use the shared press treatment.
+Notifications and search results adopted a reversible, trigger-aligned surface. A rounded clip revealed the panel while its background changed scale and elevation independently of the text. The search handle stroke extended into the first diagonal of the X. Tactile lighting was limited to actionable device, conversation, memory and paper-trading controls.
 
-The hero redraws SVG contour geometry with counter-propagating waves and a decaying pointer ripple rather than translating fixed artwork. Drawing pauses offscreen, in hidden tabs, and under reduced motion. Slow-update or low-core devices use a lower update cadence without pointer ripples. The sign-in illustration is static. No graphics dependency or new API was added.
+The prior hero redrew SVG contour geometry with counter-propagating waves and a decaying pointer ripple rather than translating fixed artwork.
 
 A 14.49-second local Chromium interaction sample without recording overhead observed 868 frame intervals (16.8 ms p95, none over 25 ms) and no Long Tasks API entries. Chromium reported 332 ms of main-thread task time, including 105 ms of script, 16 ms of layout, and 37 ms of style recalculation. This is a single local measurement; it does not isolate GPU time or certify lower-end hardware.
 

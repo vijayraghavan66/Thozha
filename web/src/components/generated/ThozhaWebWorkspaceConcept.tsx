@@ -376,55 +376,61 @@ export function ThozhaWebWorkspaceConcept({
                     setSearchOpen(false);
                 }}
               >
-                <input
-                  ref={searchInput}
-                  role="combobox"
-                  aria-label="Jump to page"
-                  aria-autocomplete="list"
-                  aria-expanded={searchOpen}
-                  aria-controls="workspace-search-results"
-                  aria-activedescendant={
-                    searchOpen && matching.length
-                      ? `workspace-search-option-${matching[activeResult]?.[1] ?? matching[0][1]}`
-                      : undefined
-                  }
+                <div
+                  className="th-search-field"
+                  data-open={searchOpen}
+                  data-query={Boolean(query)}
+                  inert={!searchOpen}
                   aria-hidden={!searchOpen}
-                  tabIndex={searchOpen ? 0 : -1}
-                  className={`th-search-input ${searchOpen ? 'is-open' : ''}`}
-                  placeholder="Search pages…"
-                  value={query}
-                  onChange={event => {
-                    setQuery(event.target.value);
-                    setActiveResult(0);
-                  }}
-                  onKeyDown={event => {
-                    if (event.nativeEvent.isComposing) return;
-                    if (event.key === 'ArrowDown' && matching.length) {
-                      event.preventDefault();
-                      setActiveResult(index => (index + 1) % matching.length);
-                    } else if (event.key === 'ArrowUp' && matching.length) {
-                      event.preventDefault();
-                      setActiveResult(index => (index - 1 + matching.length) % matching.length);
-                    } else if (event.key === 'Enter' && matching.length) {
-                      event.preventDefault();
-                      go(matching[activeResult]?.[0] ?? matching[0][0]);
+                >
+                  <input
+                    ref={searchInput}
+                    role="combobox"
+                    aria-label="Jump to page"
+                    aria-autocomplete="list"
+                    aria-expanded={searchOpen}
+                    aria-controls="workspace-search-results"
+                    aria-activedescendant={
+                      searchOpen && matching.length
+                        ? `workspace-search-option-${matching[activeResult]?.[1] ?? matching[0][1]}`
+                        : undefined
                     }
-                  }}
-                />
-                {searchOpen && query && (
-                  <button
-                    type="button"
-                    aria-label="Clear search"
-                    className="absolute right-10 top-0 z-20 grid h-10 w-8 place-items-center rounded-lg text-sm text-[#a4a5af] hover:bg-white/[.07] hover:text-white"
-                    onClick={() => {
-                      setQuery('');
+                    className="th-search-input"
+                    placeholder="Search pages…"
+                    value={query}
+                    onChange={event => {
+                      setQuery(event.target.value);
                       setActiveResult(0);
-                      searchInput.current?.focus();
                     }}
-                  >
-                    ×
-                  </button>
-                )}
+                    onKeyDown={event => {
+                      if (event.nativeEvent.isComposing) return;
+                      if (event.key === 'ArrowDown' && matching.length) {
+                        event.preventDefault();
+                        setActiveResult(index => (index + 1) % matching.length);
+                      } else if (event.key === 'ArrowUp' && matching.length) {
+                        event.preventDefault();
+                        setActiveResult(index => (index - 1 + matching.length) % matching.length);
+                      } else if (event.key === 'Enter' && matching.length) {
+                        event.preventDefault();
+                        go(matching[activeResult]?.[0] ?? matching[0][0]);
+                      }
+                    }}
+                  />
+                  {query && (
+                    <button
+                      type="button"
+                      aria-label="Clear search"
+                      className="absolute right-10 top-0 grid h-10 w-8 place-items-center rounded-lg text-sm text-[#a4a5af] hover:bg-white/[.07] hover:text-white focus-visible:outline-offset-[-4px]"
+                      onClick={() => {
+                        setQuery('');
+                        setActiveResult(0);
+                        searchInput.current?.focus();
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
                 <button
                   ref={searchTrigger}
                   type="button"

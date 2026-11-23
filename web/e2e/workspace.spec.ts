@@ -1,6 +1,59 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { signIn } from './session';
+
+declare global {
+  interface Window {
+    waterProbe: { contexts: number; draws: number; deletes: number; strength: number };
+    restoreWaterContext?: () => void;
+  }
+}
+
+async function observeWater(page: Page, blocked = false) {
+  await page.addInitScript(blocked => {
+    const probe = { contexts: 0, draws: 0, deletes: 0, strength: 0 };
+    window.waterProbe = probe;
+    const context = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, type, attributes) {
+      if (type === 'webgl2') {
+        probe.contexts++;
+        if (blocked) return null;
+      }
+      return Reflect.apply(context, this, [type, attributes]);
+    } as typeof context;
+    if (typeof WebGL2RenderingContext === 'undefined') return;
+    const gl = WebGL2RenderingContext.prototype;
+    const { drawArrays, deleteProgram, uniform4fv } = gl;
+    gl.drawArrays = function (...args) {
+      probe.draws++;
+      drawArrays.apply(this, args);
+    };
+    gl.deleteProgram = function (program) {
+      probe.deletes++;
+      deleteProgram.call(this, program);
+    };
+    gl.uniform4fv = function (...args) {
+      const values = args[1];
+      for (let i = 3; i < values.length; i += 4) {
+        probe.strength = Math.max(probe.strength, values[i]);
+      }
+      uniform4fv.apply(this, args);
+    };
+  }, blocked);
+}
+
+async function expectNoWaterDraws(page: Page) {
+  const draws = await page.evaluate(() => window.waterProbe.draws);
+  await page.waitForTimeout(180);
+  expect(await page.evaluate(() => window.waterProbe.draws)).toBe(draws);
+}
+
+function waterBackingSize(canvas: Locator) {
+  return canvas.evaluate(el => {
+    if (!(el instanceof HTMLCanvasElement)) throw new Error('Water canvas is missing');
+    return [el.width, el.height] as const;
+  });
+}
 
 async function createConversation(page: Page, title: string) {
   await page.getByRole('button', { name: /New conversation/ }).click();
@@ -179,9 +232,7 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await signIn(page);
-  const contour = page.locator('[data-water-contour]').first();
-  const still = await contour.getAttribute('d');
-  await expect(contour).toHaveAttribute('d', still!);
+  await expect(page.locator('main .th-liquid-field')).toHaveAttribute('data-water', 'poster');
   await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('link', { name: 'Trading Lab' }).click();
   await expect(page.getByRole('heading', { name: 'Trading Lab' })).toBeVisible();
@@ -221,6 +272,9 @@ test('header search morphs in place, supports keyboard selection and closes pred
   await signIn(page);
   const trigger = page.getByTestId('search-trigger');
   const initialBox = await trigger.boundingBox();
+  const field = page.locator('.th-search-field');
+  const collapsed = await field.evaluate(el => getComputedStyle(el).clipPath);
+  const fieldBox = await field.boundingBox();
   expect(initialBox).not.toBeNull();
   await page.keyboard.press('Control+k');
   const input = page.getByRole('combobox', { name: 'Jump to page' });
@@ -233,8 +287,9 @@ test('header search morphs in place, supports keyboard selection and closes pred
       .violations
   ).toEqual([]);
   await expect
-    .poll(() => input.evaluate(element => element.getBoundingClientRect().width))
-    .toBeGreaterThan(200);
+    .poll(() => field.evaluate(el => getComputedStyle(el).clipPath))
+    .toBe('inset(0px round 12px)');
+  expect(await field.boundingBox()).toEqual(fieldBox);
   const [inputBox, expandedTriggerBox] = await Promise.all([
     input.boundingBox(),
     trigger.boundingBox(),
@@ -268,6 +323,7 @@ test('header search morphs in place, supports keyboard selection and closes pred
   await expect(trigger).toHaveAttribute('aria-label', 'Search pages');
   await expect(trigger).toHaveAttribute('aria-expanded', 'false');
   expect(await trigger.boundingBox()).toEqual(initialBox);
+  await expect.poll(() => field.evaluate(el => getComputedStyle(el).clipPath)).toBe(collapsed);
 
   await trigger.click();
   await page.mouse.click(100, 360);
@@ -335,29 +391,142 @@ test('notifications unfold from the fixed bell and reverse without trapping focu
   await expect(bell).toHaveAttribute('aria-expanded', 'false');
 });
 
-test('Overview water changes contour geometry and respects both reduced-motion settings', async ({
+test('Water Lab hero draws ripples, resizes to budget and releases GPU work on navigation', async ({
   page,
 }) => {
+  await observeWater(page);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await signIn(page);
-  const water = page.locator('main [data-water-contour]').first();
-  const shape = () => water.getAttribute('d');
-  const initial = await shape();
-  await expect.poll(shape).not.toEqual(initial);
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expect(page.locator('main .th-liquid-field')).toHaveAttribute('data-motion', 'paused');
-  const paused = await shape();
-  await page.waitForTimeout(180);
-  await expect(water).toHaveAttribute('d', paused!);
+  const water = page.locator('main .th-liquid-field');
+  const canvas = water.locator('canvas');
+  const canRender = await canvas.evaluate(el =>
+    Boolean(
+      el.ownerDocument
+        .createElement('canvas')
+        .getContext('webgl2', { failIfMajorPerformanceCaveat: true })
+    )
+  );
+  test.skip(
+    !canRender,
+    'Chromium has no accelerated WebGL 2 context; the separate fallback test still runs.'
+  );
+  await expect(water).toHaveAttribute('data-water', 'webgl');
+  await expect.poll(() => page.evaluate(() => window.waterProbe.draws)).toBeGreaterThan(2);
+  const size = await waterBackingSize(canvas);
+  expect(size[0] * size[1]).toBeLessThanOrEqual(260_000);
+  if ((await water.getAttribute('data-quality')) === 'balanced') {
+    const box = (await water.boundingBox())!;
+    await page.mouse.click(box.x + box.width * 0.8, box.y + box.height * 0.74);
+    await expect.poll(() => page.evaluate(() => window.waterProbe.strength)).toBeGreaterThan(0.012);
+  }
+  const session = await page.context().newCDPSession(page);
+  await session.send('Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: false,
+  });
+  await expect(water).toHaveAttribute('data-quality', 'economy');
+  await expect
+    .poll(async () => {
+      const [width, height] = await waterBackingSize(canvas);
+      return width * height;
+    })
+    .toBeLessThanOrEqual(96_000);
+  expect((await waterBackingSize(canvas))[0]).toBeLessThan(size[0]);
+  await page.getByRole('button', { name: 'Enter the workspace' }).click();
+  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
+  await expect(water).toHaveCount(0);
+  expect(await page.evaluate(() => window.waterProbe.deletes)).toBeGreaterThan(0);
+  await expectNoWaterDraws(page);
+});
 
+test('Water Lab suspension stops actual draws, and a restored WebGL context resumes them', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 900, height: 520 });
   await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await observeWater(page);
+  await signIn(page);
+  const water = page.locator('main .th-liquid-field');
+  const canvas = water.locator('canvas');
+  const canRender = await canvas.evaluate(el =>
+    Boolean(
+      el.ownerDocument
+        .createElement('canvas')
+        .getContext('webgl2', { failIfMajorPerformanceCaveat: true })
+    )
+  );
+  test.skip(!canRender, 'Chromium has no accelerated WebGL 2 context.');
+  await expect(water).toHaveAttribute('data-water', 'webgl');
+  const main = page.locator('#main-content');
+  await main.evaluate(el => (el.scrollTop = el.scrollHeight));
+  await expect(water).toHaveAttribute('data-motion', 'paused');
+  await expectNoWaterDraws(page);
+  await main.evaluate(el => (el.scrollTop = 0));
+  await expect(water).toHaveAttribute('data-motion', 'running');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(water).toHaveAttribute('data-motion', 'paused');
+  await expectNoWaterDraws(page);
+  await page.evaluate(() => {
+    Reflect.deleteProperty(document, 'hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(water).toHaveAttribute('data-motion', 'running');
+  const lost = await canvas.evaluate(el => {
+    if (!(el instanceof HTMLCanvasElement)) throw new Error('Water canvas is missing');
+    const extension = el.getContext('webgl2')?.getExtension('WEBGL_lose_context');
+    if (!extension) return false;
+    window.restoreWaterContext = () => extension.restoreContext();
+    extension.loseContext();
+    return true;
+  });
+  expect(lost).toBe(true);
+  await expect(water).toHaveAttribute('data-water', 'poster');
+  await expect(water).toHaveAttribute('data-motion', 'paused');
+  await expectNoWaterDraws(page);
+  const previous = await page.evaluate(() => window.waterProbe.draws);
+  await page.evaluate(() => window.restoreWaterContext?.());
+  await expect(water).toHaveAttribute('data-water', 'webgl');
+  await expect.poll(() => page.evaluate(() => window.waterProbe.draws)).toBeGreaterThan(previous);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(water).toHaveAttribute('data-water', 'poster');
+  await expect(water).toHaveAttribute('data-motion', 'paused');
+  await expect.poll(() => page.evaluate(() => window.waterProbe.deletes)).toBeGreaterThan(0);
+  await expectNoWaterDraws(page);
+});
+
+test('the shader stays off for reduced motion and the renderer has a still fallback', async ({
+  page,
+}) => {
+  await observeWater(page, true);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await signIn(page);
+  const water = page.locator('main .th-liquid-field');
+  await expect(water).toHaveAttribute('data-water', 'poster');
+  await expect(water).toHaveAttribute('data-motion', 'paused');
+  expect(await page.evaluate(() => window.waterProbe.contexts)).toBe(0);
+  const still = await water.evaluate(el => getComputedStyle(el).backgroundImage);
+  expect(still).toMatch(/water-still-.*\.webp/);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await expect.poll(() => page.evaluate(() => window.waterProbe.contexts)).toBe(1);
+  await expect(water).toHaveAttribute('data-water', 'poster');
+  await expect(water).toHaveAttribute('data-motion', 'paused');
+  await expect(water.locator('canvas')).toBeHidden();
+  await expectNoWaterDraws(page);
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await page.getByRole('link', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Reduce motion: off' }).click();
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.getByRole('link', { name: 'Overview' }).click();
   await page.reload();
-  await expect(water).toHaveAttribute('d', paused!);
-  await page.waitForTimeout(180);
-  await expect(water).toHaveAttribute('d', paused!);
+  await expect(water).toHaveAttribute('data-water', 'poster');
+  await expect(water).toHaveAttribute('data-motion', 'paused');
+  expect(await page.evaluate(() => window.waterProbe.contexts)).toBe(0);
 });
 
 test('all routes retain a fixed shell and accessible scrolling at desktop, laptop, mobile and 200% zoom', async ({

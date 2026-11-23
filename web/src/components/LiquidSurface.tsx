@@ -10,13 +10,20 @@ export function LiquidCard({ className = '', ...props }: ComponentPropsWithoutRe
       type={props.type ?? 'button'}
       className={`th-liquid-card ${className}`}
       onPointerEnter={event => {
-        if (event.pointerType === 'mouse')
+        props.onPointerEnter?.(event);
+        if (
+          event.pointerType === 'mouse' &&
+          !event.currentTarget.closest('.th-stop-motion') &&
+          !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        )
           bounds.current = event.currentTarget.getBoundingClientRect();
       }}
-      onPointerLeave={() => {
+      onPointerLeave={event => {
+        props.onPointerLeave?.(event);
         bounds.current = null;
       }}
       onPointerMove={event => {
+        props.onPointerMove?.(event);
         const rect = bounds.current;
         if (!rect || event.currentTarget.closest('.th-stop-motion')) return;
         light.current?.style.setProperty(
@@ -183,7 +190,7 @@ export function TravelingSurface({
       <span
         aria-hidden="true"
         data-testid="navigation-highlight"
-        className="th-nav-highlight absolute left-0 right-0 z-0 rounded-xl border border-white/[.1] bg-gradient-to-r from-white/[.15] to-white/[.055]"
+        className="th-nav-highlight absolute left-0 right-0 z-0 rounded-xl border border-white/[.1]"
         style={{ height: geometry.height, transform: `translate3d(0, ${geometry.top}px, 0)` }}
       />
     )
