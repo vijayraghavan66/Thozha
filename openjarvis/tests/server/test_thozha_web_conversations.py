@@ -205,6 +205,35 @@ def test_stream_endpoint_marks_codex_output_buffered(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancel_closes_engine_while_waiting_for_text():
+    import asyncio
+    from contextlib import aclosing
+
+    from openjarvis.server.thozha_web_conversations import _cancellable_chunks
+
+    waiting = asyncio.Event()
+    closed = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def provider():
+        try:
+            yield "first"
+            waiting.set()
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    async with aclosing(_cancellable_chunks(provider(), cancelled.is_set)) as stream:
+        assert await anext(stream) == "first"
+        next_chunk = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        cancelled.set()
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(next_chunk, timeout=1)
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
 async def test_disconnected_sse_client_cancels_queued_response(tmp_path):
     client, engine, store = make_client(tmp_path)
     conversation_id = create_conversation(client)

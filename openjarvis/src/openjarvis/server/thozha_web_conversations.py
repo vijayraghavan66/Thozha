@@ -3,8 +3,8 @@
 This module is intentionally not mounted by the production application yet.
 The caller must supply the browser-session dependency; Android device tokens
 are never accepted here. Message generation uses the configured OpenJarvis
-engine directly, with tools disabled. The API reports a completed response
-after ``generate`` returns; it does not claim token streaming.
+engine directly, with tools disabled. The SSE route exposes public text
+deltas when the engine supports them.
 
 Startup reconciliation assumes exactly one server process uses this database.
 Multi-worker deployments need a shared worker lease before mounting this router;
@@ -20,7 +20,10 @@ import logging
 import re
 import sqlite3
 import threading
+import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import aclosing, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -533,20 +536,51 @@ def _sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {encoded}\n\n"
 
 
-def _engine_stream_mode(engine: Any, model: str) -> str:
-    """Report buffered Codex SDK output honestly; other engines use stream()."""
-    selected = engine
+def _stream_engine(engine: Any, model: str) -> Any:
     selector = getattr(engine, "_engine_for", None)
-    if callable(selector):
-        try:
-            selected = selector(model)
-        except Exception:
-            selected = engine
+    return selector(model) if callable(selector) else engine
+
+
+def _engine_stream_mode(engine: Any, selected: Any) -> str:
+    """Honor the selected engine's capability, including older Codex adapters."""
     engine_id = str(getattr(selected, "engine_id", "")).lower()
     module = type(selected).__module__.lower()
+    capability = getattr(selected, "web_chat_stream_mode", None)
+    if callable(capability):
+        return capability()
     if "codex_sdk" in engine_id or module.endswith(".codex_sdk"):
         return "buffered"
-    return "engine_stream"
+    return "engine_stream" if callable(getattr(engine, "stream", None)) else "buffered"
+
+
+async def _cancellable_chunks(
+    chunks: AsyncIterator[str], cancelled: Callable[[], bool]
+) -> AsyncIterator[str]:
+    pending = None
+    try:
+        while not cancelled():
+            pending = asyncio.ensure_future(anext(chunks))
+            while not pending.done():
+                await asyncio.wait((pending,), timeout=0.25)
+                if cancelled():
+                    return
+            finished, pending = pending, None
+            try:
+                chunk = finished.result()
+            except StopAsyncIteration:
+                return
+            if not cancelled():
+                yield chunk
+    finally:
+        try:
+            if pending is not None:
+                pending.cancel()
+                with suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await pending
+        finally:
+            close = getattr(chunks, "aclose", None)
+            if callable(close):
+                await close()
 
 
 def _require_conversation(
@@ -886,10 +920,14 @@ def create_web_conversations_router(
                 Message(role=Role(item["role"]), content=item["content"])
                 for item in history
             ]
-            mode = _engine_stream_mode(engine, model)
             parts: list[str] = []
             finalized = False
             try:
+                selected = _stream_engine(engine, model)
+                mode = _engine_stream_mode(engine, selected)
+                logger.info(
+                    "web_chat event=accepted wall_ms=%d", time.time_ns() // 1_000_000
+                )
                 yield _sse_event(
                     "accepted",
                     {
@@ -906,27 +944,37 @@ def create_web_conversations_router(
                 )
                 stream_method = getattr(engine, "stream", None)
                 if callable(stream_method):
-                    async for chunk in stream_method(
+                    options = (
+                        {"web_chat": True}
+                        if callable(getattr(selected, "web_chat_stream_mode", None))
+                        else {}
+                    )
+                    chunks = stream_method(
                         messages,
                         model=model,
                         temperature=0.7,
                         max_tokens=1024,
                         tools=[],
-                    ):
-                        if store.cancellation_requested(owner_id, response_id):
-                            store.finish(owner_id, response_id, status="cancelled")
-                            finalized = True
-                            yield _sse_event(
-                                "done",
-                                {"response_id": response_id, "status": "cancelled"},
-                            )
-                            return
-                        if not isinstance(chunk, str) or not chunk:
-                            continue
-                        parts.append(chunk)
-                        yield _sse_event(
-                            "delta", {"response_id": response_id, "content": chunk}
+                        **options,
+                    )
+                    async with aclosing(
+                        _cancellable_chunks(
+                            aiter(chunks),
+                            lambda: store.cancellation_requested(owner_id, response_id),
                         )
+                    ) as cancellable:
+                        async for chunk in cancellable:
+                            if not isinstance(chunk, str) or not chunk:
+                                continue
+                            if not parts:
+                                logger.info(
+                                    "web_chat event=first_sse_delta wall_ms=%d",
+                                    time.time_ns() // 1_000_000,
+                                )
+                            parts.append(chunk)
+                            yield _sse_event(
+                                "delta", {"response_id": response_id, "content": chunk}
+                            )
                 else:
                     generated = await asyncio.to_thread(
                         engine.generate,
@@ -966,6 +1014,11 @@ def create_web_conversations_router(
                     )
                     final_status = "completed"
                 finalized = True
+                logger.info(
+                    "web_chat event=persisted status=%s wall_ms=%d",
+                    final_status,
+                    time.time_ns() // 1_000_000,
+                )
                 yield _sse_event(
                     "done",
                     {

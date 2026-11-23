@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 import traceback
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
@@ -941,7 +943,156 @@ class CodexSDKEngine(InferenceEngine):
         )
         return {"content": result.final_response or "", "usage": usage_dict, "model": MODEL}
 
-    async def stream(self, messages, *, model: str = MODEL, temperature: float = 0.7, max_tokens: int = 1024, **kwargs: Any):
+    def web_chat_stream_mode(self) -> str:
+        try:
+            from openai_codex import AsyncCodex, AsyncTurnHandle
+            from openai_codex.generated.v2_all import MessagePhase
+        except ImportError:
+            return "buffered"
+        return (
+            "engine_stream"
+            if callable(AsyncCodex.thread_start)
+            and callable(AsyncTurnHandle.stream)
+            and hasattr(MessagePhase, "final_answer")
+            else "buffered"
+        )
+
+    async def _stream_web_chat(self, messages: list[Message]) -> AsyncIterator[str]:
+        from openai_codex import (
+            ApprovalMode,
+            AsyncCodex,
+            CodexConfig,
+            CodexError,
+            Sandbox,
+        )
+        from openai_codex.generated.v2_all import (
+            AgentMessageDeltaNotification,
+            AgentMessageThreadItem,
+            ItemCompletedNotification,
+            ItemStartedNotification,
+            MessagePhase,
+            TurnCompletedNotification,
+            TurnStatus,
+        )
+
+        cwd = _working_directory_for_current_task()
+        config = CodexConfig(
+            env={"CODEX_HOME": str(CODEX_HOME)},
+            config_overrides=_config_overrides("none", disable_tools=True),
+            cwd=cwd,
+        )
+        public_item_id = None
+        emitted: list[str] = []
+        final_text = None
+        unphased_text = None
+        completed = False
+        last_delta_ms = None
+        async with AsyncCodex(config=config) as codex:
+            codex._client._approval_handler = _approval_handler("none")
+            thread = await codex.thread_start(
+                model=MODEL,
+                approval_mode=ApprovalMode.auto_review,
+                ephemeral=True,
+                sandbox=Sandbox.read_only,
+                cwd=cwd,
+                base_instructions=_WEB_CHAT_INSTRUCTIONS,
+            )
+            turn = await thread.turn(
+                _serialize_messages(messages),
+                model=MODEL,
+                effort="xhigh",
+                approval_mode=ApprovalMode.auto_review,
+                sandbox=Sandbox.read_only,
+            )
+            try:
+                async with aclosing(turn.stream()) as events:
+                    async for event in events:
+                        payload = event.payload
+                        if isinstance(payload, TurnCompletedNotification):
+                            if payload.turn.id != turn.id:
+                                continue
+                            completed = True
+                            if payload.turn.status != TurnStatus.completed:
+                                raise EngineConnectionError("Codex Web chat turn did not complete.")
+                            break
+                        if isinstance(
+                            payload, (ItemStartedNotification, ItemCompletedNotification)
+                        ):
+                            if payload.turn_id != turn.id:
+                                continue
+                            item = payload.item.root
+                            if not isinstance(item, AgentMessageThreadItem):
+                                continue
+                            if item.phase == MessagePhase.final_answer:
+                                if public_item_id is not None and public_item_id != item.id:
+                                    raise EngineConnectionError(
+                                        "Codex returned multiple final answers."
+                                    )
+                                public_item_id = item.id
+                                if isinstance(payload, ItemCompletedNotification):
+                                    final_text = item.text
+                            elif item.phase is None and isinstance(
+                                payload, ItemCompletedNotification
+                            ):
+                                unphased_text = item.text
+                        elif (
+                            isinstance(payload, AgentMessageDeltaNotification)
+                            and payload.turn_id == turn.id
+                            and payload.item_id == public_item_id
+                            and final_text is None
+                            and payload.delta
+                        ):
+                            last_delta_ms = time.time_ns() // 1_000_000
+                            if not emitted:
+                                PERF_LOGGER.info(
+                                    "web_chat event=first_model_delta wall_ms=%d",
+                                    last_delta_ms,
+                                )
+                            emitted.append(payload.delta)
+                            yield payload.delta
+            finally:
+                if not completed:
+                    try:
+                        await asyncio.wait_for(turn.interrupt(), timeout=2)
+                    except (TimeoutError, OSError, RuntimeError, CodexError) as exc:
+                        PERF_LOGGER.warning(
+                            "Codex Web chat interrupt failed error_type=%s",
+                            type(exc).__name__,
+                        )
+        if not completed:
+            raise EngineConnectionError("Codex Web chat ended without a completion event.")
+        canonical = final_text if final_text is not None else unphased_text
+        prefix = "".join(emitted)
+        if not canonical or not canonical.startswith(prefix):
+            raise EngineConnectionError("Codex final answer did not match streamed text.")
+        PERF_LOGGER.info(
+            "web_chat event=model_completed wall_ms=%d last_delta_wall_ms=%s",
+            time.time_ns() // 1_000_000,
+            last_delta_ms,
+        )
+        if suffix := canonical[len(prefix):]:
+            yield suffix
+        self._last_success_at = time.time()
+
+    async def stream(
+        self,
+        messages,
+        *,
+        model: str = MODEL,
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        if (
+            model == MODEL
+            and kwargs.get("web_chat") is True
+            and kwargs.get("tools") == []
+            and self.web_chat_stream_mode() == "engine_stream"
+        ):
+            async with aclosing(self._stream_web_chat(list(messages))) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+            return
         result = await asyncio.to_thread(
             self.generate,
             messages,
