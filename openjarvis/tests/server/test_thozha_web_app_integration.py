@@ -43,9 +43,8 @@ def test_explicit_web_auth_mounts_owner_scoped_conversation_routes(
         hash_password("a-test-only-password-long-enough"),
     )
     monkeypatch.setenv("THOZHA_WEB_ORIGIN", origin)
-    monkeypatch.setenv(
-        "THOZHA_WEB_SESSION_DB", str(tmp_path / "web" / "sessions.db")
-    )
+    monkeypatch.setenv("THOZHA_WEB_SESSION_DB", str(tmp_path / "web" / "sessions.db"))
+    monkeypatch.setenv("THOZHA_WEB_MEMORY_DB", str(tmp_path / "web" / "memory.db"))
 
     app = _app()
     with TestClient(app, base_url=origin) as client:
@@ -72,6 +71,22 @@ def test_explicit_web_auth_mounts_owner_scoped_conversation_routes(
         listed = client.get("/v1/web/conversations")
         assert listed.status_code == 200
         assert [item["id"] for item in listed.json()["items"]] == [conversation["id"]]
+
+        memory = client.post(
+            "/v1/web/memory",
+            headers={
+                "Origin": origin,
+                "X-Thozha-CSRF": csrf,
+                "Idempotency-Key": "web-memory-integration-001",
+            },
+            json={"content": "Prefers concise status updates", "tags": ["style"]},
+        )
+        assert memory.status_code == 201
+        memory_id = memory.json()["memory"]["id"]
+        assert (
+            client.get("/v1/web/memory/search?q=concise").json()["items"][0]["id"]
+            == memory_id
+        )
 
         logout = client.post(
             "/v1/web/session/logout",

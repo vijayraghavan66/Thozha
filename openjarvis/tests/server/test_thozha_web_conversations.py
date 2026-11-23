@@ -35,12 +35,21 @@ except ImportError:
 class FakeEngine:
     engine_id = "fake-test-engine"
 
-    def __init__(self, *, response="A real test response.", gate=None, error=None):
+    def __init__(
+        self,
+        *,
+        response="A real test response.",
+        gate=None,
+        error=None,
+        stream_chunks=None,
+    ):
         self.response = response
         self.gate = gate
         self.error = error
+        self.stream_chunks = stream_chunks
         self.calls = []
         self.stream_calls = 0
+        self.stream_inputs = []
 
     def generate(self, messages, **kwargs):
         self.calls.append((messages, kwargs))
@@ -52,7 +61,9 @@ class FakeEngine:
 
     async def stream(self, *args, **kwargs):
         self.stream_calls += 1
-        yield "should not be used"
+        self.stream_inputs.append((args, kwargs))
+        for chunk in self.stream_chunks or ["should not be used"]:
+            yield chunk
 
 
 def make_client(tmp_path, *, owner="alice", engine=None, expired=False, store=None):
@@ -121,6 +132,7 @@ def test_persists_conversation_messages_events_and_real_engine_result(tmp_path):
     assert len(engine.calls) == 1
     _, kwargs = engine.calls[0]
     assert kwargs["tools"] == []
+    assert engine.calls[0][0][-1].content == "Explain Java"
     persisted = client.get(f"/v1/web/conversations/{conversation_id}").json()
     assert [message["role"] for message in persisted["messages"]] == [
         "user",
@@ -135,6 +147,58 @@ def test_persists_conversation_messages_events_and_real_engine_result(tmp_path):
     assert "owner_id" not in persisted["messages"][0]
     assert "idempotency_key" not in persisted["messages"][0]
     assert "request_hash" not in persisted["messages"][0]
+    store.close()
+
+
+def test_stream_endpoint_delivers_native_chunks_and_persists_final_answer(tmp_path):
+    engine = FakeEngine(stream_chunks=["Hello", " there."])
+    client, _, store = make_client(tmp_path, engine=engine)
+    conversation_id = create_conversation(client)
+    response = client.post(
+        f"/v1/web/conversations/{conversation_id}/messages/stream",
+        headers={"Idempotency-Key": "stream-request-key-0001"},
+        json={"content": "Say hello"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert '"mode":"engine_stream"' in response.text
+    assert '"content":"Hello"' in response.text
+    assert '"content":" there."' in response.text
+    assert '"status":"completed"' in response.text
+    conversation = client.get(f"/v1/web/conversations/{conversation_id}").json()
+    answer = next(
+        item for item in conversation["messages"] if item["role"] == "assistant"
+    )
+    assert answer["content"] == "Hello there."
+    assert engine.stream_calls == 1
+    assert engine.stream_inputs[0][0][0][-1].content == "Say hello"
+    assert engine.stream_inputs[0][1]["tools"] == []
+
+    replay = client.post(
+        f"/v1/web/conversations/{conversation_id}/messages/stream",
+        headers={"Idempotency-Key": "stream-request-key-0001"},
+        json={"content": "Say hello"},
+    )
+    assert replay.status_code == 200
+    assert '"replayed":true' in replay.text
+    assert "event: message" in replay.text
+    assert engine.stream_calls == 1
+    store.close()
+
+
+def test_stream_endpoint_marks_codex_output_buffered(tmp_path):
+    engine = FakeEngine(stream_chunks=["Completed response."])
+    engine.engine_id = "codex_sdk"
+    client, _, store = make_client(tmp_path, engine=engine)
+    conversation_id = create_conversation(client)
+    response = client.post(
+        f"/v1/web/conversations/{conversation_id}/messages/stream",
+        headers={"Idempotency-Key": "stream-request-key-0002"},
+        json={"content": "Explain"},
+    )
+    assert response.status_code == 200
+    assert '"mode":"buffered"' in response.text
+    assert engine.stream_calls == 1
     store.close()
 
 

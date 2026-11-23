@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from openjarvis.core.paths import get_config_dir
@@ -254,8 +255,8 @@ class ConversationStore:
                     if existing["request_hash"] != request_hash:
                         raise ValueError("idempotency_key_reused")
                     response = self._db.execute(
-                        "SELECT * FROM web_messages WHERE response_to=?",
-                        (existing["id"],),
+                        "SELECT * FROM web_messages WHERE owner_id=? AND response_to=?",
+                        (owner_id, existing["id"]),
                     ).fetchone()
                     self._db.commit()
                     return {
@@ -340,7 +341,7 @@ class ConversationStore:
                 )
                 context = self._db.execute(
                     "SELECT role,content FROM web_messages WHERE owner_id=? "
-                    "AND conversation_id=? AND rowid < "
+                    "AND conversation_id=? AND rowid <= "
                     "(SELECT rowid FROM web_messages WHERE id=?) ORDER BY rowid",
                     (owner_id, response["conversation_id"], response["response_to"]),
                 ).fetchall()
@@ -525,6 +526,27 @@ def _principal_owner(principal: Any) -> str:
     if expiry <= datetime.now(timezone.utc):
         raise HTTPException(status_code=401, detail="Web session expired")
     return user_id
+
+
+def _sse_event(event: str, payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    return f"event: {event}\ndata: {encoded}\n\n"
+
+
+def _engine_stream_mode(engine: Any, model: str) -> str:
+    """Report buffered Codex SDK output honestly; other engines use stream()."""
+    selected = engine
+    selector = getattr(engine, "_engine_for", None)
+    if callable(selector):
+        try:
+            selected = selector(model)
+        except Exception:
+            selected = engine
+    engine_id = str(getattr(selected, "engine_id", "")).lower()
+    module = type(selected).__module__.lower()
+    if "codex_sdk" in engine_id or module.endswith(".codex_sdk"):
+        return "buffered"
+    return "engine_stream"
 
 
 def _require_conversation(
@@ -755,6 +777,226 @@ def create_web_conversations_router(
             "status": assistant["status"] if assistant else "accepted",
             "replayed": replay,
         }
+
+    @router.post("/{conversation_id}/messages/stream")
+    async def stream_message(
+        conversation_id: str,
+        body: MessageCreate,
+        request: Request,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        principal=Depends(require_web_session),
+    ):
+        """Stream response chunks for engines that produce them incrementally.
+
+        The Codex SDK implementation yields a single completed response. It is
+        marked `buffered` in the stream event and is not represented as token
+        streaming. In either case the assistant result and lifecycle remain
+        durable and use the same duplicate-claim gate as normal Web messages.
+        """
+        await ensure_startup_recovery(request)
+        owner_id = _principal_owner(principal)
+        if idempotency_key is None or not _ID_RE.fullmatch(idempotency_key):
+            raise HTTPException(
+                status_code=400, detail="A valid Idempotency-Key header is required"
+            )
+        content = body.content.strip()
+        if not content:
+            raise HTTPException(
+                status_code=422, detail="Message content cannot be blank"
+            )
+        try:
+            result, replay = store.submit(
+                owner_id, conversation_id, idempotency_key, content
+            )
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="Conversation not found"
+            ) from None
+        except ValueError as exc:
+            detail = (
+                "Conversation is archived"
+                if str(exc) == "conversation_archived"
+                else "Idempotency key was already used for different content"
+            )
+            raise HTTPException(status_code=409, detail=detail) from None
+
+        assistant = result["assistant"]
+        response_id = assistant["id"]
+        if assistant["status"] in {"completed", "failed", "cancelled"}:
+
+            async def replay_events():
+                yield _sse_event(
+                    "accepted",
+                    {
+                        "conversation_id": conversation_id,
+                        "message_id": result["user"]["id"],
+                        "response_id": response_id,
+                        "status": assistant["status"],
+                        "replayed": True,
+                    },
+                )
+                if assistant["status"] == "completed":
+                    yield _sse_event(
+                        "message",
+                        {"response_id": response_id, "content": assistant["content"]},
+                    )
+                yield _sse_event(
+                    "done",
+                    {
+                        "response_id": response_id,
+                        "status": assistant["status"],
+                        "replayed": True,
+                    },
+                )
+
+            return StreamingResponse(
+                replay_events(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+            )
+        if assistant["status"] != "queued":
+            raise HTTPException(
+                status_code=409,
+                detail="Message is already being processed; use conversation status",
+            )
+        claim = store.claim(owner_id, response_id)
+        if claim is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Message was claimed by another response worker",
+            )
+        claimed_response, history = claim
+        engine = engine_for(request)
+        model = model_for(request)
+        if engine is None or model is None:
+            store.finish(
+                owner_id,
+                response_id,
+                status="failed",
+                error_code="engine_unavailable",
+            )
+            raise HTTPException(
+                status_code=503, detail="Conversation engine unavailable"
+            )
+
+        async def stream_events():
+            from openjarvis.core.types import Message, Role
+
+            messages = [
+                Message(role=Role(item["role"]), content=item["content"])
+                for item in history
+            ]
+            mode = _engine_stream_mode(engine, model)
+            parts: list[str] = []
+            yield _sse_event(
+                "accepted",
+                {
+                    "conversation_id": conversation_id,
+                    "message_id": result["user"]["id"],
+                    "response_id": response_id,
+                    "status": "running",
+                    "replayed": replay,
+                },
+            )
+            yield _sse_event("started", {"response_id": response_id})
+            yield _sse_event("stream_mode", {"response_id": response_id, "mode": mode})
+            try:
+                stream_method = getattr(engine, "stream", None)
+                if callable(stream_method):
+                    async for chunk in stream_method(
+                        messages,
+                        model=model,
+                        temperature=0.7,
+                        max_tokens=1024,
+                        tools=[],
+                    ):
+                        if store.cancellation_requested(owner_id, response_id):
+                            store.finish(owner_id, response_id, status="cancelled")
+                            yield _sse_event(
+                                "done",
+                                {"response_id": response_id, "status": "cancelled"},
+                            )
+                            return
+                        if not isinstance(chunk, str) or not chunk:
+                            continue
+                        parts.append(chunk)
+                        yield _sse_event(
+                            "delta", {"response_id": response_id, "content": chunk}
+                        )
+                else:
+                    generated = await asyncio.to_thread(
+                        engine.generate,
+                        messages,
+                        model=model,
+                        temperature=0.7,
+                        max_tokens=1024,
+                        tools=[],
+                    )
+                    text = (
+                        generated.get("content")
+                        if isinstance(generated, dict)
+                        else None
+                    )
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+                        yield _sse_event(
+                            "delta", {"response_id": response_id, "content": text}
+                        )
+                if store.cancellation_requested(owner_id, response_id):
+                    store.finish(owner_id, response_id, status="cancelled")
+                    final_status = "cancelled"
+                elif not parts:
+                    store.finish(
+                        owner_id,
+                        response_id,
+                        status="failed",
+                        error_code="empty_engine_response",
+                    )
+                    final_status = "failed"
+                else:
+                    store.finish(
+                        owner_id,
+                        response_id,
+                        content="".join(parts),
+                        status="completed",
+                    )
+                    final_status = "completed"
+                yield _sse_event(
+                    "done",
+                    {
+                        "response_id": response_id,
+                        "status": final_status,
+                        "stream_mode": mode,
+                    },
+                )
+            except asyncio.CancelledError:
+                store.cancel(owner_id, conversation_id, response_id)
+                store.finish(owner_id, response_id, status="cancelled")
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Web conversation stream failed "
+                    "conversation_id=%s message_id=%s error_type=%s",
+                    conversation_id,
+                    response_id,
+                    type(exc).__name__,
+                )
+                store.finish(
+                    owner_id,
+                    response_id,
+                    status="failed",
+                    error_code="generation_failed",
+                )
+                yield _sse_event(
+                    "error",
+                    {"response_id": response_id, "code": "generation_failed"},
+                )
+
+        return StreamingResponse(
+            stream_events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     @router.post("/{conversation_id}/messages/{message_id}/cancel")
     async def cancel_message(

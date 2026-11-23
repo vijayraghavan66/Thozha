@@ -326,7 +326,9 @@ def create_app(
     async def _start_durable_link_task_runner() -> None:
         agent_for_link = getattr(app.state, "agent", None)
         engine_for_link = getattr(app.state, "engine", None)
-        model_for_link = getattr(app.state, "model", "") or getattr(agent_for_link, "_model", "")
+        model_for_link = getattr(app.state, "model", "") or getattr(
+            agent_for_link, "_model", ""
+        )
         if agent_for_link is None or engine_for_link is None or not model_for_link:
             return
         try:
@@ -543,13 +545,26 @@ def create_app(
             create_web_conversations_router,
         )
 
-        web_conversations_router = create_web_conversations_router(
-            require_web_session
-        )
+        web_conversations_router = create_web_conversations_router(require_web_session)
         app.include_router(web_conversations_router)
         app.router.add_event_handler(
             "shutdown", web_conversations_router.conversation_store.close
         )
+
+        from openjarvis.server.thozha_web_memory import (
+            WebMemoryStore,
+            create_web_memory_router,
+        )
+
+        memory_path = os.environ.get("THOZHA_WEB_MEMORY_DB")
+        web_memory_store = (
+            WebMemoryStore(memory_path) if memory_path else WebMemoryStore()
+        )
+        web_memory_router = create_web_memory_router(
+            require_web_session, store=web_memory_store
+        )
+        app.include_router(web_memory_router)
+        app.router.add_event_handler("shutdown", web_memory_store.close)
     elif any(
         os.environ.get(name)
         for name in (
