@@ -310,21 +310,31 @@ def create_gateway_app(
 
     @app.post("/v1/jarvis/link/tasks")
     async def submit_link_task(request: Request):
-        _device_id_for_request(request, request.app.state.supervisor_store)
+        authenticated_device_id, _ = _device_id_for_request(request, request.app.state.supervisor_store)
         body = await _read_json_body(request)
-        if set(body) != {"objective", "capability_scope", "idempotency_key"}:
+        if set(body) != {"objective", "capability_scope", "idempotency_key", "requester_device_id"}:
             raise HTTPException(status_code=422, detail="Unexpected Link task fields")
         objective = body.get("objective")
         scope = body.get("capability_scope")
         key = body.get("idempotency_key")
+        requester_device_id = body.get("requester_device_id")
         if not isinstance(objective, str) or not objective.strip() or len(objective.encode("utf-8")) > 4096:
             raise HTTPException(status_code=422, detail="objective must be non-empty and under 4096 bytes")
         if scope not in (["read_only"], ["assistant"]):
             raise HTTPException(status_code=403, detail="Only read_only or supervisor-gated assistant scope is enabled")
         if not isinstance(key, str) or not _IDEMPOTENCY_RE.fullmatch(key):
             raise HTTPException(status_code=422, detail="Invalid idempotency key")
+        if not isinstance(requester_device_id, str) or not _ID_RE.fullmatch(requester_device_id):
+            raise HTTPException(status_code=422, detail="Invalid requester device ID")
+        if requester_device_id != authenticated_device_id:
+            raise HTTPException(status_code=403, detail="Authenticated device does not match the Link task requester")
         raw = json.dumps(
-            {"objective": objective.strip(), "capability_scope": scope, "idempotency_key": key},
+            {
+                "objective": objective.strip(),
+                "capability_scope": scope,
+                "idempotency_key": key,
+                "requester_device_id": requester_device_id,
+            },
             separators=(",", ":"), ensure_ascii=False,
         ).encode("utf-8")
         return await _proxy(request, backend_path="/v1/jarvis/link/tasks", body=raw)

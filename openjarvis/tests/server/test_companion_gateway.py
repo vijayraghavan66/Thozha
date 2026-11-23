@@ -255,12 +255,13 @@ def test_invitation_scoped_gateway_rejects_owner_rejection_and_expired_claim(tmp
 
 
 def test_gateway_allows_only_read_only_link_task_envelopes(gateway):
-    client, _, token, _, _, upstream = gateway
+    client, _, token, device_id, _, upstream = gateway
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {
         "objective": "Explain Java in one sentence",
         "capability_scope": ["read_only"],
         "idempotency_key": "jarvis-link-task-20261116-01",
+        "requester_device_id": device_id,
     }
     accepted = client.post("/v1/jarvis/link/tasks", headers=headers, json=body)
     assert accepted.status_code == 200
@@ -271,6 +272,14 @@ def test_gateway_allows_only_read_only_link_task_envelopes(gateway):
         "/v1/jarvis/link/tasks", headers=headers,
         json={**body, "capability_scope": ["system_admin"]},
     ).status_code == 403
+    assert client.post(
+        "/v1/jarvis/link/tasks", headers=headers,
+        json={**body, "requester_device_id": "a" * 32},
+    ).status_code == 403
+    assert client.post(
+        "/v1/jarvis/link/tasks", headers=headers,
+        json={key: value for key, value in body.items() if key != "requester_device_id"},
+    ).status_code == 422
     assert client.post(
         "/v1/jarvis/link/tasks", headers=headers,
         json={**body, "command": "rm -rf /"},
