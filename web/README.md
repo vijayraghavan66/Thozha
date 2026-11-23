@@ -87,6 +87,16 @@ Chromium layout checks cover all eight routes at 1440×900, 1280×800, 1024×768
 
 Search and drawer interaction captures: [Anchored search](./docs/alpha-visuals/refinement/anchored-search.png) · [Mobile navigation drawer](./docs/alpha-visuals/refinement/mobile-navigation-drawer.png).
 
+### Liquid interaction milestone
+
+The pre-change Playwright recording showed that the hero translated fixed paths, notifications opened a centered modal, and search results vanished immediately on close. The desktop rail already used a moving shared highlight; the drawer and page used entrance/exit or entrance-only motion. The device cards only changed fill at selection.
+
+Notifications and search results now share a reversible, trigger-aligned surface. A rounded clip reveals the panel while its background changes scale and elevation independently of the text. Notifications still report that Web v1 has no notification API. The same search handle stroke extends into the first diagonal of the X; the other diagonal emerges as the lens recedes. The rail retains a single traveling highlight. Tactile lighting is limited to actionable device, conversation, memory, and paper-trading controls; ordinary cards and unavailable developer actions remain static. Automation draft controls and Settings use the shared press treatment.
+
+The hero redraws SVG contour geometry with counter-propagating waves and a decaying pointer ripple rather than translating fixed artwork. Drawing pauses offscreen, in hidden tabs, and under reduced motion. Slow-update or low-core devices use a lower update cadence without pointer ripples. The sign-in illustration is static. No graphics dependency or new API was added.
+
+A 14.49-second local Chromium interaction sample without recording overhead observed 868 frame intervals (16.8 ms p95, none over 25 ms) and no Long Tasks API entries. Chromium reported 332 ms of main-thread task time, including 105 ms of script, 16 ms of layout, and 37 ms of style recalculation. This is a single local measurement; it does not isolate GPU time or certify lower-end hardware.
+
 ## Contract handoff
 
 Runtime wiring is based on `codex/core` at `90927d50` and the OpenAPI v1 on `codex/openapi-contracts` at `e7ae0cd2`. See the [official Web types](../contracts/web-api/v1.ts) and [integration guide](../docs/COPILOT_INTEGRATION.md). `npm run contract:generate` generates browser-only types from that pinned Git object; fetch `codex/openapi-contracts` if needed, or pass a reviewed local spec as an argument. The published spec references an undefined generic `Error` schema; generation excludes just that error payload shape and the client uses HTTP status messages. There are no changes to the shared specs.

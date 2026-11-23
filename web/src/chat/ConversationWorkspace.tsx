@@ -19,6 +19,7 @@ import {
 } from '../api/client';
 import type { WebConversationStreamMode } from '../../../contracts/web-api/v1';
 import { Chip, Head, Loading, Modal, Notice, Panel } from '../components/ui';
+import { LiquidCard } from '../components/LiquidSurface';
 import { field, formatDate, muted, outline, solid } from '../components/styles';
 import { MarkdownMessage } from './MarkdownMessage';
 import { detailKey, isPendingResponse, useConversationSnapshot } from './updates';
@@ -441,8 +442,7 @@ export default function ConversationWorkspace({
               </label>
               <div className="hidden max-h-[530px] space-y-1 overflow-y-auto px-1 pb-2 md:block">
                 {items.map(item => (
-                  <button
-                    type="button"
+                  <LiquidCard
                     key={item.id}
                     aria-pressed={item.id === id}
                     onClick={() => setSelection(item.id)}
@@ -452,7 +452,7 @@ export default function ConversationWorkspace({
                     <span className="mt-2 block text-[10px] text-[#c4c5cb]">
                       {formatDate(item.updated_at)}
                     </span>
-                  </button>
+                  </LiquidCard>
                 ))}
               </div>
             </>

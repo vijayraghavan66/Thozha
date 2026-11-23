@@ -188,35 +188,6 @@ button:disabled {
   cursor: not-allowed;
 }
 
-@keyframes th-water {
-  0%,
-  100% {
-    transform: translate3d(-12px, 0, 0);
-  }
-  50% {
-    transform: translate3d(14px, 10px, 0);
-  }
-}
-@keyframes th-water-inner {
-  0%,
-  100% {
-    transform: translate3d(12px, 0, 0);
-  }
-  50% {
-    transform: translate3d(-16px, -9px, 0);
-  }
-}
-@keyframes th-liquid-glint {
-  0%,
-  100% {
-    transform: translate3d(-8px, -4px, 0);
-    opacity: 0.48;
-  }
-  50% {
-    transform: translate3d(11px, 5px, 0);
-    opacity: 0.8;
-  }
-}
 @keyframes th-rise {
   from {
     opacity: 0;
@@ -261,37 +232,27 @@ button:disabled {
   from {
     opacity: 1;
   }
+  @keyframes th-backdrop-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
   to {
     opacity: 0;
-  }
-}
-@keyframes th-search-results-in {
-  from {
-    opacity: 0;
-    transform: translate3d(0, -5px, 0);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
   }
 }
 .th-liquid-field {
-  background: linear-gradient(112deg, #191a1d 13%, #292a30 68%, #15161a);
-  transform: translate3d(var(--liquid-x, 0px), var(--liquid-y, 0px), 0);
-  transition: transform 450ms ease-out;
+  background: radial-gradient(ellipse at 83% 53%, #34363c 0%, #18191d 48%, #0d0e10 79%);
   contain: paint;
 }
 .th-liquid-field svg {
-  mask-image: linear-gradient(90deg, transparent 3%, #000 42%);
+  mask-image: linear-gradient(90deg, transparent 12%, #000 70%);
 }
-.th-water {
-  animation: th-water 16s ease-in-out -1s infinite;
-}
-.th-water-inner {
-  animation: th-water-inner 21s ease-in-out -3s infinite;
-}
-.th-liquid-glint {
-  animation: th-liquid-glint 25s ease-in-out -5s infinite;
+.th-liquid-field.is-quiet svg {
+  opacity: 0.44;
 }
 .th-enter {
   animation: th-rise var(--th-duration-page) var(--th-ease-out) both;
@@ -300,13 +261,13 @@ button:disabled {
   animation: th-dialog-in var(--th-duration-press) var(--th-ease-out) both;
 }
 .th-workspace dialog[open]::backdrop {
-  animation: th-dialog-in var(--th-duration-press) var(--th-ease-out) both;
+  animation: th-backdrop-in var(--th-duration-press) var(--th-ease-out) both;
 }
 .th-workspace dialog.th-nav-dialog[open] {
   animation: th-drawer-in var(--th-duration-drawer) var(--th-ease-spring) both;
 }
 .th-workspace dialog.th-nav-dialog[open]::backdrop {
-  animation: th-dialog-in var(--th-duration-drawer) var(--th-ease-out) both;
+  animation: th-backdrop-in var(--th-duration-drawer) var(--th-ease-out) both;
 }
 .th-workspace dialog.th-nav-dialog.is-closing[open] {
   animation: th-drawer-out 220ms var(--th-ease-out) both;
@@ -319,6 +280,10 @@ button:disabled {
     transform var(--th-duration-nav) var(--th-ease-spring),
     height var(--th-duration-nav) var(--th-ease-out);
   pointer-events: none;
+  top: 0;
+  box-shadow:
+    inset 0 1px rgb(255 255 255 / 8%),
+    0 5px 16px rgb(0 0 0 / 22%);
 }
 .th-menu-line {
   fill: none;
@@ -326,6 +291,7 @@ button:disabled {
   stroke-linecap: round;
   stroke-width: 1.7;
   transform-box: view-box;
+  transform-origin: center;
   transition:
     transform var(--th-duration-icon) var(--th-ease-out),
     opacity var(--th-duration-icon) var(--th-ease-out);
@@ -348,7 +314,7 @@ button:disabled {
   width: 40px;
   height: 40px;
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: 20px;
   background: #1b1c20;
   padding: 0 5rem 0 0.75rem;
   color: #f4f4f6;
@@ -356,6 +322,7 @@ button:disabled {
   pointer-events: none;
   transition:
     width var(--th-duration-search) var(--th-ease-out),
+    border-radius var(--th-duration-search) var(--th-ease-out),
     opacity var(--th-duration-press) ease-out,
     border-color var(--th-duration-press) ease-out;
 }
@@ -363,6 +330,7 @@ button:disabled {
   width: min(320px, calc(100vw - 120px));
   border-color: rgb(255 255 255 / 18%);
   opacity: 1;
+  border-radius: 12px;
   pointer-events: auto;
 }
 .th-search-input:focus-visible {
@@ -388,31 +356,139 @@ button:disabled {
   opacity: 0;
   transform: scale(0.55);
 }
-.th-search-handle.is-open {
-  opacity: 0;
-  transform: scale(0.3);
+.th-search-handle {
+  transform: translate(4.6px, 4.6px) scale(0.47);
 }
-.th-search-cross-a.is-open {
-  opacity: 1;
-  transform: scale(1.05) rotate(0);
+.th-search-handle.is-open {
+  transform: none;
 }
 .th-search-cross-b.is-open {
   opacity: 1;
   transform: scale(1.05) rotate(0);
 }
-.th-search-results {
-  animation: th-search-results-in var(--th-duration-press) var(--th-ease-out) both;
+.th-anchored-surface {
+  position: absolute;
+  z-index: 25;
+  right: 0;
+  width: min(320px, calc(100vw - 72px));
+  clip-path: inset(0 0 calc(100% - 40px) calc(100% - 40px) round 20px);
+  transform: translateY(-4px);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    clip-path var(--th-duration-search) var(--th-ease-spring),
+    transform var(--th-duration-search) var(--th-ease-spring),
+    opacity var(--th-duration-search) var(--th-ease-out);
+}
+.th-anchored-surface::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 16px;
+  background: linear-gradient(150deg, #242528, #161719 58%);
+  box-shadow: inset 0 0 0 1px #ffffff23;
+  transform-origin: calc(100% - 20px) 20px;
+  transform: scale(0.93);
+  transition:
+    transform var(--th-duration-search) var(--th-ease-spring),
+    box-shadow var(--th-duration-search) var(--th-ease-out);
+}
+.th-anchored-surface[data-open='true']::before {
+  transform: none;
+  box-shadow:
+    inset 0 0 0 1px #ffffff23,
+    inset 0 1px 0 #ffffff19;
+}
+.th-anchored-surface[data-open='true'] {
+  clip-path: inset(0 round 16px);
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+}
+.th-anchored-content {
+  position: relative;
+  opacity: 0;
+  transition: opacity var(--th-duration-press) var(--th-ease-out);
+}
+.th-anchored-surface[data-open='true'] .th-anchored-content {
+  opacity: 1;
+  transition-delay: 55ms;
+}
+.th-notification-surface {
+  top: 0;
+}
+.th-search-surface {
+  top: calc(100% + 6px);
+  width: min(320px, calc(100vw - 120px));
+}
+.th-header-action,
+.th-bell {
+  transition:
+    background-color var(--th-duration-press),
+    transform var(--th-duration-icon) var(--th-ease-spring);
+}
+.th-header-action:hover,
+.th-header-action[aria-expanded='true'] {
+  background-color: #ffffff12;
+}
+.th-bell[data-open='true'] {
+  transform: scale(0.86);
+}
+.th-liquid-card {
+  position: relative;
+  isolation: isolate;
+  overflow: clip;
+  transition:
+    background-color var(--th-duration-press),
+    border-color var(--th-duration-press),
+    box-shadow var(--th-duration-press),
+    scale var(--th-duration-press) var(--th-ease-spring);
+}
+.th-card-light {
+  position: absolute;
+  inset: -100px auto auto -100px;
+  width: 200px;
+  height: 200px;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(circle, #ffffff26, #ffffff05 45%, transparent 70%);
+  opacity: 0;
+  transition: opacity var(--th-duration-press);
+}
+@media (hover: hover) and (pointer: fine) {
+  .th-liquid-card:hover:not(:disabled) {
+    box-shadow:
+      inset 0 0 0 1px #ffffff24,
+      inset 0 1px #ffffff16;
+  }
+  .th-liquid-card:hover:not(:disabled) .th-card-light {
+    opacity: 1;
+  }
+}
+.th-liquid-card:active:not(:disabled) {
+  scale: 0.986;
+}
+.th-press {
+  transition:
+    background-color var(--th-duration-press),
+    scale var(--th-duration-press) var(--th-ease-spring);
+}
+.th-press:active:not(:disabled) {
+  scale: 0.98;
+}
+.th-stop-motion .th-card-light {
+  display: none;
 }
 .th-stop-motion,
-.th-stop-motion * {
+.th-stop-motion *,
+.th-stop-motion .th-anchored-surface::before {
   animation: none !important;
   transition: none !important;
   scroll-behavior: auto !important;
 }
-.th-stop-motion .th-liquid-field {
-  transform: none !important;
+.th-stop-motion :is(.th-press, .th-liquid-card) {
+  scale: none;
 }
-.th-stop-motion .th-search-results,
 .th-stop-motion dialog.th-nav-dialog[open] {
   animation: none !important;
 }
@@ -421,13 +497,17 @@ button:disabled {
 }
 @media (prefers-reduced-motion: reduce) {
   .th-workspace,
-  .th-workspace * {
+  .th-workspace *,
+  .th-workspace .th-anchored-surface::before {
     animation: none !important;
     transition: none !important;
     scroll-behavior: auto !important;
   }
-  .th-liquid-field {
-    transform: none !important;
+  .th-workspace :is(.th-press, .th-liquid-card) {
+    scale: none;
+  }
+  .th-card-light {
+    display: none;
   }
   .th-workspace dialog::backdrop {
     animation: none !important;

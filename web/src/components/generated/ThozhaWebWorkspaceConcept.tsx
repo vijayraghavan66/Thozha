@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { WorkspaceApi } from '../../api/client';
 import {
   Blueprint,
@@ -8,6 +8,7 @@ import {
   Settings,
 } from '../../pages/WorkspacePages';
 import { Chip, Crest, Loading, Modal, Notice } from '../ui';
+import { AnchoredSurface, NotificationPanel, TravelingSurface } from '../LiquidSurface';
 import { muted } from '../styles';
 
 const ConversationWorkspace = lazy(() => import('../../chat/ConversationWorkspace'));
@@ -42,14 +43,6 @@ function SearchGlyph({ open }: { open: boolean }) {
       />
       <path
         className={`th-search-handle${open ? ' is-open' : ''}`}
-        d="m15 15 4.5 4.5"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.7"
-      />
-      <path
-        className={`th-search-cross th-search-cross-a${open ? ' is-open' : ''}`}
         d="m7 7 10 10"
         fill="none"
         stroke="currentColor"
@@ -88,38 +81,9 @@ function WorkspaceNavigation({
   onNavigate: () => void;
 }) {
   const nav = useRef<HTMLElement>(null);
-  const [indicator, setIndicator] = useState<{ top: number; height: number } | null>(null);
-
-  useLayoutEffect(() => {
-    const element = nav.current;
-    if (!element) return;
-    const update = () => {
-      const active = element.querySelector<HTMLElement>('[aria-current="page"]');
-      if (!active) return;
-      const navBounds = element.getBoundingClientRect();
-      const activeBounds = active.getBoundingClientRect();
-      setIndicator({ top: activeBounds.top - navBounds.top, height: activeBounds.height });
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(element);
-    window.addEventListener('resize', update);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('resize', update);
-    };
-  }, [page]);
-
   return (
     <nav ref={nav} aria-label="Main navigation" className="relative space-y-1">
-      {indicator && (
-        <span
-          aria-hidden="true"
-          data-testid="navigation-highlight"
-          className="th-nav-highlight absolute left-0 right-0 z-0 rounded-xl border border-white/[.1] bg-gradient-to-r from-white/[.15] to-white/[.055] shadow-sm"
-          style={{ height: indicator.height, transform: `translate3d(0, ${indicator.top}px, 0)` }}
-        />
-      )}
+      <TravelingSurface container={nav} selection={page} />
       {sections.map(([name, slug, symbol], index) => (
         <div key={slug} className="relative z-[1]">
           {index === 5 && (
@@ -177,7 +141,8 @@ export function ThozhaWebWorkspaceConcept({
 }) {
   const [page, setPage] = useState<Section>(currentPage);
   const [visitedChat, setVisitedChat] = useState(() => currentPage() === 'AI Workspace');
-  const [dialog, setDialog] = useState<'navigation' | 'notifications' | null>(null);
+  const [dialog, setDialog] = useState<'navigation' | null>(null);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [drawerClosing, setDrawerClosing] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -202,6 +167,7 @@ export function ThozhaWebWorkspaceConcept({
       if (next === 'AI Workspace') setVisitedChat(true);
       if (!drawerClosingRef.current) setDialog(null);
       setSearchOpen(false);
+      setNotificationsOpen(false);
     }
     window.addEventListener('hashchange', onNavigate);
     return () => {
@@ -228,6 +194,7 @@ export function ThozhaWebWorkspaceConcept({
       setQuery('');
       setActiveResult(0);
       setDialog(null);
+      setNotificationsOpen(false);
       setSearchOpen(true);
     }
     window.addEventListener('keydown', shortcut);
@@ -294,6 +261,7 @@ export function ThozhaWebWorkspaceConcept({
     drawerClosingRef.current = false;
     setDrawerClosing(false);
     setSearchOpen(false);
+    setNotificationsOpen(false);
     setDialog('navigation');
   }
 
@@ -303,6 +271,7 @@ export function ThozhaWebWorkspaceConcept({
       return;
     }
     setDialog(null);
+    setNotificationsOpen(false);
     setQuery('');
     setActiveResult(0);
     setSearchOpen(true);
@@ -372,7 +341,7 @@ export function ThozhaWebWorkspaceConcept({
           </div>
         </aside>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <header className="flex min-h-[70px] shrink-0 items-center justify-between gap-1 border-b border-white/[.08] px-8 max-md:px-3">
+          <header className="relative z-10 flex min-h-[70px] shrink-0 items-center justify-between gap-1 border-b border-white/[.08] px-8 max-md:px-3">
             <div className="flex min-w-0 items-center gap-2 sm:gap-3">
               <button
                 type="button"
@@ -466,12 +435,16 @@ export function ThozhaWebWorkspaceConcept({
                 >
                   <SearchGlyph open={searchOpen} />
                 </button>
-                {searchOpen && (
+                <AnchoredSurface
+                  id="workspace-search-surface"
+                  open={searchOpen}
+                  className="th-search-surface"
+                >
                   <div
                     id="workspace-search-results"
                     role="listbox"
                     aria-label="Workspace pages"
-                    className="th-search-results absolute right-0 top-full z-40 mt-2 max-h-[min(360px,calc(100dvh-110px))] w-[min(320px,calc(100vw-120px))] overflow-y-auto rounded-xl border border-white/15 bg-[#1a1b1f] p-1.5 shadow-2xl"
+                    className="max-h-[min(360px,calc(100dvh-110px))] overflow-y-auto p-1.5"
                   >
                     {matching.map(([name, slug], index) => (
                       <button
@@ -501,16 +474,14 @@ export function ThozhaWebWorkspaceConcept({
                       </p>
                     )}
                   </div>
-                )}
+                </AnchoredSurface>
               </div>
-              <button
-                type="button"
-                className="min-h-10 min-w-9 rounded-lg text-base text-[#b4b4bb] hover:bg-white/10"
-                aria-label="Notifications"
-                onClick={() => setDialog('notifications')}
-              >
-                ♧
-              </button>
+              <NotificationPanel open={notificationsOpen} onOpenChange={setNotificationsOpen}>
+                <Chip>UNAVAILABLE IN WEB v1</Chip>
+                <p className={`mt-3 ${muted}`}>
+                  The browser API does not expose notification history or unread counts.
+                </p>
+              </NotificationPanel>
             </div>
           </header>
           <main
@@ -534,6 +505,7 @@ export function ThozhaWebWorkspaceConcept({
                     onDevices={() => go('Device Hub')}
                     onSettings={() => go('Settings')}
                     connected={!problem}
+                    reduced={motion.reduced}
                   />
                 )}
                 {page === 'Trading Lab' && (
@@ -589,14 +561,6 @@ export function ThozhaWebWorkspaceConcept({
           id="workspace-navigation"
         >
           <WorkspaceNavigation page={page} drawer onNavigate={closeNavigation} />
-        </Modal>
-      )}
-      {dialog === 'notifications' && (
-        <Modal title="Notifications" close={() => setDialog(null)}>
-          <Chip>UNAVAILABLE IN WEB v1</Chip>
-          <p className={`mt-3 ${muted}`}>
-            The browser API does not expose notification history or unread counts.
-          </p>
         </Modal>
       )}
     </div>

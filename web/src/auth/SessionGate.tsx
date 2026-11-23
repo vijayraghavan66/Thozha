@@ -9,7 +9,8 @@ import {
   type WebApi,
   type WebSession,
 } from '../api/client';
-import { Chip, Crest, Loading, Notice, Panel, Water } from '../components/ui';
+import { Chip, Crest, Loading, Notice, Panel } from '../components/ui';
+import { WaterSurface } from '../components/WaterSurface';
 import { field, muted, outline, solid } from '../components/styles';
 import { ThozhaWebWorkspaceConcept } from '../components/generated/ThozhaWebWorkspaceConcept';
 
@@ -256,7 +257,7 @@ export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
     <main className="th-workspace grid min-h-dvh items-center bg-[#08090b] p-4 text-[#ececf0] md:p-10">
       <div className="th-enter mx-auto grid w-full max-w-[960px] overflow-hidden rounded-[24px] border border-white/10 bg-[#101114] shadow-[0_40px_130px_rgba(0,0,0,.5)] md:grid-cols-[1.1fr_1fr]">
         <div className="relative overflow-hidden bg-[#202126] p-8 md:p-10">
-          <Water />
+          <WaterSurface quiet />
           <div className="relative">
             <Crest />
             <p className="mt-8 text-[10px] font-semibold tracking-[.25em] text-[#c4c5cb]">

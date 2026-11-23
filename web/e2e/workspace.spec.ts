@@ -187,7 +187,9 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await signIn(page);
-  await expect(page.locator('.th-water').first()).toHaveCSS('animation-name', 'none');
+  const contour = page.locator('[data-water-contour]').first();
+  const still = await contour.getAttribute('d');
+  await expect(contour).toHaveAttribute('d', still!);
   await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('link', { name: 'Trading Lab' }).click();
   await expect(page.getByRole('heading', { name: 'Trading Lab' })).toBeVisible();
@@ -310,27 +312,57 @@ test('mobile menu morphs into a close state and its drawer closes outside or wit
   await expect(page.getByTestId('navigation-trigger')).toBeFocused();
 });
 
-test('Overview water moves by default and respects both reduced-motion settings', async ({
+test('notifications unfold from the fixed bell and reverse without trapping focus', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+  const bell = page
+    .locator('header button[aria-controls]')
+    .filter({ has: page.locator('.th-bell') });
+  const box = await bell.boundingBox();
+  const panel = page.locator('.th-notification-surface');
+  const heading = page.getByRole('heading', { name: 'Notifications', exact: true });
+  const collapsed = await panel.evaluate(el => getComputedStyle(el).clipPath);
+  await bell.click();
+  await expect(heading).toBeFocused();
+  await expect(bell).toHaveAttribute('aria-expanded', 'true');
+  await expect.poll(() => panel.evaluate(el => getComputedStyle(el).opacity)).toBe('1');
+  expect(await bell.boundingBox()).toEqual(box);
+  expect((await panel.boundingBox())!.x).toBeGreaterThan(0);
+  expect(await page.getByRole('dialog').count()).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(bell).toBeFocused();
+  await expect(heading).toHaveCount(0);
+  await expect.poll(() => panel.evaluate(el => getComputedStyle(el).clipPath)).toBe(collapsed);
+  await bell.click();
+  await page.mouse.click(30, 490);
+  await expect(bell).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('Overview water changes contour geometry and respects both reduced-motion settings', async ({
   page,
 }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await signIn(page);
-  const water = page.locator('main .th-water');
-  const transforms = () =>
-    water.evaluateAll(layers => layers.map(layer => getComputedStyle(layer).transform));
-  const initial = await transforms();
-  await expect.poll(transforms).not.toEqual(initial);
+  const water = page.locator('main [data-water-contour]').first();
+  const shape = () => water.getAttribute('d');
+  const initial = await shape();
+  await expect.poll(shape).not.toEqual(initial);
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expect(water.first()).toHaveCSS('animation-name', 'none');
-  await expect(water.last()).toHaveCSS('animation-name', 'none');
+  await expect(page.locator('main .th-liquid-field')).toHaveAttribute('data-motion', 'paused');
+  const paused = await shape();
+  await page.waitForTimeout(180);
+  await expect(water).toHaveAttribute('d', paused!);
 
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.getByRole('link', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Reduce motion: off' }).click();
   await page.getByRole('link', { name: 'Overview' }).click();
   await page.reload();
-  await expect(water.first()).toHaveCSS('animation-name', 'none');
-  await expect(water.last()).toHaveCSS('animation-name', 'none');
+  await expect(water).toHaveAttribute('d', paused!);
+  await page.waitForTimeout(180);
+  await expect(water).toHaveAttribute('d', paused!);
 });
 
 test('all routes retain a fixed shell and accessible scrolling at desktop, laptop, mobile and 200% zoom', async ({

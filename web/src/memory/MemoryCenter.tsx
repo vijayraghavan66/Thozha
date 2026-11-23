@@ -8,6 +8,7 @@ import {
   type WorkspaceApi,
 } from '../api/client';
 import { Chip, Head, Loading, Modal, Notice, Panel } from '../components/ui';
+import { LiquidCard } from '../components/LiquidSurface';
 import { field, formatDate, muted, outline, solid } from '../components/styles';
 
 const pageSize = 50;
@@ -271,8 +272,7 @@ export default function MemoryCenter({
           <ul className="max-h-[480px] overflow-y-auto p-1">
             {list.data?.items.map(memory => (
               <li key={memory.id} className="border-b border-white/10 py-4 last:border-none">
-                <button
-                  type="button"
+                <LiquidCard
                   className="block w-full break-words rounded-lg px-2 py-1 text-left hover:bg-white/10"
                   onClick={() => {
                     setSelected({ memory, deleting: false });
@@ -283,7 +283,7 @@ export default function MemoryCenter({
                   <span className="mt-1 block truncate text-[11px] text-[#a4a5af]">
                     {memory.tags.join(' · ') || 'No tags'}
                   </span>
-                </button>
+                </LiquidCard>
               </li>
             ))}
           </ul>

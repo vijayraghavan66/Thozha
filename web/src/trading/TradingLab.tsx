@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Chip, Head, Modal, Notice, Panel, Row, Stat, Unavailable } from '../components/ui';
+import { LiquidCard } from '../components/LiquidSurface';
 import { field, formatDate, muted, outline, solid } from '../components/styles';
 import {
   formatInr,
@@ -128,8 +129,7 @@ export default function TradingLab() {
         className="mb-6 flex flex-wrap gap-x-5 gap-y-2 border-b border-white/10"
       >
         {tabs.map(name => (
-          <button
-            type="button"
+          <LiquidCard
             key={name}
             aria-pressed={tab === name}
             onClick={() => {
@@ -139,7 +139,7 @@ export default function TradingLab() {
             className={`border-b-2 pb-3 text-xs ${tab === name ? 'border-white text-white' : 'border-transparent text-[#a4a5ad]'}`}
           >
             {name}
-          </button>
+          </LiquidCard>
         ))}
       </nav>
       {sandbox.storageError && (

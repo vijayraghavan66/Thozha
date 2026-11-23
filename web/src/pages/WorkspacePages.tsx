@@ -1,5 +1,7 @@
 import { useState, type FormEvent } from 'react';
-import { Chip, Head, Line, Panel, Row, Stat, Unavailable, Water } from '../components/ui';
+import { Chip, Head, Line, Panel, Row, Stat, Unavailable } from '../components/ui';
+import { LiquidCard } from '../components/LiquidSurface';
+import { WaterSurface } from '../components/WaterSurface';
 import { field, formatDate, muted, outline, solid } from '../components/styles';
 
 export function Overview({
@@ -7,11 +9,13 @@ export function Overview({
   onDevices,
   onSettings,
   connected,
+  reduced,
 }: {
   onChat: () => void;
   onDevices: () => void;
   onSettings: () => void;
   connected: boolean;
+  reduced: boolean;
 }) {
   return (
     <>
@@ -26,7 +30,7 @@ export function Overview({
         }
       />
       <div className="relative mb-5 min-h-[255px] overflow-hidden rounded-[24px] border border-white/[.15] bg-[#202126] p-8 md:p-10">
-        <Water />
+        <WaterSurface reduced={reduced} />
         <div className="relative max-w-[490px]">
           <div className="text-[10px] font-semibold tracking-[.25em] text-[#b8b9c0]">
             THOZHA / 3.0
@@ -147,8 +151,7 @@ export function DeviceHub() {
           </div>
           <div className="grid grid-cols-4 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
             {deviceExamples.map(example => (
-              <button
-                type="button"
+              <LiquidCard
                 key={example[0]}
                 aria-pressed={selected === example}
                 onClick={() => select(example)}
@@ -159,10 +162,10 @@ export function DeviceHub() {
                 </span>
                 <b className="mt-5 text-sm">{example[0]}</b>
                 <p className="mt-2 text-xs text-[#a4a5af]">Sample only</p>
-              </button>
+              </LiquidCard>
             ))}
           </div>
-          <Panel cls="mt-5 p-6">
+          <Panel key={selected[0]} cls="th-enter mt-5 p-6">
             <h2 className="font-semibold">{selected[0]}</h2>
             <p className={`mt-3 ${muted}`}>{selected[1]} No device was contacted.</p>
             <div className="mt-5 flex flex-wrap gap-3">
@@ -241,7 +244,7 @@ export function Blueprint() {
         reason="Web v1 has no mounted scheduler API. Drafts stay on this page until you leave; they are not saved, scheduled, enabled or run on your host."
       />
       {builder && (
-        <Panel cls="mt-5 max-w-[780px] p-6">
+        <Panel cls="th-enter mt-5 max-w-[780px] p-6">
           <h2 className="font-semibold">Create an unscheduled draft</h2>
           <form onSubmit={saveDraft} className="mt-5 space-y-4">
             <label className="block text-xs">
