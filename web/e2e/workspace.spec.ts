@@ -59,9 +59,15 @@ function waterBackingSize(canvas: Locator) {
 }
 
 async function createConversation(page: Page, title: string) {
-  await page.locator('main').getByRole('button', { name: '＋ New conversation' }).click();
-  await page.getByLabel('Conversation title (optional)').fill(title);
-  await page.getByRole('button', { name: 'Create conversation' }).click();
+  const session = await (await page.request.get('/v1/web/session')).json();
+  const response = await page.request.post('/v1/web/conversations', {
+    headers: { Origin: new URL(page.url()).origin, 'X-Thozha-CSRF': session.csrf_token },
+    data: { title },
+  });
+  expect(response.ok()).toBeTruthy();
+  const { id } = await response.json();
+  await page.goto(`/#/ai-workspace?conversation=${id}`);
+  await page.reload();
   await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toBeEditable();
 }
@@ -69,6 +75,56 @@ async function send(page: Page, content: string) {
   await page.getByRole('textbox', { name: 'Message Jarvis' }).fill(content);
   await page.getByRole('button', { name: /Send ↑/ }).click();
 }
+
+test('mobile slash commands stay local and refuse tasks without verified readiness', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+  await page.locator('main').getByRole('button', { name: '＋ New conversation' }).click();
+  const writes: string[] = [];
+  page.on('request', request => {
+    if (request.method() === 'POST') writes.push(new URL(request.url()).pathname);
+  });
+  const composer = page.getByRole('textbox', { name: 'Message Jarvis' });
+  const palette = page.getByRole('listbox', { name: 'Composer commands' });
+  await composer.fill('/');
+  await expect(palette.getByRole('option')).toHaveCount(3);
+  expect(
+    (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
+      .violations
+  ).toEqual([]);
+  await composer.press('ArrowDown');
+  await expect(palette.getByRole('option', { selected: true })).toContainText('/status');
+  await composer.press('Escape');
+  await expect(palette).toHaveCount(0);
+  await composer.fill('/he');
+  await composer.press('Tab');
+  await expect(composer).toHaveValue('/help ');
+  await expect(composer).toBeFocused();
+  await composer.press('Enter');
+  const help = page.getByRole('dialog', { name: 'Composer commands' });
+  await expect(help).toContainText('/research');
+  await expect(help).toContainText('Not enabled');
+  await page.keyboard.press('Escape');
+  await expect(composer).toBeFocused();
+  await composer.fill('/st');
+  await palette.getByRole('option', { name: /\/status/ }).click();
+  await composer.press('Enter');
+  const status = page.getByRole('dialog', { name: 'Host readiness' });
+  await expect(status).toContainText('Host reports: degraded');
+  await expect(status).toContainText('No active device mapping was verified');
+  await page.keyboard.press('Escape');
+  await composer.fill('/not-a-command');
+  await composer.press('Enter');
+  await expect(page.getByRole('alert')).toContainText('Unknown command');
+  await composer.fill('/task Read host status');
+  await composer.press('Enter');
+  await expect(page.getByLabel('Objective')).toHaveValue('Read host status');
+  await expect(page.getByText(/No active device mapping was verified/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Submit task', exact: true })).toBeDisabled();
+  expect(writes).toEqual([]);
+});
 
 test('private screens require the real cookie session and sign-out revokes it', async ({
   page,
@@ -162,7 +218,7 @@ test('persists actual cancellation and exposes engine failure and prompt recover
   await signIn(page, '/#/ai-workspace');
   await createConversation(page, 'Cancellation verification');
   await send(page, 'Check cancellation behavior');
-  await page.getByRole('button', { name: 'Cancel response' }).click();
+  await page.getByRole('button', { name: 'Stop generating' }).click();
   await expect(page.getByText('Response cancelled.', { exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Fixture response' })).toHaveCount(0);
   await page.getByText(/Response events \(/).click();
@@ -378,12 +434,23 @@ test('new conversation from another section waits for the real chat module and k
     .getByRole('complementary', { name: 'Workspace sidebar' })
     .getByRole('button', { name: 'New conversation' })
     .click();
-  await expect(page.getByRole('dialog', { name: 'New conversation' })).toBeVisible();
-  await page.getByLabel('Conversation title (optional)').fill('Created from Settings');
-  await page.getByRole('button', { name: 'Create conversation' }).click();
-  await expect(page.getByRole('heading', { name: 'Created from Settings' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'New chat', exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'New conversation' })).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toBeFocused();
+  const writes: string[] = [];
+  page.on('request', request => {
+    if (request.method() === 'POST') writes.push(new URL(request.url()).pathname);
+  });
+  const composer = page.getByRole('textbox', { name: 'Message Jarvis' });
+  const firstMessage = 'Check my Mac files and write a summary';
+  await composer.fill(firstMessage);
+  await composer.press('Enter');
+  await composer.press('Enter');
+  await expect(page.getByRole('heading', { name: firstMessage })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
+  expect(writes).toEqual(['/v1/web/conversations', expect.stringMatching(/\/messages\/stream$/)]);
   await page.reload();
-  await expect(page.getByRole('link', { name: 'Created from Settings' })).toBeVisible();
+  await expect(page.getByRole('link', { name: firstMessage })).toBeVisible();
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
   await page.getByRole('button', { name: 'Delete permanently' }).click();
 });

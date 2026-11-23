@@ -5,7 +5,6 @@ import type { ApprovalInput, PairedDevice } from '../api/control';
 import { formatDate, muted, outline, solid } from '../components/styles';
 import { Chip, Loading, Modal, Notice, Panel, Row } from '../components/ui';
 import { approvalsKey, controlError, tasksKey, useApprovals } from './controlState';
-import { DevicePicker } from './DevicePicker';
 
 function ApprovalReview({
   api,
@@ -21,7 +20,6 @@ function ApprovalReview({
   close: () => void;
 }) {
   const cache = useQueryClient();
-  const [device, selectDevice] = useState('');
   const [expired, setExpired] = useState(false);
   const detail = useQuery({
     queryKey: ['web-control', 'approval', id],
@@ -45,11 +43,8 @@ function ApprovalReview({
       void cache.invalidateQueries({ queryKey: tasksKey });
     },
   });
-  const deviceId = devices.some(item => item.device_id === device)
-    ? device
-    : devices.length === 1
-      ? devices[0].device_id
-      : '';
+  const deviceId = approval?.requester_device_id ?? '';
+  const requester = devices.find(item => item.device_id === deviceId);
   const uncertain = decision.isError && mayHaveBeenAccepted(decision.error);
   const sameDecision =
     uncertain &&
@@ -143,19 +138,10 @@ function ApprovalReview({
           )}
           {approval.status === 'PENDING' && (
             <div className="mt-4">
-              <DevicePicker
-                devices={devices}
-                value={deviceId}
-                change={selectDevice}
-                disabled={!connected || decision.isPending || uncertain}
-                label="Approval requester device"
-              />
-              {devices.length > 1 && (
-                <p className={`mt-2 ${muted}`}>
-                  Choose the device that owns this task. Web v1 does not include its ID in approval
-                  details; the server rejects any mismatch.
-                </p>
-              )}
+              <p className={`break-all ${muted}`}>
+                Approval requester device: {requester ? `${requester.device_name} · ` : ''}
+                {deviceId}
+              </p>
             </div>
           )}
         </>

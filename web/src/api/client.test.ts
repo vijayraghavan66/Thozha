@@ -123,7 +123,7 @@ describe('owner-scoped supervisor API', () => {
     });
     await expect(control.submitTask(body)).rejects.toMatchObject({
       status: 422,
-      detail: undefined,
+      detail: 'The host rejected one or more request fields.',
     });
     await expect(api.login({ username: 'test', password: 'temporary' })).rejects.toMatchObject({
       status: 401,

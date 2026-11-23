@@ -18,6 +18,32 @@ const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const date = z.iso.datetime({ offset: true });
 const sequence = z.number().int().nonnegative();
 const object = z.record(z.string(), z.unknown());
+const componentReadiness = z.object({
+  state: z.enum(['ready', 'unavailable', 'unknown']),
+  reason: z.string().optional(),
+});
+const readiness = z.object({
+  status: z.enum(['ready', 'degraded']),
+  components: z.object({
+    authentication: z.object({
+      browser_session: z.literal('authenticated'),
+      codex_sdk: z.enum([
+        'not_reported',
+        'missing',
+        'credential_present_unverified',
+        'verified_this_process',
+        'unavailable',
+      ]),
+    }),
+    device_mapping: componentReadiness.extend({
+      active_device_count: z.number().int().nonnegative(),
+    }),
+    engine: componentReadiness.extend({ check: z.enum(['preflight', 'runtime']).optional() }),
+    supervisor_worker: componentReadiness,
+    automation_scheduler: componentReadiness,
+  }),
+}) satisfies z.ZodType<Schemas['WebSupervisorReadiness']>;
+export type SupervisorReadiness = z.infer<typeof readiness>;
 export const taskState = z.enum([
   'CREATED',
   'PLANNING',
@@ -60,6 +86,7 @@ const approval = z.object({
   id,
   task_id: id,
   operation: z.string(),
+  requester_device_id: id,
   target_resource: z.string(),
   canonical_arguments: object.optional(),
   operation_digest: digest,
@@ -194,6 +221,8 @@ async function verifiedZip(response: Response, item: SupervisorArtifact, signal:
 export function createControlApi(request: JsonRequest, exchange: Exchange, csrf: string) {
   const write = { method: 'POST', body: {}, csrf } as const;
   return {
+    supervisorReadiness: (signal?: AbortSignal) =>
+      request('/v1/web/supervisor/readiness' satisfies keyof paths, 200, readiness, { signal }),
     listTasks: (state: 'active' | 'completed' | 'all', limit: number, signal?: AbortSignal) =>
       request(
         `${tasksPath}?state=${state}&limit=${limit}`,

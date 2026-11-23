@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import openapiTS, { astToString } from 'openapi-typescript';
 import { parse } from 'yaml';
 
-const revision = 'a83d163d9a5e6aa4ae6402025e3318246521aa83';
+const revision = '0e4cd9341ecf40ddf4b0232322421d5e77c3380c';
 const path = 'openapi/thozha-v1.yaml';
 const document = parse(
   process.argv[2]
@@ -28,14 +28,7 @@ function followReferences(value) {
     if (!Object.hasOwn(components[group], name)) {
       const definition = document.components[group][name];
       if (!definition) throw new Error(`Unresolved OpenAPI component: ${value.$ref}`);
-      // v1 references a missing Error schema; the client consumes only the HTTP status.
-      const unresolvedError =
-        group === 'responses' &&
-        !document.components.schemas.Error &&
-        definition.content?.['application/json']?.schema?.$ref === '#/components/schemas/Error';
-      components[group][name] = unresolvedError
-        ? { description: definition.description }
-        : definition;
+      components[group][name] = definition;
       followReferences(components[group][name]);
     }
   }

@@ -1,4 +1,4 @@
-// Generated from openapi/thozha-v1.yaml at a83d163d9a5e6aa4ae6402025e3318246521aa83.
+// Generated from openapi/thozha-v1.yaml at 0e4cd9341ecf40ddf4b0232322421d5e77c3380c.
 // Do not edit. Run npm run contract:generate.
 
 export interface paths {
@@ -213,6 +213,23 @@ export interface paths {
         post?: never;
         /** @description Requires exact same-origin Origin, application/json, and X-Thozha-CSRF. */
         delete: operations["deleteWebMemory"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/web/supervisor/readiness": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Returns only safe component states and reason codes. Codex credential file presence is preflight evidence and is not reported as runtime authentication unless a model turn has succeeded in this process. */
+        get: operations["getWebSupervisorReadiness"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -609,6 +626,11 @@ export interface components {
             expires_at: number;
             csrf_token: string;
         };
+        Error: {
+            detail: string | {
+                [key: string]: unknown;
+            } | unknown[];
+        };
         WebConversationCreate: {
             title?: string | null;
         };
@@ -703,9 +725,35 @@ export interface components {
             /** @constant */
             search_mode: "substring";
         };
+        WebSupervisorReadiness: {
+            /** @enum {string} */
+            status: "ready" | "degraded";
+            components: {
+                authentication: {
+                    /** @constant */
+                    browser_session: "authenticated";
+                    /** @enum {string} */
+                    codex_sdk: "not_reported" | "missing" | "credential_present_unverified" | "verified_this_process" | "unavailable";
+                };
+                device_mapping: components["schemas"]["WebComponentReadiness"] & {
+                    active_device_count: number;
+                };
+                engine: components["schemas"]["WebComponentReadiness"] & {
+                    /** @enum {string} */
+                    check?: "preflight" | "runtime";
+                };
+                supervisor_worker: components["schemas"]["WebComponentReadiness"];
+                automation_scheduler: components["schemas"]["WebComponentReadiness"];
+            };
+        };
+        WebComponentReadiness: {
+            /** @enum {string} */
+            state: "ready" | "unavailable" | "unknown";
+            reason?: string;
+        };
         WebTaskCreate: {
             objective: string;
-            capability_scope: ("read_only" | "assistant" | "development")[];
+            capability_scope: ("read_only" | "mac_read" | "assistant" | "development")[];
             idempotency_key: string;
             requester_device_id: string;
         };
@@ -733,6 +781,13 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        WebTaskCancellation: {
+            task_id: string;
+            /** @enum {string} */
+            state: "CREATED" | "PLANNING" | "RUNNING" | "VERIFYING" | "WAITING_APPROVAL" | "PAUSED" | "COMPLETED" | "FAILED" | "CANCELLED";
+            cancelled: boolean;
+            action_may_have_started: boolean;
+        };
         Approval: {
             id: string;
             task_id: string;
@@ -741,12 +796,19 @@ export interface components {
             canonical_arguments?: {
                 [key: string]: unknown;
             };
+            arguments?: {
+                [key: string]: unknown;
+            };
             operation_digest: string;
+            reason?: string;
+            /** @constant */
+            risk?: "requires_user_approval";
             status: string;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             expires_at: string;
+            requester_device_id: string;
         };
         WebApprovalDecision: {
             /** @enum {string} */
@@ -858,42 +920,54 @@ export interface components {
             headers: {
                 [name: string]: unknown;
             };
-            content?: never;
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
         };
         /** @description Authenticated caller is not authorized for this resource */
         Forbidden: {
             headers: {
                 [name: string]: unknown;
             };
-            content?: never;
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
         };
         /** @description Backend, engine, or resource unavailable */
         Unavailable: {
             headers: {
                 [name: string]: unknown;
             };
-            content?: never;
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
         };
         /** @description Resource not found */
         NotFound: {
             headers: {
                 [name: string]: unknown;
             };
-            content?: never;
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
         };
         /** @description Request validation failure */
         InvalidRequest: {
             headers: {
                 [name: string]: unknown;
             };
-            content?: never;
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
         };
         /** @description State, ownership, digest, expiry, or idempotency conflict */
         Conflict: {
             headers: {
                 [name: string]: unknown;
             };
-            content?: never;
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
         };
     };
     parameters: {
@@ -1338,6 +1412,27 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
+    getWebSupervisorReadiness: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Supervisor, engine, device-mapping, and automation readiness. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebSupervisorReadiness"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
     listWebSupervisorTasks: {
         parameters: {
             query?: {
@@ -1378,7 +1473,16 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Task accepted or idempotent replay. */
+            /** @description Completed idempotent replay; no worker wake occurs. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebTaskResult"];
+                };
+            };
+            /** @description Newly accepted task or nonterminal idempotent replay. */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -1494,7 +1598,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebTaskResult"];
+                    "application/json": components["schemas"]["WebTaskCancellation"];
                 };
             };
             401: components["responses"]["Unauthorized"];

@@ -177,12 +177,15 @@ async function readControlError(response: Response, signal: AbortSignal) {
   });
   const parsed = z
     .object({
-      detail: z.union([z.string(), z.object({ reason: z.string() })]),
+      detail: z.union([z.string(), z.record(z.string(), z.unknown()), z.array(z.unknown())]),
     })
     .safeParse(json);
   const detail = parsed.data?.detail;
+  if (Array.isArray(detail)) return 'The host rejected one or more request fields.';
   const message = typeof detail === 'string' ? detail : detail?.reason;
-  return message && message.length <= 300 && !/[\r\n]/.test(message) ? message : undefined;
+  return typeof message === 'string' && message.length <= 300 && !/[\r\n]/.test(message)
+    ? message
+    : undefined;
 }
 
 export function createWebApi(fetcher: typeof fetch = globalThis.fetch.bind(globalThis)) {

@@ -6,6 +6,7 @@ import { signIn } from './session';
 
 const studio = '/#/developer-studio';
 const taskPath = '/v1/web/tasks';
+const readinessPath = '/v1/web/supervisor/readiness';
 const authHeaders = async (page: Page) => {
   const response = await page.request.get('/v1/web/session');
   expect(response.status()).toBe(200);
@@ -46,14 +47,13 @@ test('prefills without execution, resumes real supervisor SSE, and reloads the v
 }) => {
   await signIn(page, '/#/ai-workspace');
   await page.locator('main').getByRole('button', { name: '＋ New conversation' }).click();
-  await page.getByLabel('Conversation title (optional)').fill('Supervisor handoff fixture');
-  await page.getByRole('button', { name: 'Create conversation' }).click();
-  await page.getByRole('textbox', { name: 'Message Jarvis' }).fill('Fixture slow task');
+  const composer = page.getByRole('textbox', { name: 'Message Jarvis' });
+  await composer.fill('/task Fixture slow task');
   const writes: string[] = [];
   page.on('request', request => {
     if (request.method() === 'POST') writes.push(new URL(request.url()).pathname);
   });
-  await page.getByRole('button', { name: 'Review as supervisor task' }).click();
+  await page.getByRole('button', { name: 'Review task', exact: true }).click();
   await expect(page.getByLabel('Objective')).toHaveValue('Fixture slow task');
   expect(writes).toEqual([]);
 
@@ -74,6 +74,7 @@ test('prefills without execution, resumes real supervisor SSE, and reloads the v
       response.headers()['content-type']?.startsWith('text/event-stream')
   );
   const task = await submitTask(page);
+  expect(writes).toEqual([taskPath]);
   expect((await streamed).status()).toBe(200);
   expect(requests.length).toBeGreaterThanOrEqual(2);
   expect(Number(requests[1].cursor)).toBeGreaterThan(0);
@@ -100,6 +101,42 @@ test('prefills without execution, resumes real supervisor SSE, and reloads the v
     state: 'COMPLETED',
     idempotent_replay: true,
   });
+});
+
+test('does not post a slash task if the mapped worker becomes unavailable after review', async ({
+  page,
+}) => {
+  await signIn(page, '/#/ai-workspace');
+  await page.locator('main').getByRole('button', { name: '＋ New conversation' }).click();
+  await page.getByRole('textbox', { name: 'Message Jarvis' }).fill('/task Read host status');
+  await page.getByRole('button', { name: 'Review task', exact: true }).click();
+  await pairedDevice(page);
+  const submit = page.getByRole('button', { name: 'Submit task', exact: true });
+  await expect(submit).toBeEnabled();
+  await page.route(`**${readinessPath}`, async route => {
+    const response = await route.fetch();
+    const report = await response.json();
+    expect(report.components.device_mapping.active_device_count).toBeGreaterThan(0);
+    await route.fulfill({
+      response,
+      json: {
+        ...report,
+        status: 'degraded',
+        components: {
+          ...report.components,
+          supervisor_worker: { state: 'unavailable', reason: 'runner_unavailable' },
+        },
+      },
+    });
+  });
+  const writes: string[] = [];
+  page.on('request', request => {
+    if (request.method() === 'POST') writes.push(new URL(request.url()).pathname);
+  });
+  await submit.click();
+  await expect(page.getByText(/Supervisor worker is not ready/)).toBeVisible();
+  await expect(submit).toBeDisabled();
+  expect(writes).toEqual([]);
 });
 
 test('rejects unauthorized task writes and records cancellation and failure from the backend', async ({
@@ -164,14 +201,10 @@ test('reviews the exact operation, rejects digest mismatch, and records explicit
     await expect(dialog).toContainText('screen-coordinate');
     await expect(dialog).toContainText('"x": 1');
     await expect(dialog).toContainText(approval.operation_digest);
-    await expect(dialog.getByRole('button', { name: 'Approve this operation' })).toBeDisabled();
-    const picker = dialog.getByLabel('Approval requester device');
-    const value = await picker
-      .locator('option')
-      .filter({ hasText: 'Isolated test pairing' })
-      .getAttribute('value');
-    expect(value).toBeTruthy();
-    await picker.selectOption(value!);
+    await expect(dialog).toContainText(
+      `Approval requester device: Isolated test pairing · ${approval.requester_device_id}`
+    );
+    expect(approval.requester_device_id).toBe(task.request.requester_device_id);
     const decisionPath = `/v1/web/approvals/${approval.id}/decision`;
     if (choice === 'Reject') {
       const stale = await page.request.post(decisionPath, {
@@ -180,7 +213,7 @@ test('reviews the exact operation, rejects digest mismatch, and records explicit
           decision: 'reject',
           task_id: task.id,
           expected_operation_digest: '0'.repeat(64),
-          requester_device_id: await picker.inputValue(),
+          requester_device_id: approval.requester_device_id,
           idempotency_key: randomUUID(),
         },
       });

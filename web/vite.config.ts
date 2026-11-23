@@ -19,6 +19,7 @@ const webPaths = `^/v1/web/(?:${[
   'session(?:/login|/logout)?',
   `conversations(?:/${uuid}(?:/archive|/messages(?:/stream|/${uuid}/cancel)?)?)?`,
   `memory(?:/search|/${id})?`,
+  'supervisor/readiness',
   `tasks(?:/${id}(?:/events(?:/stream)?|/cancel|/artifacts(?:/[a-f0-9]{64}/download)?)?)?`,
   `approvals/(?:pending|${id}(?:/decision)?)`,
   `devices(?:/${id}(?:/revoke)?)?`,

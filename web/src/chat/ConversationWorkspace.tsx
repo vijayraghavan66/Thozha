@@ -25,6 +25,8 @@ import { field, formatDate, muted, outline, solid } from '../components/styles';
 import { MarkdownMessage } from './MarkdownMessage';
 import { WaterSurface } from '../components/WaterSurface';
 import { detailKey, isPendingResponse, useConversationSnapshot } from './updates';
+import { CommandResult } from './CommandResult';
+import { parseSlash, slashCommands, titleFromMessage } from './slashCommands';
 
 const listKey = ['conversations'] as const;
 const maxMessageLength = 16_000;
@@ -45,7 +47,8 @@ const failures: Record<string, string> = {
 };
 type Attempt = { id: string; key: string; text: string };
 type SendIssue = { attempt: Attempt; message: string; uncertain: boolean };
-type Dialog = { type: 'create' } | { type: 'archive' | 'delete'; conversation: Conversation };
+type Dialog = { type: 'archive' | 'delete'; conversation: Conversation };
+type ConversationOperation = Dialog | { type: 'create'; text: string };
 type LiveResponse = {
   conversationId: string;
   responseId: string;
@@ -92,8 +95,15 @@ function Message({
                     : 'Generating response…'}
           </span>
           {!cancellation && (
-            <button type="button" className={outline} onClick={cancel} disabled={!cancel}>
-              Cancel response
+            <button
+              type="button"
+              className="grid size-8 place-items-center rounded-md text-[#c7c8ce] hover:bg-white/10 disabled:opacity-50"
+              onClick={cancel}
+              disabled={!cancel}
+              aria-label="Stop generating"
+              title="Stop generating"
+            >
+              <span aria-hidden="true" className="size-2.5 rounded-[2px] bg-current" />
             </button>
           )}
         </div>
@@ -143,11 +153,20 @@ export default function ConversationWorkspace({
   const [receipts, setReceipts] = useState<Record<string, string | undefined>>({});
   const [live, setLive] = useState<LiveResponse>();
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [fresh, setFresh] = useState(false);
+  const [firstDraft, setFirstDraft] = useState('');
+  const [slashError, setSlashError] = useState('');
+  const [commandResult, setCommandResult] = useState<'status' | 'help'>();
+  const [paletteDismissed, setPaletteDismissed] = useState(false);
+  const [paletteIndex, setPaletteIndex] = useState(0);
   const [commandError, setCommandError] = useState('');
   const [cancelError, setCancelError] = useState<{ id: string; message: string }>();
   const [notice, setNotice] = useState('');
   const log = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const focusDraft = useRef(false);
+  const createLock = useRef(false);
+  const createUncertain = useRef(false);
   const followLatest = useRef(true);
   const previousConversation = useRef<string | null>(null);
   const activeSend = useRef(new Set<string>());
@@ -160,12 +179,13 @@ export default function ConversationWorkspace({
       if (!window.location.hash.startsWith('#/ai-workspace')) return;
       const params = new URLSearchParams(window.location.hash.split('?')[1]);
       if (params.has('new')) {
-        setCommandError('');
-        setDialog({ type: 'create' });
+        startConversation();
         return;
       }
       const requested = params.get('conversation');
       if (requested) {
+        setFresh(false);
+        setSlashError('');
         setArchived(false);
         setSelection(requested);
       }
@@ -177,7 +197,7 @@ export default function ConversationWorkspace({
 
   const list = useQuery({ queryKey: listKey, queryFn: ({ signal }) => api.list(signal), enabled });
   const items = list.data?.items.filter(item => Boolean(item.archived_at) === archived) ?? [];
-  const selected = items.find(item => item.id === selection) ?? items[0];
+  const selected = fresh ? undefined : (items.find(item => item.id === selection) ?? items[0]);
   const id = selected?.id ?? null;
   const detail = useConversationSnapshot(
     api.get,
@@ -197,14 +217,30 @@ export default function ConversationWorkspace({
       ),
     [messages]
   );
-  const draft = id ? (drafts[id] ?? '') : '';
+  const draft = id ? (drafts[id] ?? '') : fresh ? firstDraft : '';
+  const slash = parseSlash(draft);
+  const candidates = slash?.completing
+    ? slashCommands.filter(entry => !('deferred' in entry) && entry.name.startsWith(slash.name))
+    : [];
+  const paletteOpen = Boolean(active && !paletteDismissed && slash?.completing);
+  const highlighted = candidates[paletteIndex] ?? candidates[0];
+  const paletteId = `${fieldId}-commands`;
   const issue = id ? issues[id] : undefined;
   const receipt = id ? receipts[id] : undefined;
   const awaitingHistory = Boolean(receipt && !messages?.some(message => message.id === receipt));
   const pending = Boolean(
     messages?.some(message => message.role === 'assistant' && isPendingResponse(message.status))
   );
-  const canWrite = Boolean(id && snapshot && !detail.isError && !archived && connected);
+  const canWrite = Boolean(
+    !archived && connected && (fresh || (id && snapshot && !detail.isError))
+  );
+
+  useLayoutEffect(() => {
+    if (active && canWrite && focusDraft.current && composer.current) {
+      focusDraft.current = false;
+      composer.current.focus({ preventScroll: true });
+    }
+  });
   const pendingCancellation = new Set(
     snapshot?.events
       .filter(event => event.event_type === 'cancellation_requested')
@@ -227,22 +263,27 @@ export default function ConversationWorkspace({
   }, [active, awaitingHistory, id, live?.partial, messages, reduced]);
 
   const command = useMutation({
-    mutationFn: async ({ dialog, title }: { dialog: Dialog; title: string }) => {
-      if (dialog.type === 'create') return api.create(title ? { title } : {});
-      if (dialog.type === 'archive') await api.archive(dialog.conversation.id);
-      else await api.delete(dialog.conversation.id);
+    mutationFn: async (operation: ConversationOperation) => {
+      if (operation.type === 'create')
+        return api.create({ title: titleFromMessage(operation.text) });
+      if (operation.type === 'archive') await api.archive(operation.conversation.id);
+      else await api.delete(operation.conversation.id);
       return null;
     },
-    onSuccess: async (created, { dialog: operation }) => {
+    onSuccess: async (created, operation) => {
       await cache.cancelQueries({ queryKey: listKey });
-      if (created) {
+      if (created && operation.type === 'create') {
         cache.setQueryData<{ items: Conversation[] }>(listKey, initial => ({
-          items: [created, ...(initial?.items ?? [])],
+          items: [created, ...(initial?.items ?? []).filter(item => item.id !== created.id)],
         }));
+        setDrafts(previous => ({ ...previous, [created.id]: operation.text }));
+        setFirstDraft('');
+        setFresh(false);
         setArchived(false);
         setSelection(created.id);
-        window.location.hash = `#/ai-workspace?conversation=${encodeURIComponent(created.id)}`;
-        setNotice('Conversation created.');
+        if (window.location.hash.startsWith('#/ai-workspace') || !window.location.hash)
+          window.location.hash = `#/ai-workspace?conversation=${encodeURIComponent(created.id)}`;
+        beginSend({ id: created.id, key: crypto.randomUUID(), text: operation.text });
       } else if (operation.type !== 'create') {
         const removedId = operation.conversation.id;
         cache.setQueryData<{ items: Conversation[] }>(listKey, initial => ({
@@ -274,13 +315,19 @@ export default function ConversationWorkspace({
       setDialog(null);
       void cache.invalidateQueries({ queryKey: listKey });
     },
-    onError: (error, { dialog: operation }) => {
+    onError: (error, operation) => {
       const guidance =
         operation.type === 'create' && mayHaveBeenAccepted(error)
-          ? ' The server may have created it. Close this dialog and check the conversation list before trying again.'
+          ? ' The server may have saved this conversation. Check the sidebar before starting a new chat.'
           : '';
-      setCommandError(errorText(error, 'change this conversation') + guidance);
+      if (operation.type === 'create') {
+        createUncertain.current = Boolean(guidance);
+        setSlashError(errorText(error, 'create the conversation') + guidance);
+      } else setCommandError(errorText(error, 'change this conversation'));
       if (guidance) void cache.invalidateQueries({ queryKey: listKey });
+    },
+    onSettled: () => {
+      createLock.current = false;
     },
   });
 
@@ -382,7 +429,12 @@ export default function ConversationWorkspace({
 
   const sending = send.isPending;
   const composerDisabled =
-    !canWrite || sending || awaitingHistory || pending || Boolean(issue?.uncertain);
+    !canWrite ||
+    command.isPending ||
+    sending ||
+    awaitingHistory ||
+    pending ||
+    Boolean(issue?.uncertain);
 
   function beginSend(attempt: Attempt, recovery = false) {
     if (activeSend.current.size || !connected) return;
@@ -394,8 +446,65 @@ export default function ConversationWorkspace({
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = draft.trim();
-    if (!id || composerDisabled || !value) return;
-    beginSend({ id, key: crypto.randomUUID(), text: value });
+    if (composerDisabled || !value || createLock.current) return;
+    setPaletteDismissed(true);
+    if (slash) {
+      if (!slash.command || 'deferred' in slash.command) {
+        setSlashError(
+          slash.command
+            ? `/${slash.name} is not enabled. Use /help for available commands.`
+            : 'Unknown command. Use /help for available commands.'
+        );
+        return;
+      }
+      if ((slash.command.name === 'task') !== Boolean(slash.argument)) {
+        setSlashError(`Usage: ${slash.command.usage}`);
+        return;
+      }
+      if (slash.command.name === 'task') {
+        setSlashError('');
+        onReviewTask(slash.argument);
+      } else {
+        updateDraft('');
+        setCommandResult(slash.command.name);
+      }
+      return;
+    }
+    if (id) beginSend({ id, key: crypto.randomUUID(), text: value });
+    else if (fresh && !createUncertain.current && !activeSend.current.size) {
+      createLock.current = true;
+      setSlashError('');
+      command.mutate({ type: 'create', text: value });
+    }
+  }
+
+  function startConversation() {
+    if (createLock.current) return;
+    focusDraft.current = true;
+    createUncertain.current = false;
+    setFresh(true);
+    setArchived(false);
+    setFirstDraft('');
+    setDialog(null);
+    setNotice('');
+    setSlashError('');
+    setPaletteDismissed(false);
+    setPaletteIndex(0);
+    composer.current?.focus({ preventScroll: true });
+  }
+
+  function updateDraft(text: string) {
+    if (id) setDrafts(previous => ({ ...previous, [id]: text }));
+    else if (fresh) setFirstDraft(text);
+    setSlashError('');
+    setPaletteDismissed(false);
+    setPaletteIndex(0);
+  }
+
+  function completeCommand(name: string) {
+    updateDraft(`/${name} `);
+    setPaletteDismissed(true);
+    composer.current?.focus({ preventScroll: true });
   }
 
   function openDialog(next: Dialog) {
@@ -403,7 +512,7 @@ export default function ConversationWorkspace({
     setNotice('');
     setDialog(next);
   }
-  const selectedName = snapshot?.title ?? selected?.title;
+  const selectedName = fresh ? 'New chat' : (snapshot?.title ?? selected?.title);
 
   return (
     <>
@@ -416,8 +525,8 @@ export default function ConversationWorkspace({
             <button
               type="button"
               className={outline}
-              disabled={!connected || list.isPending}
-              onClick={() => openDialog({ type: 'create' })}
+              disabled={!connected || list.isPending || command.isPending}
+              onClick={startConversation}
             >
               ＋ New conversation
             </button>
@@ -525,7 +634,7 @@ export default function ConversationWorkspace({
               ref={log}
               aria-label="Conversation messages"
               role="region"
-              tabIndex={snapshot?.messages.length ? 0 : undefined}
+              tabIndex={fresh || snapshot?.messages.length ? 0 : undefined}
               onScroll={event => {
                 const el = event.currentTarget;
                 followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
@@ -534,20 +643,33 @@ export default function ConversationWorkspace({
             >
               {!id && list.isSuccess && (
                 <div className="th-v4-empty m-auto text-center">
+                  {fresh && (
+                    <div className="th-v4-empty-material">
+                      <WaterSurface reduced={reduced || !active} />
+                    </div>
+                  )}
                   <span className="th-v4-empty-mark" aria-hidden="true">
                     ✳
                   </span>
-                  <h2>{archived ? 'Your archive is quiet.' : 'Make room for a thought.'}</h2>
+                  <h2>
+                    {fresh
+                      ? 'Where should we begin?'
+                      : archived
+                        ? 'Your archive is quiet.'
+                        : 'Make room for a thought.'}
+                  </h2>
                   <p>
                     {archived
                       ? 'No archived conversations.'
-                      : 'Start a conversation. Your history stays on your Thozha host.'}
+                      : fresh
+                        ? 'Send your first message to save this chat.'
+                        : 'Start a conversation. Your history stays on your Thozha host.'}
                   </p>
-                  {!archived && (
+                  {!archived && !fresh && (
                     <button
                       type="button"
                       className={solid}
-                      onClick={() => openDialog({ type: 'create' })}
+                      onClick={startConversation}
                       disabled={!connected}
                     >
                       New conversation
@@ -660,21 +782,87 @@ export default function ConversationWorkspace({
                 )}
               </div>
             )}
-            {!archived && (
+            {!archived && (id || fresh) && (
               <form
                 onSubmit={submit}
                 className="m-4 rounded-2xl border border-white/20 bg-[#222329] p-2"
               >
+                {paletteOpen && (
+                  <div className="mb-2 rounded-xl border border-white/15 bg-[#1c1d22] px-2 py-1 text-xs">
+                    <p className="px-2 py-1 text-[#c4c5cb]">Composer commands</p>
+                    <ul
+                      id={paletteId}
+                      role="listbox"
+                      aria-label="Composer commands"
+                      className="max-h-[min(30dvh,12rem)] overflow-y-auto"
+                    >
+                      {candidates.map(entry => (
+                        <li
+                          key={entry.name}
+                          id={`${paletteId}-${entry.name}`}
+                          role="option"
+                          aria-selected={highlighted?.name === entry.name}
+                          className="cursor-pointer rounded-md px-2 py-2 aria-selected:bg-white/15 hover:bg-white/10"
+                          onMouseDown={event => event.preventDefault()}
+                          onClick={() => completeCommand(entry.name)}
+                        >
+                          <code>{entry.usage}</code>
+                          <span className="ml-2 text-[#c4c5cb]">{entry.description}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    {!candidates.length && (
+                      <p role="status" className="px-2 py-1">
+                        No matching commands. Use /help for the command list.
+                      </p>
+                    )}
+                  </div>
+                )}
+                {slashError && <Notice error>{slashError}</Notice>}
+                {slash?.command && !('deferred' in slash.command) && (
+                  <div className="px-2 pt-1">
+                    <Chip>{slash.command.usage} · Command</Chip>
+                  </div>
+                )}
                 <textarea
                   ref={composer}
                   rows={2}
                   maxLength={maxMessageLength}
                   value={draft}
-                  readOnly={!canWrite || sending || Boolean(issue?.uncertain)}
-                  onChange={event => {
-                    if (id) setDrafts(previous => ({ ...previous, [id]: event.target.value }));
-                  }}
+                  readOnly={!canWrite || command.isPending || sending || Boolean(issue?.uncertain)}
+                  onChange={event => updateDraft(event.target.value)}
                   onKeyDown={event => {
+                    if (event.nativeEvent.isComposing) return;
+                    if (paletteOpen && event.key === 'Escape') {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setPaletteDismissed(true);
+                      return;
+                    }
+                    if (
+                      paletteOpen &&
+                      highlighted &&
+                      ['ArrowUp', 'ArrowDown'].includes(event.key)
+                    ) {
+                      event.preventDefault();
+                      const offset = event.key === 'ArrowUp' ? -1 : 1;
+                      const next = (paletteIndex + offset + candidates.length) % candidates.length;
+                      setPaletteIndex(next);
+                      document
+                        .getElementById(`${paletteId}-${candidates[next].name}`)
+                        ?.scrollIntoView({ block: 'nearest' });
+                      return;
+                    }
+                    if (
+                      paletteOpen &&
+                      highlighted &&
+                      !event.shiftKey &&
+                      ['Enter', 'Tab'].includes(event.key)
+                    ) {
+                      event.preventDefault();
+                      completeCommand(highlighted.name);
+                      return;
+                    }
                     if (
                       event.key === 'Enter' &&
                       !event.shiftKey &&
@@ -687,18 +875,35 @@ export default function ConversationWorkspace({
                   placeholder="Message Thozha…"
                   aria-label="Message Jarvis"
                   aria-describedby={fieldId}
+                  aria-autocomplete="list"
+                  aria-controls={paletteOpen ? paletteId : undefined}
+                  aria-activedescendant={
+                    paletteOpen && highlighted ? `${paletteId}-${highlighted.name}` : undefined
+                  }
                   className="min-h-[48px] w-full resize-y rounded-lg bg-transparent px-3 py-2 text-xs leading-6 text-white placeholder:text-[#a4a5af]"
                 />
                 <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1">
                   <span id={fieldId} className="text-[10px] text-[#a4a5af]">
-                    Enter to send · Shift+Enter for newline
+                    {paletteOpen
+                      ? 'Arrow keys to navigate · Enter or Tab to select · Escape to close'
+                      : 'Enter to send · Shift+Enter for newline · / for commands'}
                   </span>
                   <button
-                    disabled={composerDisabled || !draft.trim()}
+                    disabled={
+                      composerDisabled ||
+                      !draft.trim() ||
+                      (fresh && createUncertain.current && !slash)
+                    }
                     className={solid}
                     type="submit"
                   >
-                    {sending ? 'Sending…' : 'Send ↑'}
+                    {sending || command.isPending
+                      ? 'Sending…'
+                      : slash?.command?.name === 'task'
+                        ? 'Review task'
+                        : slash
+                          ? 'Run command'
+                          : 'Send ↑'}
                   </button>
                 </div>
               </form>
@@ -721,7 +926,7 @@ export default function ConversationWorkspace({
                     type="button"
                     className={`${outline} mt-3`}
                     disabled={!connected}
-                    onClick={() => onReviewTask(draft.trim())}
+                    onClick={() => onReviewTask(slash ? '' : draft.trim())}
                   >
                     Review as supervisor task
                   </button>
@@ -781,15 +986,12 @@ export default function ConversationWorkspace({
             )}
         </div>
       </div>
+      {active && commandResult && (
+        <CommandResult mode={commandResult} api={api} close={() => setCommandResult(undefined)} />
+      )}
       {dialog && (
         <Modal
-          title={
-            dialog.type === 'create'
-              ? 'New conversation'
-              : dialog.type === 'archive'
-                ? 'Archive conversation'
-                : 'Delete conversation'
-          }
+          title={dialog.type === 'archive' ? 'Archive conversation' : 'Delete conversation'}
           locked={command.isPending}
           close={() => setDialog(null)}
         >
@@ -798,29 +1000,15 @@ export default function ConversationWorkspace({
             onSubmit={event => {
               event.preventDefault();
               if (command.isPending || !connected) return;
-              const title = String(new FormData(event.currentTarget).get('title') ?? '').trim();
               setCommandError('');
-              command.mutate({ dialog, title });
+              command.mutate(dialog);
             }}
           >
-            {dialog.type === 'create' ? (
-              <label className="block text-xs">
-                Conversation title (optional)
-                <input
-                  data-dialog-focus
-                  name="title"
-                  className={field + ' mt-2'}
-                  maxLength={160}
-                  placeholder="New conversation"
-                />
-              </label>
-            ) : (
-              <p className={muted}>
-                {dialog.type === 'delete'
-                  ? `Permanently delete “${dialog.conversation.title}” and its server-saved messages and events?`
-                  : `Archive “${dialog.conversation.title}”? It will remain readable under Show archived.`}
-              </p>
-            )}
+            <p className={muted}>
+              {dialog.type === 'delete'
+                ? `Permanently delete “${dialog.conversation.title}” and its server-saved messages and events?`
+                : `Archive “${dialog.conversation.title}”? It will remain readable under Show archived.`}
+            </p>
             {commandError && <Notice error>{commandError}</Notice>}
             <div className="flex flex-wrap justify-end gap-2">
               <button
@@ -834,11 +1022,9 @@ export default function ConversationWorkspace({
               <button type="submit" className={solid} disabled={command.isPending || !connected}>
                 {command.isPending
                   ? 'Working…'
-                  : dialog.type === 'create'
-                    ? 'Create conversation'
-                    : dialog.type === 'archive'
-                      ? 'Archive conversation'
-                      : 'Delete permanently'}
+                  : dialog.type === 'archive'
+                    ? 'Archive conversation'
+                    : 'Delete permanently'}
               </button>
             </div>
           </form>

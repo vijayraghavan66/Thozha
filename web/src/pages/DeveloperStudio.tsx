@@ -1,5 +1,5 @@
-import { useState, type FormEvent } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { mayHaveBeenAccepted, type WorkspaceApi } from '../api/client';
 import { type PairedDevice, type TaskInput, type TaskScope } from '../api/control';
 import { field, muted, outline, solid } from '../components/styles';
@@ -8,6 +8,7 @@ import { Approvals } from './Approvals';
 import { controlError, taskHref, tasksKey, useDevices, useTasks } from './controlState';
 import { DevicePicker } from './DevicePicker';
 import { TaskDetail } from './TaskDetail';
+import { readinessError, taskReadinessBlocker } from './supervisorReadiness';
 
 function TaskForm({
   api,
@@ -26,8 +27,29 @@ function TaskForm({
   const [objective, setObjective] = useState(prefill);
   const [selection, setSelection] = useState('');
   const [scope, setScope] = useState<TaskScope>('read_only');
+  const [checking, setChecking] = useState(false);
+  const [preflightError, setPreflightError] = useState('');
+  const submitLock = useRef(false);
+  const eligible = useRef(false);
+  useEffect(() => {
+    eligible.current = connected;
+    return () => {
+      eligible.current = false;
+    };
+  }, [connected]);
+  const readiness = useQuery({
+    queryKey: ['task-form-readiness'],
+    queryFn: ({ signal }) => api.supervisorReadiness(signal),
+    enabled: connected,
+    retry: false,
+  });
+  const blocker = readiness.isSuccess ? taskReadinessBlocker(readiness.data) : undefined;
+  const readinessVerified = readiness.isSuccess && !readiness.isFetching && !blocker;
   const submit = useMutation({
     mutationFn: (body: TaskInput) => api.submitTask(body),
+    onSettled: () => {
+      submitLock.current = false;
+    },
     onSuccess: () => {
       void cache.invalidateQueries({ queryKey: tasksKey });
     },
@@ -43,27 +65,44 @@ function TaskForm({
     controlError(submit.error, 'submit') === 'Supervisor task worker is unavailable';
   const uncertain = submit.isError && !unavailable && mayHaveBeenAccepted(submit.error);
 
-  function send(event: FormEvent<HTMLFormElement>) {
+  async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!connected || !deviceId || !objective.trim() || submit.isPending) return;
+    if (!connected || !deviceId || !objective.trim() || !readinessVerified || submitLock.current)
+      return;
     const accepted = {
       onSuccess: (data: Awaited<ReturnType<WorkspaceApi['submitTask']>>) =>
         onAccepted(data.task_id),
     };
-    if (uncertain) {
-      if (submit.variables?.requester_device_id === deviceId)
-        submit.mutate(submit.variables, accepted);
+    const body = uncertain
+      ? submit.variables?.requester_device_id === deviceId
+        ? submit.variables
+        : undefined
+      : {
+          objective: objective.trim(),
+          requester_device_id: deviceId,
+          capability_scope: [scope],
+          idempotency_key: crypto.randomUUID(),
+        };
+    if (!body) return;
+    submitLock.current = true;
+    setChecking(true);
+    setPreflightError('');
+    const fresh = await readiness.refetch();
+    if (!eligible.current) {
+      submitLock.current = false;
+      setChecking(false);
       return;
     }
-    submit.mutate(
-      {
-        objective: objective.trim(),
-        requester_device_id: deviceId,
-        capability_scope: [scope],
-        idempotency_key: crypto.randomUUID(),
-      },
-      accepted
-    );
+    const problem = fresh.isSuccess
+      ? taskReadinessBlocker(fresh.data)
+      : readinessError(fresh.error);
+    setChecking(false);
+    if (problem) {
+      setPreflightError(problem);
+      submitLock.current = false;
+      return;
+    }
+    submit.mutate(body, accepted);
   }
 
   return (
@@ -76,7 +115,7 @@ function TaskForm({
       <form className="mt-4 space-y-4" onSubmit={send}>
         <fieldset
           className="min-w-0 space-y-4"
-          disabled={!connected || submit.isPending || uncertain}
+          disabled={!connected || checking || submit.isPending || uncertain}
         >
           <label className="block text-xs">
             Objective
@@ -114,6 +153,22 @@ function TaskForm({
             An active mapped pairing is required. Check Device Hub for details.
           </p>
         )}
+        {connected && readiness.isFetching && !submit.isPending && (
+          <p role="status" className={muted}>
+            Checking supervisor readiness…
+          </p>
+        )}
+        {connected && (readiness.isError || blocker || preflightError) && (
+          <Notice
+            error
+            retry={() => {
+              setPreflightError('');
+              void readiness.refetch();
+            }}
+          >
+            {blocker ?? (readiness.isError ? readinessError(readiness.error) : preflightError)}
+          </Notice>
+        )}
         {submit.isError && (
           <Notice error>
             {controlError(submit.error, 'submit the task')}
@@ -128,11 +183,19 @@ function TaskForm({
             !connected ||
             !deviceId ||
             !objective.trim() ||
+            !readinessVerified ||
+            checking ||
             submit.isPending ||
             (uncertain && submit.variables?.requester_device_id !== deviceId)
           }
         >
-          {submit.isPending ? 'Submitting…' : uncertain ? 'Retry same task' : 'Submit task'}
+          {checking
+            ? 'Checking readiness…'
+            : submit.isPending
+              ? 'Submitting…'
+              : uncertain
+                ? 'Retry same task'
+                : 'Submit task'}
         </button>
       </form>
     </Panel>
