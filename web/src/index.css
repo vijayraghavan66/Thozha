@@ -544,11 +544,19 @@ button:disabled {
 }
 
 .th-code-copy {
-  display: inline-grid;
+  display: inline-flex;
+  inline-size: 6rem;
+  block-size: 1.75rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  border-radius: 5px;
   white-space: nowrap;
-  transition:
-    background-color 180ms ease-out,
-    color 180ms ease-out;
+}
+.th-code-copy:focus-visible {
+  outline: 1px solid #d6d8df;
+  outline-offset: 1px;
 }
 .th-code-copy:hover {
   background-color: rgb(255 255 255 / 10%);
@@ -560,33 +568,22 @@ button:disabled {
 .th-code-copy[data-state='failed'] {
   color: #f0d6d9;
 }
-.th-code-copy > span {
-  display: inline-flex;
-  grid-area: 1 / 1;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.3rem;
-  opacity: 0;
-  transform: translateY(2px);
-  transition:
-    opacity 180ms ease-out,
-    transform 180ms ease-out;
+.th-code-copy > svg {
+  flex: none;
 }
-.th-code-copy[data-state='idle'] > [data-copy-label='idle'],
-.th-code-copy[data-state='copied'] > [data-copy-label='copied'],
-.th-code-copy[data-state='failed'] > [data-copy-label='failed'] {
-  opacity: 1;
-  transform: none;
-}
-@media (prefers-reduced-motion: reduce) {
-  .th-code-copy,
-  .th-code-copy > span {
-    transition: none;
-    transform: none;
+@media (prefers-reduced-motion: no-preference) {
+  .th-code-copy:not([data-state='idle']) > svg {
+    animation: th-code-copy-icon 170ms ease-out both;
   }
 }
-.th-stop-motion .th-code-copy > span {
-  transform: none;
+.th-stop-motion .th-code-copy > svg {
+  animation: none;
+}
+@keyframes th-code-copy-icon {
+  from {
+    opacity: 0.45;
+    transform: scale(0.88);
+  }
 }
 
 .th-markdown {

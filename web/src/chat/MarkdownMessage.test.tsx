@@ -14,7 +14,21 @@ it('renders Markdown but never loads inline images or enables raw HTML', () => {
   expect(screen.getByText('[Image: A diagram]')).toBeVisible();
   expect(screen.queryByRole('img')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Ignore me' })).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Copy code' })).toBeVisible();
+  expect(screen.getByRole('button', { name: /Copy code/ })).toBeVisible();
+});
+
+it('labels fenced terminal and output blocks without reclassifying source languages', () => {
+  render(
+    <MarkdownMessage
+      content={
+        '```bash\necho "not a terminal transcript"\n```\n\n```console\nuser@host$ whoami\n```\n\n```stderr\ndenied\n```'
+      }
+    />
+  );
+  expect(screen.getByLabelText('Code block')).toHaveTextContent('echo');
+  expect(screen.getByLabelText('Terminal block')).toHaveTextContent('user@host');
+  expect(screen.getByLabelText('Output block')).toHaveTextContent('denied');
+  expect(screen.getAllByRole('button', { name: /Copy code/ })).toHaveLength(3);
 });
 
 afterEach(() => {
@@ -33,7 +47,7 @@ it('waits for the clipboard, ignores overlapping clicks, and resets only the act
   );
   vi.stubGlobal('navigator', { clipboard: { writeText } });
   render(<MarkdownMessage content={'```\nfirst\n```\n\n    second\n'} />);
-  const [first, second] = screen.getAllByRole('button', { name: 'Copy code' });
+  const [first, second] = screen.getAllByRole('button', { name: /Copy code/ });
   fireEvent.click(first);
   fireEvent.click(first);
   expect(writeText).toHaveBeenCalledExactlyOnceWith('first');
@@ -61,8 +75,8 @@ it('announces a denied write, allows retry, and clears feedback on unmount', asy
   vi.stubGlobal('navigator', { clipboard: { writeText } });
   const { unmount } = render(<MarkdownMessage content={'```\nretry me\n```'} />);
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy code' })));
-  expect(screen.getByRole('status')).toHaveTextContent("Couldn't copy. Try again");
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: "Couldn't copy" })));
+  expect(screen.getByRole('status')).toHaveTextContent('Copy failed. Try again');
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Copy failed' })));
   expect(screen.getByRole('button', { name: 'Copied!' })).toBeVisible();
   expect(vi.getTimerCount()).toBe(1);
   unmount();

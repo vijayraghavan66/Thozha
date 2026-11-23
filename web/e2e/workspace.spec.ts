@@ -455,16 +455,29 @@ test('renders the reported SSE mode, persists context, copies code and supports 
   await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
   const copy = page.locator('.th-code-copy');
   const bounds = await copy.boundingBox();
+  const block = page.locator('.th-markdown pre');
+  const blockBounds = await block.boundingBox();
+  await page.keyboard.press('Tab');
   await copy.focus();
+  await expect(copy).toHaveCSS('outline-width', '1px');
+  await expect(copy).toHaveCSS('outline-offset', '1px');
   await page.keyboard.press('Enter');
   await expect(copy).toHaveAccessibleName('Copied!');
-  await expect(copy.locator('[data-copy-label="copied"]')).toHaveCSS('opacity', '1');
+  await expect(copy).toHaveText('Copied!');
   await expect(copy).toBeFocused();
   expect(await copy.boundingBox()).toEqual(bounds);
+  expect(await block.boundingBox()).toEqual(blockBounds);
+  await expect(
+    page.getByRole('region', { name: 'Conversation messages' }).getByText('Copied', { exact: true })
+  ).toHaveCount(0);
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
     "const workspace = 'Thozha Alpha';"
   );
   await expect(copy).toHaveAccessibleName('Copy code');
+  await expect(copy).toHaveText('Copy code');
+  await expect(
+    page.getByRole('region', { name: 'Conversation messages' }).getByText('Copied', { exact: true })
+  ).toHaveCount(0);
   await page.reload();
   await expect(
     page.getByText('Remember the name Thozha Alpha for context.', { exact: true })
@@ -520,26 +533,24 @@ test('code copy shows touch-friendly failure and retry without moving the block'
     await send(page, 'Show a test response with a code block.');
     const copy = page.getByRole('button', { name: 'Copy code' });
     await expect(copy).toBeVisible();
-    const block = page.getByRole('region', { name: 'Conversation messages' }).locator('pre');
+    const block = page
+      .getByRole('region', { name: 'Conversation messages' })
+      .locator('div.rounded-xl:has(.th-code-copy)');
     const bounds = await copy.boundingBox();
     const blockBounds = await block.boundingBox();
-    await copy.screenshot({ path: info.outputPath('copy-default.png') });
+    await block.screenshot({ path: info.outputPath('copy-default.png') });
     await copy.tap();
-    const retry = page.getByRole('button', { name: "Couldn't copy" });
+    const retry = page.getByRole('button', { name: 'Copy failed' });
     await expect(retry).toBeVisible();
-    await expect(retry.locator('[data-copy-label="failed"]')).toHaveCSS('opacity', '1');
-    await expect(retry.locator('[data-copy-label="failed"]')).toHaveCSS(
-      'transition-duration',
-      '0s'
-    );
+    await expect(retry).toHaveText('Copy failed');
     expect(await retry.boundingBox()).toEqual(bounds);
-    await retry.screenshot({ path: info.outputPath('copy-failed.png') });
+    await block.screenshot({ path: info.outputPath('copy-failed.png') });
     await retry.tap();
     const copied = page.getByRole('button', { name: 'Copied!' });
     await expect(copied).toBeVisible();
     expect(await copied.boundingBox()).toEqual(bounds);
     expect(await block.boundingBox()).toEqual(blockBounds);
-    await copied.screenshot({ path: info.outputPath('copy-success.png') });
+    await block.screenshot({ path: info.outputPath('copy-success.png') });
   } finally {
     await context.close();
   }
