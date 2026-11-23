@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import threading
 import time
 from collections import deque
@@ -141,8 +142,17 @@ class WebSessionStore:
                 "Web session database must not be a symlink"
             )
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent_stat = self.path.parent.stat()
+        if (
+            parent_stat.st_uid != os.geteuid()
+            or stat.S_IMODE(parent_stat.st_mode) & 0o077
+        ):
+            raise WebAuthConfigurationError(
+                "Web session database directory must be owner-only"
+            )
         self._clock = clock
         self._lock = threading.RLock()
+        created_database = not self.path.exists()
         self._db = sqlite3.connect(str(self.path), timeout=5, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA busy_timeout=5000")
@@ -159,8 +169,22 @@ class WebSessionStore:
         self._db.commit()
         try:
             os.chmod(self.path, 0o600)
-        except OSError:
-            pass
+            if stat.S_IMODE(self.path.stat().st_mode) != 0o600:
+                raise OSError("session database mode is not 0600 after chmod")
+        except OSError as exc:
+            self._db.close()
+            if created_database:
+                for suffix in ("", "-wal", "-shm"):
+                    try:
+                        Path(f"{self.path}{suffix}").unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        # The owner-only parent remains the fallback protection.
+                        pass
+            raise WebAuthConfigurationError(
+                "Web session database must be restricted to mode 0600"
+            ) from exc
 
     def create(
         self, *, session_id: str, user_id: str, csrf_token: str, expires_at: int

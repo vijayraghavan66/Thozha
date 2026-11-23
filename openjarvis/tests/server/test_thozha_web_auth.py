@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import os
+import stat
 import time
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from openjarvis.server import thozha_web_auth
 from openjarvis.server.thozha_web_auth import (
     CSRF_COOKIE,
     SESSION_COOKIE,
     LoginRateLimiter,
     WebAuthConfig,
+    WebAuthConfigurationError,
     WebAuthContext,
     WebSessionStore,
     hash_password,
@@ -72,6 +77,44 @@ def test_missing_configuration_fails_closed(tmp_path):
             == 503
         )
         assert client.get("/v1/web/session").status_code == 503
+
+
+def test_session_database_and_parent_are_owner_only(tmp_path):
+    database = tmp_path / "web_sessions.db"
+    store = WebSessionStore(database)
+    try:
+        assert stat.S_IMODE(tmp_path.stat().st_mode) & 0o077 == 0
+        assert stat.S_IMODE(database.stat().st_mode) == 0o600
+    finally:
+        store.close()
+
+
+def test_unsafe_existing_database_parent_is_rejected(tmp_path):
+    os.chmod(tmp_path, 0o750)
+    try:
+        with pytest.raises(
+            WebAuthConfigurationError, match="directory must be owner-only"
+        ):
+            WebSessionStore(tmp_path / "web_sessions.db")
+    finally:
+        os.chmod(tmp_path, 0o700)
+
+
+def test_database_chmod_failure_fails_closed_and_cleans_new_database(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "web_sessions.db"
+    actual_chmod = os.chmod
+
+    def fail_database_chmod(path, mode):
+        if Path(path) == database:
+            raise PermissionError("test permission failure")
+        actual_chmod(path, mode)
+
+    monkeypatch.setattr(thozha_web_auth.os, "chmod", fail_database_chmod)
+    with pytest.raises(WebAuthConfigurationError, match="restricted to mode 0600"):
+        WebSessionStore(database)
+    assert not database.exists()
 
 
 def test_password_hash_verification_is_constant_contract():
