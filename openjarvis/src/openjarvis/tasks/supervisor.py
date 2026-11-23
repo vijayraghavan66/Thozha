@@ -32,13 +32,16 @@ LINK_SCOPE_CAPABILITIES = {
     # allowlisted workspace. Granted only to allowlisted companion devices by the Link host.
     "development": frozenset({"file:read", "file:write", "code:execute", "tool:invoke"}),
     "read_only": frozenset({"file:read"}),
+    # Narrow, read-only Mac diagnostics. This remains distinct from assistant
+    # control scope so version/uptime probes cannot discover screen or control tools.
+    "mac_read": frozenset({"file:read", "tool:read"}),
     "web_research": frozenset({"network:fetch", "file:read"}),
     "desktop_observation": frozenset({"file:read"}),
     # The assistant may request a bounded Mac MCP action, but the Codex bridge
     # turns every state-changing call into an exact supervisor approval.
     "assistant": frozenset({"file:read", "tool:invoke"}),
 }
-LINK_TASK_SCOPES = frozenset({"read_only", "assistant", "development"})
+LINK_TASK_SCOPES = frozenset({"read_only", "mac_read", "assistant", "development"})
 
 
 def is_link_scope(scope) -> bool:

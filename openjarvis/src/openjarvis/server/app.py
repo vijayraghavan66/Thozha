@@ -322,6 +322,7 @@ def create_app(
     app.state._managed_runtime_stopping = False
     app.state.session_start = time.time()
     app.state.link_task_runner = None
+    app.state.link_task_runner_unavailable_reason = "not_started"
     app.state.web_automation_scheduler = None
     app.state.web_automation_scheduler_store = None
 
@@ -332,12 +333,44 @@ def create_app(
         model_for_link = getattr(app.state, "model", "") or getattr(
             agent_for_link, "_model", ""
         )
-        if agent_for_link is None or engine_for_link is None or not model_for_link:
+        if agent_for_link is None:
+            app.state.link_task_runner_unavailable_reason = "agent_not_configured"
+            logger.warning("Durable Link runner unavailable: agent is not configured")
+            return
+        if engine_for_link is None:
+            app.state.link_task_runner_unavailable_reason = "engine_not_configured"
+            logger.warning("Durable Link runner unavailable: engine is not configured")
+            return
+        if not model_for_link:
+            app.state.link_task_runner_unavailable_reason = "model_not_configured"
+            logger.warning("Durable Link runner unavailable: model is not configured")
             return
         try:
             from openjarvis.server.routes import _engine_key_for_model
 
             if _engine_key_for_model(engine_for_link, model_for_link) != "codex_sdk":
+                app.state.link_task_runner_unavailable_reason = "unsupported_engine"
+                logger.warning(
+                    "Durable Link runner unavailable: configured model engine is unsupported"
+                )
+                return
+            health = getattr(engine_for_link, "health", None)
+            if callable(health) and not health():
+                engine_readiness = getattr(engine_for_link, "readiness", None)
+                details = engine_readiness() if callable(engine_readiness) else {}
+                app.state.link_task_runner_unavailable_reason = (
+                    "codex_sdk_unavailable"
+                    if details.get("sdk_package_present") is False
+                    else "codex_cli_unavailable"
+                    if details.get("cli_binary_present") is False
+                    else "codex_auth_missing"
+                    if details.get("credential_file_present") is False
+                    else "engine_unhealthy"
+                )
+                logger.warning(
+                    "Durable Link runner unavailable: Codex preflight failed reason=%s",
+                    app.state.link_task_runner_unavailable_reason,
+                )
                 return
             from openjarvis.server.link_task_runner import LinkTaskExecutionRunner
 
@@ -348,8 +381,13 @@ def create_app(
             )
             app.state.link_task_runner = link_runner
             await link_runner.start()
+            app.state.link_task_runner_unavailable_reason = None
         except (TypeError, ValueError):
+            app.state.link_task_runner_unavailable_reason = "runner_start_failed"
             logger.exception("Durable Link task runner configuration is invalid")
+        except Exception:
+            app.state.link_task_runner_unavailable_reason = "runner_start_failed"
+            logger.exception("Durable Link task runner failed during startup")
 
     @app.on_event("shutdown")
     async def _stop_durable_link_task_runner() -> None:
@@ -360,6 +398,7 @@ def create_app(
         if link_runner is not None:
             await link_runner.stop()
             app.state.link_task_runner = None
+            app.state.link_task_runner_unavailable_reason = "runner_stopped"
 
     # Exposed so WebSocket handlers can authenticate the handshake (the HTTP
     # AuthMiddleware never sees WS upgrade requests). Empty = auth disabled.

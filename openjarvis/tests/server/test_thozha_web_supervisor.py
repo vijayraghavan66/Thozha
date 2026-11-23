@@ -31,6 +31,7 @@ DEVICE_B = "b" * 32
 class FakeRunner:
     def __init__(self):
         self.wakes = 0
+        self.is_running = True
 
     def wake(self):
         self.wakes += 1
@@ -79,6 +80,9 @@ def web_client(tmp_path, monkeypatch):
     app = FastAPI()
     app.state.supervisor_store = store
     app.state.link_task_runner = runner
+    app.state.link_task_runner_unavailable_reason = None
+    app.state.engine = SimpleNamespace(health=lambda: True)
+    app.state.web_automation_scheduler = None
     app.state.thozha_web_auth = SimpleNamespace(
         config=SimpleNamespace(owner_id=WEB_OWNER)
     )
@@ -178,6 +182,70 @@ def test_web_task_submission_is_owner_bound_idempotent_and_queued(web_client):
     assert conflict.status_code == 409
 
 
+def test_readiness_reports_safe_component_states_without_secrets(web_client):
+    client, _store, runner = web_client
+    ready = client.get("/v1/web/supervisor/readiness")
+    assert ready.status_code == 200
+    payload = ready.json()
+    assert payload["status"] == "ready"
+    assert payload["components"]["authentication"]["browser_session"] == "authenticated"
+    assert payload["components"]["authentication"]["codex_sdk"] == "not_reported"
+    assert payload["components"]["device_mapping"] == {
+        "state": "ready",
+        "active_device_count": 1,
+    }
+    assert payload["components"]["engine"]["state"] == "ready"
+    assert payload["components"]["supervisor_worker"]["state"] == "ready"
+    serialized = json.dumps(payload)
+    assert "token_hash" not in serialized
+    assert "public_key" not in serialized
+    assert WEB_OWNER not in serialized  # owner identity itself is not returned
+
+    runner.is_running = False
+    client.app.state.link_task_runner_unavailable_reason = "runner_start_failed"
+    degraded = client.get("/v1/web/supervisor/readiness").json()
+    assert degraded["status"] == "degraded"
+    assert degraded["components"]["supervisor_worker"] == {
+        "state": "unavailable",
+        "reason": "runner_start_failed",
+    }
+
+
+def test_readiness_does_not_call_credential_presence_authenticated(web_client):
+    client, _store, _runner = web_client
+    client.app.state.engine = SimpleNamespace(
+        health=lambda: True,
+        readiness=lambda: {
+            "state": "preflight_ready",
+            "sdk_package_present": True,
+            "cli_binary_present": True,
+            "credential_file_present": True,
+            "runtime_auth_verified": False,
+            "authentication_state": "credential_present_unverified",
+        },
+    )
+    payload = client.get("/v1/web/supervisor/readiness").json()
+    assert payload["status"] == "degraded"
+    assert payload["components"]["authentication"]["codex_sdk"] == "credential_present_unverified"
+    assert payload["components"]["engine"] == {
+        "state": "unknown",
+        "reason": "codex_auth_not_verified_this_process",
+        "check": "preflight",
+    }
+
+    client.app.state.engine.readiness = lambda: {
+        "state": "unavailable",
+        "sdk_package_present": True,
+        "cli_binary_present": True,
+        "credential_file_present": False,
+        "runtime_auth_verified": False,
+        "authentication_state": "missing",
+    }
+    missing = client.get("/v1/web/supervisor/readiness").json()
+    assert missing["components"]["authentication"]["codex_sdk"] == "missing"
+    assert missing["components"]["engine"]["reason"] == "codex_auth_missing"
+
+
 def test_completed_submission_replay_returns_terminal_result_without_waking_worker(
     web_client,
 ):
@@ -273,7 +341,12 @@ def test_task_status_events_and_cancel_are_persisted(web_client):
 
     cancelled = client.post(f"/v1/web/tasks/{task_id}/cancel")
     assert cancelled.status_code == 200
-    assert cancelled.json()["state"] == "CANCELLED"
+    assert cancelled.json() == {
+        "task_id": task_id,
+        "state": "CANCELLED",
+        "cancelled": True,
+        "action_may_have_started": False,
+    }
     assert store.get_task(task_id)["state"] == "CANCELLED"
 
 
@@ -376,10 +449,12 @@ def test_approval_review_and_reject_use_exact_shared_decision_path(web_client):
     listed = client.get("/v1/web/approvals/pending")
     assert listed.status_code == 200
     assert [item["id"] for item in listed.json()["approvals"]] == [approval_id]
+    assert listed.json()["approvals"][0]["requester_device_id"] == DEVICE_A
     card = client.get(f"/v1/web/approvals/{approval_id}")
     assert card.status_code == 200
     assert card.json()["operation_digest"] == digest
     assert card.json()["canonical_arguments"] == {"name": "Calculator"}
+    assert card.json()["requester_device_id"] == DEVICE_A
 
     decision = client.post(
         f"/v1/web/approvals/{approval_id}/decision",

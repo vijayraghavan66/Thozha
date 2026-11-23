@@ -4,13 +4,18 @@ from __future__ import annotations
 import base64
 import json
 import os
+import platform
 import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 from openjarvis.security.mac_mcp_policy import open_app_mcp_enabled, record_open_app_event
 
@@ -194,10 +199,102 @@ def ask_sensitive(description,payload):
     # whose supervisor approval was consumed by the parent process.
     return _SUPERVISOR_OPERATION_VERIFIED
 
+def system_info():
+    """Return fixed, read-only macOS version and uptime facts."""
+    task_id = ""
+    audit_store = None
+    try:
+        task_id, audit_store = _begin_mac_read_audit("get_system_info")
+        if sys.platform != "darwin":
+            raise RuntimeError("system_info_unavailable_on_host")
+        version = platform.mac_ver()[0]
+        if not version:
+            raise RuntimeError("macos_version_unavailable")
+        uptime_seconds = max(0, int(time.time() - psutil.boot_time()))
+        payload = json.dumps(
+            {"macos_version": version, "uptime_seconds": uptime_seconds}
+        )
+        if audit_store is not None:
+            audit_store.record_event(
+                task_id,
+                "mac.read_only_tool.completed",
+                {"operation": "get_system_info", "success": True},
+            )
+        return text_result(payload)
+    except Exception as exc:
+        if audit_store is not None:
+            try:
+                audit_store.record_event(
+                    task_id,
+                    "mac.read_only_tool.failed",
+                    {
+                        "operation": "get_system_info",
+                        "error_code": type(exc).__name__,
+                    },
+                )
+            except Exception:
+                pass
+        return text_result(
+            f"System information could not be read ({type(exc).__name__}).", True
+        )
+    finally:
+        if audit_store is not None:
+            audit_store.close()
+
+
+def _begin_mac_read_audit(operation: str):
+    """Validate server-issued task scope and persist a content-free start event.
+
+    This executes inside the MCP server process. It deliberately opens the
+    supervisor database with recovery disabled so a short-lived MCP process
+    cannot alter task recovery state.
+    """
+    if MODE != "mac_read":
+        return "", None
+    task_id = os.environ.get("JARVIS_SUPERVISOR_TASK_ID", "")
+    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
+        raise PermissionError("supervisor_task_context_missing")
+    if (
+        os.environ.get("JARVIS_SUPERVISOR_TASK_SOURCE") != "jarvis_link"
+        or os.environ.get("JARVIS_SUPERVISOR_TASK_SCOPE") != "mac_read"
+    ):
+        raise PermissionError("supervisor_task_scope_mismatch")
+    from openjarvis.core.paths import get_config_dir
+    from openjarvis.tasks.supervisor import SupervisorStore
+
+    configured_db = os.environ.get("JARVIS_SUPERVISOR_DB", "").strip()
+    db_path = Path(configured_db).expanduser() if configured_db else get_config_dir() / "supervisor.db"
+    if not db_path.is_absolute():
+        raise PermissionError("supervisor_database_path_invalid")
+    store = SupervisorStore(
+        str(db_path), run_recovery=False
+    )
+    try:
+        task = store.get_task(task_id)
+        metadata = json.loads(task.get("recovery_json") or "{}") if task else {}
+        if (
+            task is None
+            or task.get("state") != "RUNNING"
+            or metadata.get("source") != "jarvis_link"
+            or metadata.get("capability_scope") != ["mac_read"]
+        ):
+            raise PermissionError("supervisor_task_not_authorized")
+        store.record_event(
+            task_id,
+            "mac.read_only_tool.started",
+            {"operation": operation},
+        )
+        return task_id, store
+    except Exception:
+        store.close()
+        raise
+
 def tool_list():
     common=[
       {"name":"get_disk_usage","description":"Read total, used, and free root disk space on the Mac.","inputSchema":{"type":"object","properties":{},"additionalProperties":False},"annotations":{"readOnlyHint":True,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}},
     ]
+    if MODE in {"mac_read", "read", "control", "workspace"}:
+        common.append({"name":"get_system_info","description":"Read the macOS product version and uptime seconds. This is read-only and accepts no arguments.","inputSchema":{"type":"object","properties":{},"additionalProperties":False},"annotations":{"readOnlyHint":True,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}})
     if MODE in {"read","control","workspace"}:
         common += [
           {"name":"get_active_app","description":"Read the frontmost Mac app and window title.","inputSchema":{"type":"object","properties":{},"additionalProperties":False},"annotations":{"readOnlyHint":True,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}},
@@ -219,9 +316,20 @@ def tool_list():
 
 def call_tool(name,args):
     if not isinstance(args, dict): return text_result("Mac tool arguments must be an object.", True)
-    if name=="get_disk_usage": return disk_usage()
-    if name=="get_active_app": return text_result(active_app())
-    if name=="capture_screen": return screenshot()
+    read_only_tools = {"get_disk_usage", "get_system_info", "get_active_app", "capture_screen"}
+    if name in read_only_tools:
+        if MODE not in {"basic", "mac_read", "read", "control", "workspace"}:
+            return text_result("This task has no Mac observation capability.", True)
+        if MODE == "basic" and name != "get_disk_usage":
+            return text_result("This task has no system diagnostic capability.", True)
+        if MODE == "mac_read" and name not in {"get_disk_usage", "get_system_info"}:
+            return text_result("This task has no screen observation capability.", True)
+        if args:
+            return text_result("Read-only Mac tools do not accept arguments.", True)
+        if name == "get_disk_usage": return disk_usage()
+        if name == "get_system_info": return system_info()
+        if name == "get_active_app": return text_result(active_app())
+        if name == "capture_screen": return screenshot()
     if name == "open_app" and not open_app_mcp_enabled():
         _open_app_audit(
             "disabled", application=_safe_application(args),

@@ -23,6 +23,15 @@ OpenJarvis also has general chat routes: POST /v1/chat/completions (including SS
 - Keep actions disabled in preview mode. Do not simulate approval decisions, task execution, push notifications, or artifact delivery.
 - After a future authenticated integration is approved, show truthful states: accepted is not completed; approval recorded is not execution completed; artifact bytes are not verified until size/hash checks pass.
 
+### Supervisor readiness and contract details
+
+- `GET /v1/web/supervisor/readiness` is authenticated and owner-scoped. It returns redacted component states/reason codes for the Codex preflight, browser session, mapped devices, durable Link worker and optional automation scheduler. A present Codex auth file is explicitly `credential_present_unverified`; only a successful model turn in the current process reports `verified_this_process`. The endpoint never returns credential paths, tokens, device keys or private worker settings.
+- `POST /v1/web/tasks` returns `202` for a new task or a nonterminal replay, and `200` for a completed idempotent replay. Do not assume every replay is `202`.
+- Task cancellation returns a cancellation receipt (`task_id`, `state`, `cancelled`, `action_may_have_started`), not a `WebTaskResult`.
+- Approval detail/pending items include `requester_device_id` only after the route has verified that the task belongs to an active device explicitly mapped to the authenticated Web owner. This supports deliberate device selection; clients must still send and revalidate it on a decision.
+- `mac_read` is a narrow server-validated Link scope for the fixed `get_system_info` and `get_disk_usage` tools. It disables other configured MCP servers and shell surfaces. It does not grant screen observation, app launch, or control.
+- These contract changes are additive except for correcting the documented response shape. The Web type and OpenAPI definitions live in `contracts/web-api/v1.ts` and the separate `codex/openapi-contracts` branch. The Copilot-owned `web/README.md` still contains its original handoff notes and should be refreshed by Copilot when the UI branch is next updated; no Copilot frontend files were changed by this pass.
+
 ## Implemented versus planned
 
 | Capability | Source status | Web readiness |

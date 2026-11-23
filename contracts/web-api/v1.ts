@@ -1,14 +1,18 @@
 /**
  * Versioned browser API types for Thozha Web.
  *
- * These types describe implemented, auth-gated session/conversation/memory
- * operations only. Supervisor task, approval, and device types are added when
- * their backend routes land; do not infer endpoint support from UI mocks.
+ * These types describe implemented, auth-gated Web v1 routes. Runtime
+ * availability still depends on separately configured credentials, pairing
+ * mappings, and workers; do not infer availability from UI mocks.
  */
 
 export interface WebLoginRequest {
   username: string;
   password: string;
+}
+
+export interface WebApiError {
+  detail: string | Record<string, unknown> | unknown[];
 }
 
 export interface WebSession {
@@ -124,7 +128,7 @@ export interface WebMemoryList {
   search_mode: "substring";
 }
 
-export type WebTaskScope = "read_only" | "assistant" | "development";
+export type WebTaskScope = "read_only" | "mac_read" | "assistant" | "development";
 
 export type WebTaskState =
   | "CREATED"
@@ -154,6 +158,37 @@ export interface WebTaskResult {
   error_code: string | null;
 }
 
+export interface WebTaskCancellation {
+  task_id: string;
+  state: WebTaskState;
+  cancelled: boolean;
+  action_may_have_started: boolean;
+}
+
+export interface WebComponentReadiness {
+  state: "ready" | "unavailable" | "unknown";
+  reason?: string;
+}
+
+export interface WebSupervisorReadiness {
+  status: "ready" | "degraded";
+  components: {
+    authentication: {
+      browser_session: "authenticated";
+      codex_sdk:
+        | "not_reported"
+        | "missing"
+        | "credential_present_unverified"
+        | "verified_this_process"
+        | "unavailable";
+    };
+    device_mapping: WebComponentReadiness & { active_device_count: number };
+    engine: WebComponentReadiness & { check?: "preflight" | "runtime" };
+    supervisor_worker: WebComponentReadiness;
+    automation_scheduler: WebComponentReadiness;
+  };
+}
+
 export interface WebTaskEvent {
   seq: number;
   event_type: string;
@@ -174,7 +209,10 @@ export interface WebApproval {
   target_resource: string;
   canonical_arguments: Record<string, unknown>;
   operation_digest: string;
+  requester_device_id: string;
+  arguments?: Record<string, unknown>;
   reason: string;
+  risk: "requires_user_approval";
   status: string;
   created_at: string;
   expires_at: string;
@@ -284,6 +322,7 @@ export const WEB_API_V1 = {
   conversations: "/v1/web/conversations",
   memory: "/v1/web/memory",
   tasks: "/v1/web/tasks",
+  readiness: "/v1/web/supervisor/readiness",
   approvals: "/v1/web/approvals",
   devices: "/v1/web/devices",
   automations: "/v1/web/automations",

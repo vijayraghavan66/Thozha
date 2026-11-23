@@ -61,6 +61,7 @@ _EVENT_PAYLOAD_KEYS = frozenset(
         "bytes_written",
         "manifest_sha256",
         "artifact_sha256",
+        "success",
     }
 )
 
@@ -350,6 +351,144 @@ def create_web_supervisor_router(
             raise HTTPException(status_code=401, detail="Web owner is not authorized")
         return resolve_web_device_ids(principal, store)
 
+    @router.get("/supervisor/readiness")
+    async def supervisor_readiness(
+        request: Request,
+        response: Response,
+        principal=Depends(require_web_session),
+    ) -> dict[str, Any]:
+        """Expose only component states/reason codes to the authenticated owner."""
+        response.headers["Cache-Control"] = "no-store"
+        store = store_for(request)
+        context = getattr(request.app.state, "thozha_web_auth", None)
+        auth_config = getattr(context, "config", None)
+        owner_id = _principal_user_id(principal)
+        if auth_config is None or owner_id != auth_config.owner_id:
+            raise HTTPException(status_code=401, detail="Web owner is not authorized")
+
+        try:
+            mapped_ids = resolve_web_device_ids(principal, store)
+            mapping = {"state": "ready", "active_device_count": len(mapped_ids)}
+        except HTTPException as exc:
+            mapping = {
+                "state": "unavailable",
+                "reason": (
+                    "device_mapping_unavailable"
+                    if exc.status_code == 403
+                    else "paired_device_store_unavailable"
+                ),
+                "active_device_count": 0,
+            }
+
+        engine = getattr(request.app.state, "engine", None)
+        engine_health = getattr(engine, "health", None)
+        codex_auth_state = "not_reported"
+        if engine is None:
+            engine_status = {
+                "state": "unavailable",
+                "reason": "engine_not_configured",
+            }
+        elif callable(getattr(engine, "readiness", None)):
+            try:
+                engine_readiness = engine.readiness()
+                codex_auth_state = engine_readiness.get(
+                    "authentication_state", "not_reported"
+                )
+                if engine_readiness.get("state") != "preflight_ready":
+                    engine_status = {
+                        "state": "unavailable",
+                        "reason": (
+                            "codex_sdk_unavailable"
+                            if engine_readiness.get("sdk_package_present") is False
+                            else "codex_cli_unavailable"
+                            if engine_readiness.get("cli_binary_present") is False
+                            else "codex_auth_missing"
+                            if engine_readiness.get("credential_file_present") is False
+                            else "codex_sdk_preflight_failed"
+                        ),
+                    }
+                elif engine_readiness.get("runtime_auth_verified") is True:
+                    engine_status = {"state": "ready", "check": "runtime"}
+                else:
+                    # A credential file and executable are not proof that the
+                    # SDK can authenticate. Keep this explicitly unverified
+                    # until a real model call succeeds in this process.
+                    engine_status = {
+                        "state": "unknown",
+                        "reason": "codex_auth_not_verified_this_process",
+                        "check": "preflight",
+                    }
+            except Exception:
+                codex_auth_state = "unavailable"
+                engine_status = {
+                    "state": "unavailable",
+                    "reason": "codex_sdk_readiness_check_failed",
+                }
+        elif callable(engine_health):
+            try:
+                engine_status = (
+                    {"state": "ready"}
+                    if bool(engine_health())
+                    else {"state": "unavailable", "reason": "engine_unhealthy"}
+                )
+            except Exception as exc:
+                engine_status = {
+                    "state": "unavailable",
+                    "reason": f"engine_health_check_failed_{type(exc).__name__}",
+                }
+        else:
+            engine_status = {"state": "unknown", "reason": "health_check_unsupported"}
+
+        runner = getattr(request.app.state, "link_task_runner", None)
+        runner_ready = bool(getattr(runner, "is_running", False))
+        runner_status = (
+            {"state": "ready"}
+            if runner_ready
+            else {
+                "state": "unavailable",
+                "reason": getattr(
+                    request.app.state,
+                    "link_task_runner_unavailable_reason",
+                    None,
+                )
+                or "runner_unavailable",
+            }
+        )
+        scheduler = getattr(request.app.state, "web_automation_scheduler", None)
+        scheduler_ready = bool(
+            scheduler is not None
+            and getattr(scheduler, "web_supervisor_dispatcher_ready", False)
+        )
+        scheduler_status = (
+            {"state": "ready"}
+            if scheduler_ready
+            else {
+                "state": "unavailable",
+                "reason": (
+                    "automation_disabled"
+                    if scheduler is None
+                    else "automation_dispatcher_unavailable"
+                ),
+            }
+        )
+        components = {
+            "authentication": {
+                "browser_session": "authenticated",
+                "codex_sdk": codex_auth_state,
+            },
+            "device_mapping": mapping,
+            "engine": engine_status,
+            "supervisor_worker": runner_status,
+            "automation_scheduler": scheduler_status,
+        }
+        required = [mapping, engine_status, runner_status]
+        return {
+            "status": "ready"
+            if all(item.get("state") == "ready" for item in required)
+            else "degraded",
+            "components": components,
+        }
+
     @router.post("/tasks")
     async def submit_task(
         body: WebTaskCreate,
@@ -613,10 +752,17 @@ def create_web_supervisor_router(
         approvals = []
         for item in store.pending_approvals(min(limit * 4, 400)):
             try:
-                _require_web_task_owner(store, item["task_id"], allowed)
+                _, owner_actor = _require_web_task_owner(
+                    store, item["task_id"], allowed
+                )
             except HTTPException:
                 continue
-            approvals.append(_approval_payload(item))
+            payload = _approval_payload(item)
+            # The identifier is exposed only after the task's active paired
+            # owner mapping has been verified. It lets a multi-device owner
+            # submit an unambiguous approval decision.
+            payload["requester_device_id"] = owner_actor.removeprefix("device:")
+            approvals.append(payload)
             if len(approvals) >= limit:
                 break
         return {"approvals": approvals, "count": len(approvals)}
@@ -634,8 +780,10 @@ def create_web_supervisor_router(
         item = store.approval(approval_id)
         if item is None:
             raise HTTPException(status_code=404, detail="Approval not found")
-        _require_web_task_owner(store, item["task_id"], allowed)
-        return _approval_payload(item)
+        _, owner_actor = _require_web_task_owner(store, item["task_id"], allowed)
+        payload = _approval_payload(item)
+        payload["requester_device_id"] = owner_actor.removeprefix("device:")
+        return payload
 
     @router.post("/approvals/{approval_id}/decision")
     async def decide_approval(
