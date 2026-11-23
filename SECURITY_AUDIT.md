@@ -14,7 +14,7 @@ The monorepo imports each project's reachable branch history under its own direc
 
 - Removed the tracked Android premium-audit.json from the exported history because it recorded an absolute home-directory path.
 - Replaced the owner's absolute home prefix in exported text/history with a redacted path. OpenJarvis's current remote-development workspace defaults were also changed to derive from Path.home() in local commit c4cd0c82.
-- Replaced historical AWS-key-shaped and JWT-shaped example values in exported history. The confirmed JWT was a public-role sample, not a service-role credential; it is still omitted from the export.
+- Replaced historical AWS-key-shaped and JWT-shaped values in exported history. The confirmed JWT was a public-role sample, not a service-role credential; it is still omitted from the export. Two Google API-key-shaped strings in vendored Baileys history were also replaced in the monorepo copy.
 - Excluded raw PROGRESS.md, local configuration, Firebase service-account files, signing material, Wrangler state, runtime databases, logs, captures, APKs and evaluation workspaces through the monorepo allowlist and .gitignore.
 
 ## Scan results
