@@ -246,6 +246,154 @@ paths:
               schema: { $ref: '#/components/schemas/WebMessageCancelResult' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/conversations/{conversation_id}/messages/stream:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+    post:
+      operationId: streamWebConversationMessage
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: >
+        Uses the configured engine's actual stream() method with tools disabled.
+        Engines with native streaming emit deltas incrementally. Codex SDK emits
+        one buffered result after generate() completes and is labeled buffered.
+        Disconnect/cancel suppresses late result persistence, but blocking
+        inference cannot be forcibly interrupted.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebMessageCreate' }
+      responses:
+        '200':
+          description: Authenticated server-sent events for acceptance, lifecycle, deltas, and completion.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/memory:
+    post:
+      operationId: createWebMemory
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [memory]
+      description: Owner-scoped persistent memory. Requires exact same-origin Origin, JSON, CSRF, and Idempotency-Key. Owner limits are 5000 entries and 20 MiB content.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebMemoryCreate' }
+      responses:
+        '201':
+          description: Memory persisted or returned as an idempotent replay.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMemoryCreateResult' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { description: Owner-scoped memory quota exceeded. }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+    get:
+      operationId: listWebMemory
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [memory]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 5000, default: 0 }
+      responses:
+        '200':
+          description: Owner-scoped memories, ordered by most recently updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMemoryList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/web/memory/search:
+    get:
+      operationId: searchWebMemory
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [memory]
+      description: Deterministic case-insensitive substring search; not semantic retrieval.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Owner-scoped substring matches.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMemoryList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+  /v1/web/memory/{memory_id}:
+    parameters:
+      - name: memory_id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+    get:
+      operationId: getWebMemory
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [memory]
+      responses:
+        '200':
+          description: Owned memory item.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMemory' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteWebMemory
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [memory]
+      description: Requires exact same-origin Origin, application/json, and X-Thozha-CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '204': { description: Owned memory deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /v1/jarvis/system/info:
     get:
       operationId: getMacSystemInfo
@@ -725,6 +873,36 @@ components:
         conversation_id: { type: string, format: uuid }
         message_id: { type: string, format: uuid }
         status: { type: string, enum: [queued, running, completed, failed, cancelled, cancellation_requested] }
+    WebMemoryCreate:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1, maxLength: 16384 }
+        title: { type: [string, 'null'], maxLength: 160 }
+        tags: { type: array, maxItems: 16, items: { type: string, maxLength: 64 } }
+    WebMemory:
+      type: object
+      required: [id, title, content, tags, created_at, updated_at]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        title: { type: string }
+        content: { type: string }
+        tags: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    WebMemoryCreateResult:
+      type: object
+      required: [memory, replayed]
+      properties:
+        memory: { $ref: '#/components/schemas/WebMemory' }
+        replayed: { type: boolean }
+    WebMemoryList:
+      type: object
+      required: [items, search_mode]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/WebMemory' } }
+        search_mode: { type: string, const: substring }
     MacSystemInfo:
       type: object
       required: [online, uptime]
@@ -882,10 +1060,10 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
   x-thozha-not-implemented:
-    - authenticated web task SSE/WebSocket
+    - authenticated web task submission/status/cancellation APIs (implementation in progress)
     - event replay and resume contract for browsers
-    - artifact relay through the companion gateway
-    - per-user memory scopes and memory deletion
+    - owner-scoped Web artifact manifest/download APIs
+    - semantic or embedding-backed Web memory retrieval
     - automation schedule CRUD API
     - notification history/read state API
     - FCM delivery through verified project credentials
