@@ -241,6 +241,134 @@ test('Overview water moves by default and respects both reduced-motion settings'
   await expect(water.last()).toHaveCSS('animation-name', 'none');
 });
 
+test('all routes retain a fixed shell and accessible scrolling at desktop, laptop, mobile and 200% zoom', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await signIn(page);
+  const routes = [
+    ['overview', 'A quieter kind of control.'],
+    ['ai-workspace', 'AI Workspace'],
+    ['trading-lab', 'Trading Lab'],
+    ['device-hub', 'Device Hub'],
+    ['automations', 'Automations'],
+    ['memory-center', 'Memory Center'],
+    ['developer-studio', 'Developer Studio'],
+    ['settings', 'Settings'],
+  ] as const;
+  for (const [width, height] of [
+    [1440, 900],
+    [1280, 800],
+    [390, 844],
+    [720, 450], // 1440×900 at 200% zoom exposes a 720×450 CSS-pixel viewport.
+  ]) {
+    await page.setViewportSize({ width, height });
+    if (width === 720) {
+      const chromium = await page.context().newCDPSession(page);
+      await chromium.send('Emulation.setDeviceMetricsOverride', {
+        width,
+        height,
+        deviceScaleFactor: 2,
+        mobile: false,
+      });
+    }
+    for (const [slug, heading] of routes) {
+      await page.goto(`/#/${slug}`);
+      await expect(page.locator('#main-content h1:visible')).toHaveText(heading);
+      const metrics = await page.evaluate(() => {
+        const main = document.querySelector<HTMLElement>('#main-content')!;
+        const sidebar = document.querySelector<HTMLElement>('aside')!;
+        const header = document.querySelector<HTMLElement>('header')!;
+        const shell = document.querySelector<HTMLElement>('.th-workspace')!;
+        return {
+          viewport: { width: innerWidth, height: innerHeight },
+          document: {
+            width: document.documentElement.scrollWidth,
+            height: document.documentElement.scrollHeight,
+          },
+          shell: shell.getBoundingClientRect().height,
+          sidebar: sidebar.getBoundingClientRect().width,
+          headerTop: header.getBoundingClientRect().top,
+          mainWidth: main.clientWidth,
+          mainScrollWidth: main.scrollWidth,
+          mainHeight: main.clientHeight,
+          mainScrollHeight: main.scrollHeight,
+          mainOverflow: getComputedStyle(main).overflowY,
+        };
+      });
+      expect(metrics.viewport).toEqual({ width, height });
+      expect(metrics.document.width, `${width}px ${slug} document width`).toBeLessThanOrEqual(
+        width + 1
+      );
+      expect(metrics.document.height, `${height}px ${slug} document height`).toBeLessThanOrEqual(
+        height + 1
+      );
+      expect(metrics.shell).toBe(height);
+      expect(metrics.sidebar).toBe(width >= 1024 ? 237 : 0);
+      expect(metrics.mainOverflow).toBe('auto');
+      expect(metrics.mainScrollWidth, `${width}px ${slug} main width`).toBeLessThanOrEqual(
+        metrics.mainWidth + 1
+      );
+      await page.locator('#main-content').evaluate(el => {
+        el.scrollTop = el.scrollHeight;
+      });
+      expect(await page.locator('header').evaluate(el => el.getBoundingClientRect().top)).toBe(
+        metrics.headerTop
+      );
+      if (slug === 'settings' && metrics.mainScrollHeight > metrics.mainHeight) {
+        await page.getByRole('button', { name: 'Sign out' }).scrollIntoViewIfNeeded();
+        await expect(page.getByRole('button', { name: 'Sign out' })).toBeInViewport();
+      }
+    }
+    if (width === 1280) {
+      await page.getByRole('link', { name: 'Overview' }).click();
+      await expect(page.locator('#main-content')).toHaveJSProperty('scrollTop', 0);
+    }
+  }
+  await page.getByRole('button', { name: 'Open navigation' }).click();
+  await expect(page.getByRole('dialog', { name: 'Workspace navigation' })).toBeVisible();
+  await expect(page.getByRole('dialog').getByRole('link', { name: 'Overview' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Open navigation' })).toBeFocused();
+  expect(
+    (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
+      .violations
+  ).toEqual([]);
+});
+
+test('long conversation history scrolls inside the chat without moving the application header', async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await signIn(page, '/#/ai-workspace');
+  await createConversation(page, 'Long history layout verification');
+  for (let index = 0; index < 5; index++) {
+    await send(page, `Layout history item ${index}: ${'a detailed prompt '.repeat(16)}`);
+    await expect(page.getByRole('heading', { name: 'Fixture response' })).toHaveCount(index + 1);
+  }
+  const history = page.getByRole('region', { name: 'Conversation messages' });
+  expect(
+    await history.evaluate(el => el.scrollHeight > el.clientHeight),
+    'message history must have its own scroll region'
+  ).toBe(true);
+  await history.evaluate(el => {
+    el.scrollTop = 0;
+  });
+  const headerTop = await page.locator('header').evaluate(el => el.getBoundingClientRect().top);
+  await history.evaluate(el => {
+    el.scrollTop = el.scrollHeight;
+  });
+  expect(await page.locator('header').evaluate(el => el.getBoundingClientRect().top)).toBe(
+    headerTop
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toBeVisible();
+  await history.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBe(844);
+});
+
 test('captures the approved desktop and mobile design and checks accessibility', async ({
   page,
 }, info) => {

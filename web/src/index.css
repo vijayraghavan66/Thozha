@@ -163,6 +163,10 @@ body {
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
 }
 
+body:has(.th-workspace) {
+  overflow: hidden;
+}
+
 :where(a, button, input, textarea, select, summary):focus-visible {
   outline: 2px solid #d6d8df;
   outline-offset: 3px;
@@ -179,19 +183,30 @@ button:disabled {
 @keyframes th-water {
   0%,
   100% {
-    transform: translate3d(0, 0, 0) rotate(0deg);
+    transform: translate3d(-12px, 0, 0);
   }
   50% {
-    transform: translate3d(-38px, 22px, 0) rotate(9deg);
+    transform: translate3d(14px, 10px, 0);
   }
 }
 @keyframes th-water-inner {
   0%,
   100% {
-    transform: translate3d(0, 0, 0) rotate(0deg);
+    transform: translate3d(12px, 0, 0);
   }
   50% {
-    transform: translate3d(24px, -15px, 0) rotate(-10deg);
+    transform: translate3d(-16px, -9px, 0);
+  }
+}
+@keyframes th-liquid-glint {
+  0%,
+  100% {
+    transform: translate3d(-8px, -4px, 0);
+    opacity: 0.48;
+  }
+  50% {
+    transform: translate3d(11px, 5px, 0);
+    opacity: 0.8;
   }
 }
 @keyframes th-rise {
@@ -199,19 +214,47 @@ button:disabled {
     opacity: 0;
     transform: translateY(6px);
   }
+  @keyframes th-dialog-in {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.99);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
   to {
     opacity: 1;
     transform: translateY(0);
   }
 }
+.th-liquid-field {
+  background: linear-gradient(112deg, #191a1d 13%, #292a30 68%, #15161a);
+  transform: translate3d(var(--liquid-x, 0px), var(--liquid-y, 0px), 0);
+  transition: transform 450ms ease-out;
+  contain: paint;
+}
+.th-liquid-field svg {
+  mask-image: linear-gradient(90deg, transparent 3%, #000 42%);
+}
 .th-water {
-  animation: th-water 9s ease-in-out -1s infinite;
+  animation: th-water 16s ease-in-out -1s infinite;
 }
 .th-water-inner {
-  animation: th-water-inner 11s ease-in-out -2s infinite;
+  animation: th-water-inner 21s ease-in-out -3s infinite;
+}
+.th-liquid-glint {
+  animation: th-liquid-glint 25s ease-in-out -5s infinite;
 }
 .th-enter {
-  animation: th-rise 0.28s ease-out both;
+  animation: th-rise 0.22s ease-out both;
+}
+.th-workspace dialog[open] {
+  animation: th-dialog-in 0.2s ease-out both;
+}
+.th-workspace dialog[open]::backdrop {
+  animation: th-dialog-in 0.2s ease-out both;
 }
 .th-stop-motion,
 .th-stop-motion * {
@@ -219,12 +262,24 @@ button:disabled {
   transition: none !important;
   scroll-behavior: auto !important;
 }
+.th-stop-motion .th-liquid-field {
+  transform: none !important;
+}
+.th-stop-motion dialog::backdrop {
+  animation: none !important;
+}
 @media (prefers-reduced-motion: reduce) {
   .th-workspace,
   .th-workspace * {
     animation: none !important;
     transition: none !important;
     scroll-behavior: auto !important;
+  }
+  .th-liquid-field {
+    transform: none !important;
+  }
+  .th-workspace dialog::backdrop {
+    animation: none !important;
   }
 }
 

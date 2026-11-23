@@ -84,7 +84,7 @@ export function ThozhaWebWorkspaceConcept({
     if (!focusAfterNavigation.current) return;
     focusAfterNavigation.current = false;
     main.current?.focus({ preventScroll: true });
-    window.scrollTo({ top: 0, behavior: 'instant' });
+    main.current?.scrollTo({ top: 0, behavior: 'instant' });
   }, [page]);
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
@@ -123,7 +123,7 @@ export function ThozhaWebWorkspaceConcept({
     }
   }
 
-  function navigation() {
+  function navigation(drawer = false) {
     return (
       <nav aria-label="Main navigation" className="space-y-1">
         {sections.map(([name, slug, symbol], index) => (
@@ -135,9 +135,10 @@ export function ThozhaWebWorkspaceConcept({
             )}
             <a
               href={`#/${slug}`}
+              data-dialog-focus={drawer && index === 0 ? '' : undefined}
               onClick={() => setDialog(null)}
               aria-current={page === name ? 'page' : undefined}
-              className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[12px] transition ${
+              className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-[12px] transition-colors duration-200 ease-out ${
                 page === name
                   ? 'border border-white/[.1] bg-gradient-to-r from-white/[.15] to-white/[.055] font-semibold text-white shadow-sm'
                   : 'border border-transparent text-[#a0a2a9] hover:bg-white/[.06] hover:text-white'
@@ -156,7 +157,7 @@ export function ThozhaWebWorkspaceConcept({
 
   return (
     <div
-      className={`th-workspace min-h-dvh bg-[#08090b] p-3 text-[#ececf0] selection:bg-white/25 ${motion.reduced ? 'th-stop-motion' : ''}`}
+      className={`th-workspace h-dvh min-h-0 overflow-hidden bg-[#08090b] p-3 text-[#ececf0] selection:bg-white/25 ${motion.reduced ? 'th-stop-motion' : ''}`}
     >
       <a
         href="#main-content"
@@ -168,9 +169,9 @@ export function ThozhaWebWorkspaceConcept({
       >
         Skip to content
       </a>
-      <div className="relative mx-auto flex min-h-[calc(100dvh-1.5rem)] max-w-[1550px] overflow-hidden rounded-[24px] border border-white/[.1] bg-[#101114] shadow-[0_40px_130px_rgba(0,0,0,.5)] lg:min-h-[825px]">
-        <aside className="z-30 hidden w-[237px] shrink-0 flex-col border-r border-white/[.08] bg-[#131417] p-4 lg:flex">
-          <div className="mb-10 flex items-center gap-3 px-2 pt-3">
+      <div className="relative mx-auto flex h-full min-h-0 min-w-0 max-w-[1550px] overflow-hidden rounded-[24px] border border-white/[.1] bg-[#101114] shadow-[0_40px_130px_rgba(0,0,0,.5)]">
+        <aside className="z-30 hidden w-[237px] shrink-0 flex-col overflow-hidden border-r border-white/[.08] bg-[#131417] p-4 lg:flex">
+          <div className="mb-10 flex shrink-0 items-center gap-3 px-2 pt-3">
             <Crest />
             <div>
               <div className="text-[21px] font-semibold tracking-[-.06em]">
@@ -181,11 +182,11 @@ export function ThozhaWebWorkspaceConcept({
               </p>
             </div>
           </div>
-          <div className="mb-3 px-3 text-[10px] font-semibold tracking-[.18em] text-[#a4a5af]">
+          <div className="mb-3 shrink-0 px-3 text-[10px] font-semibold tracking-[.18em] text-[#a4a5af]">
             WORKSPACE
           </div>
-          {navigation()}
-          <div className="mt-auto rounded-2xl border border-white/[.08] bg-[#1c1d21] p-3">
+          <div className="min-h-0 flex-1 overflow-y-auto">{navigation()}</div>
+          <div className="mt-4 shrink-0 rounded-2xl border border-white/[.08] bg-[#1c1d21] p-3">
             <div className="flex items-center gap-3">
               <span
                 aria-hidden="true"
@@ -202,7 +203,7 @@ export function ThozhaWebWorkspaceConcept({
             </div>
           </div>
         </aside>
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <header className="flex min-h-[70px] shrink-0 items-center justify-between gap-1 border-b border-white/[.08] px-8 max-md:px-3">
             <div className="flex min-w-0 items-center gap-2 sm:gap-3">
               <button
@@ -248,7 +249,7 @@ export function ThozhaWebWorkspaceConcept({
             id="main-content"
             tabIndex={-1}
             ref={main}
-            className="relative flex-1 px-9 py-9 outline-none max-md:px-4 max-md:py-6"
+            className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-9 py-8 outline-none max-md:px-4 max-md:py-6"
           >
             {problem && (
               <div className="mb-5">
@@ -316,7 +317,7 @@ export function ThozhaWebWorkspaceConcept({
           close={() => setDialog(null)}
           cls="mr-auto ml-3 min-h-[70dvh] max-w-[275px] bg-[#131417]"
         >
-          {navigation()}
+          {navigation(true)}
         </Modal>
       )}
       {dialog === 'search' && (

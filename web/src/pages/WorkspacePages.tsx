@@ -382,62 +382,75 @@ export function Settings({
         title="Settings"
         desc="Manage this browser session, your visual preferences and integration visibility."
       />
-      <Panel cls="max-w-[780px] p-6">
-        <h2 className="font-semibold">Visual preferences</h2>
-        <Row main="Theme" sub="Graphite, silver and pearl" right="Monochrome" />
-        <Row
-          main="Reduced motion"
-          sub="Turn off water and page transitions. The system preference is always respected."
-          right={
-            <button type="button" className={outline} aria-pressed={reduced} onClick={toggleMotion}>
-              {reduced ? 'Reduce motion: on' : 'Reduce motion: off'}
-            </button>
-          }
-        />
-        {motionProblem && (
-          <p role="status" className={muted}>
-            {motionProblem}
-          </p>
-        )}
-        <h2 className="mt-7 font-semibold">Browser session</h2>
-        <Row
-          main="Web API v1"
-          sub="Session verification, not Mac or model health."
-          right={<Chip>{connected ? 'SESSION VERIFIED' : 'CONNECTION UNCERTAIN'}</Chip>}
-        />
-        <p role="status" className="my-2 text-xs text-[#c7c8ce]">
-          Last verified at {new Date(checkedAt).toLocaleTimeString()}.
-        </p>
-        <Row
-          main="Workspace owner"
-          sub={userId}
-          right={`Expires ${formatDate(expiresAt * 1000)}`}
-        />
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button type="button" className={outline} onClick={checkSession}>
-            Check session
-          </button>
-          <button type="button" className={solid} onClick={logout}>
-            Sign out
-          </button>
+      <div className="grid max-w-[1100px] min-w-0 items-start gap-4 xl:grid-cols-2">
+        <div className="min-w-0 space-y-4">
+          <Panel cls="p-5">
+            <h2 className="font-semibold">Visual preferences</h2>
+            <Row main="Theme" sub="Graphite, silver and pearl" right="Monochrome" />
+            <Row
+              main="Reduced motion"
+              sub="Turn off water and page transitions. The system preference is always respected."
+              right={
+                <button
+                  type="button"
+                  className={outline}
+                  aria-pressed={reduced}
+                  onClick={toggleMotion}
+                >
+                  {reduced ? 'Reduce motion: on' : 'Reduce motion: off'}
+                </button>
+              }
+            />
+            {motionProblem && (
+              <p role="status" className={muted}>
+                {motionProblem}
+              </p>
+            )}
+          </Panel>
+          <Panel cls="p-5">
+            <h2 className="font-semibold">Integrations and permissions</h2>
+            <Row
+              main="Paytm Money and market providers"
+              sub="No brokerage account or data provider is linked."
+              right="Unavailable"
+            />
+            <Row
+              main="Device permissions"
+              sub="Managed through the separate companion authorization boundary."
+              right="Unavailable"
+            />
+            <Row
+              main="Notification preferences"
+              sub="There is no browser notification settings or history API."
+              right="Unavailable"
+            />
+          </Panel>
         </div>
-        <h2 className="mt-7 font-semibold">Integrations and permissions</h2>
-        <Row
-          main="Paytm Money and market providers"
-          sub="No brokerage account or data provider is linked."
-          right="Unavailable"
-        />
-        <Row
-          main="Device permissions"
-          sub="Managed through the separate companion authorization boundary."
-          right="Unavailable"
-        />
-        <Row
-          main="Notification preferences"
-          sub="There is no browser notification settings or history API."
-          right="Unavailable"
-        />
-      </Panel>
+        <Panel cls="order-first min-w-0 p-5 xl:order-last">
+          <h2 className="font-semibold">Browser session</h2>
+          <Row
+            main="Web API v1"
+            sub="Session verification, not Mac or model health."
+            right={<Chip>{connected ? 'SESSION VERIFIED' : 'CONNECTION UNCERTAIN'}</Chip>}
+          />
+          <p role="status" className="my-2 text-xs text-[#c7c8ce]">
+            Last verified at {new Date(checkedAt).toLocaleTimeString()}.
+          </p>
+          <Row
+            main="Workspace owner"
+            sub={userId}
+            right={`Expires ${formatDate(expiresAt * 1000)}`}
+          />
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button type="button" className={outline} onClick={checkSession}>
+              Check session
+            </button>
+            <button type="button" className={solid} onClick={logout}>
+              Sign out
+            </button>
+          </div>
+        </Panel>
+      </div>
     </>
   );
 }

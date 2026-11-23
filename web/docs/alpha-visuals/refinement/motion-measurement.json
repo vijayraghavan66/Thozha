@@ -1,0 +1,19 @@
+{
+  "frame0": {
+    "transform": "matrix(1, 0, 0, 1, -11.163, 0.321905)",
+    "animation": "th-water"
+  },
+  "frame2s": {
+    "transform": "matrix(1, 0, 0, 1, -1.95503, 3.86345)",
+    "animation": "th-water"
+  },
+  "reduced": {
+    "transform": "none",
+    "animation": "none"
+  },
+  "frames": 73,
+  "medianFrameMs": 16.699999999999818,
+  "p95FrameMs": 16.700000000000273,
+  "maxFrameMs": 16.800000000000182,
+  "notes": "Local Chromium 1440x900, 2 seconds apart; screenshot captures actual CSS motion. rAF is browser pacing, not GPU benchmark."
+}

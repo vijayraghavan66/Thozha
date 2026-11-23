@@ -9,7 +9,7 @@ The Web Workspace is a React, TypeScript, Vite, and Tailwind application in the 
 3. For loopback development only, configure `THOZHA_WEB_ORIGIN=http://127.0.0.1:5173` and `THOZHA_WEB_ALLOW_INSECURE_LOOPBACK_DEV=1` on the backend. Start `npm run dev` in `web/` and open `http://127.0.0.1:5173` (not `localhost`). If the backend uses a different loopback port, set `THOZHA_WEB_UPSTREAM=http://127.0.0.1:<port>` on the **Vite process**.
 4. Sign in with the browser owner ID and password. There is no default owner or frontend authentication bypass. `npm run build` produces `dist/`. For local production preview, use `npm run preview` and configure the backend origin to `http://127.0.0.1:4173` instead.
 
-Use `Ctrl+K` / `⌘K` to jump to pages, `Escape` to close dialogs, and `Enter` / `Shift+Enter` to send / insert a newline. The workspace respects system and in-app reduced-motion preferences.
+Use `Ctrl+K` / `⌘K` to jump to pages, `Escape` to close dialogs, and `Enter` / `Shift+Enter` to send / insert a newline. The workspace respects system and in-app reduced-motion preferences. On desktop the 237px navigation rail and top bar stay in place; only the active page scrolls. At narrow widths the rail becomes a focus-managed navigation drawer. Settings groups browser session, visual preferences, and unavailable integrations; the sign-out control remains reachable when zoomed or on short screens.
 
 ### Run alongside an existing OpenJarvis service
 
@@ -76,6 +76,14 @@ Playwright opens the production bundle on loopback ports `45837`/`45838` using t
 - Production entry assets measured 116.46 kB JavaScript and 7.68 kB CSS gzipped. One warm Chromium loopback navigation measured 6 ms to `DOMContentLoaded`; none of the AI Workspace, Trading Lab, or Memory Center chunks loaded on Overview. This is not a deployment or model latency benchmark.
 
 Playwright screenshots (the conversation uses the labeled test engine): [Sign-in](./docs/alpha-visuals/sign-in.png) · [Desktop Overview](./docs/alpha-visuals/desktop-overview.png) · [Desktop conversation](./docs/alpha-visuals/desktop-conversation.png) · [Mobile conversation](./docs/alpha-visuals/mobile-conversation.png).
+
+### Workspace layout and motion refinement
+
+The approved monochrome surfaces and navigation are preserved. The Overview liquid scene now uses lightweight layered SVG wave contours, pearl/silver shading and slow transform/opacity animation, with a small pointer parallax on fine-pointer devices. It does not create simulated data, fetch motion assets, or use WebGL. System and in-app reduced-motion settings disable ambient movement and dialog/page transitions.
+
+Chromium layout checks cover all eight routes at 1440×900, 1280×800, 390×844, and a 720×450 CSS-pixel viewport at 2× device scale (the effective viewport of a 1440×900 window at 200% zoom). They verify fixed shell and header geometry, 237px desktop rail, scrollable content/chat, reachable Settings controls, no document or horizontal overflow, drawer focus restoration, and mobile Settings accessibility. Before refinement, Settings made the document 1,131px high at 1280×800; afterward the document stays 800px, with 829px of Settings content scrolling inside its 704px main pane. A 1.2-second local Chromium requestAnimationFrame sample observed 73 frames (median and p95 interval 16.7ms); this measures browser pacing only, not GPU cost or low-end-device performance. Two hero captures 2 seconds apart changed 24,102 pixels above a 5-level RGB threshold; computed water transforms changed while both reduced-motion modes set animation to `none`.
+
+[Before Overview](./docs/alpha-visuals/refinement/before-1440-overview.png) · [After Overview](./docs/alpha-visuals/refinement/after-1440-overview.png) · [Before Settings](./docs/alpha-visuals/refinement/before-1280-settings.png) · [After Settings](./docs/alpha-visuals/refinement/after-1280-settings.png) · [Before mobile AI](./docs/alpha-visuals/refinement/before-390-ai-workspace.png) · [After mobile AI](./docs/alpha-visuals/refinement/after-390-ai-workspace.png) · [Motion frame 0](./docs/alpha-visuals/refinement/motion-frame-0.png) · [Motion frame +2s](./docs/alpha-visuals/refinement/motion-frame-2s.png) · [Measurements](./docs/alpha-visuals/refinement/motion-measurement.json).
 
 ## Contract handoff
 
