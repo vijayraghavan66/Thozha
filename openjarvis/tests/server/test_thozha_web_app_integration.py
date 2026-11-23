@@ -100,3 +100,59 @@ def test_explicit_web_auth_mounts_owner_scoped_conversation_routes(
         )
         assert logout.status_code == 204
         assert client.get("/v1/web/conversations").status_code == 401
+
+
+def test_automation_routes_are_opt_in_and_fail_closed_without_link_runner_or_mapping(
+    monkeypatch, tmp_path
+):
+    from openjarvis.server.thozha_web_auth import hash_password
+
+    origin = "https://thozha.test"
+    monkeypatch.setenv("THOZHA_WEB_OWNER_ID", "test-owner")
+    monkeypatch.setenv(
+        "THOZHA_WEB_PASSWORD_HASH",
+        hash_password("a-test-only-password-long-enough"),
+    )
+    monkeypatch.setenv("THOZHA_WEB_ORIGIN", origin)
+    monkeypatch.setenv("THOZHA_WEB_SESSION_DB", str(tmp_path / "web" / "sessions.db"))
+    monkeypatch.setenv("THOZHA_WEB_MEMORY_DB", str(tmp_path / "web" / "memory.db"))
+    monkeypatch.setenv(
+        "THOZHA_WEB_AUTOMATION_DB", str(tmp_path / "web" / "automation.db")
+    )
+    monkeypatch.setenv("THOZHA_WEB_AUTOMATION_ENABLED", "1")
+    monkeypatch.delenv("THOZHA_WEB_ALLOWED_DEVICE_IDS", raising=False)
+
+    app = _app()
+    with TestClient(app, base_url=origin) as client:
+        login = client.post(
+            "/v1/web/session/login",
+            headers={"Origin": origin},
+            json={
+                "username": "test-owner",
+                "password": "a-test-only-password-long-enough",
+            },
+        )
+        assert login.status_code == 200
+        csrf = login.json()["csrf_token"]
+        capabilities = client.get("/v1/web/automations/capabilities")
+        assert capabilities.status_code == 200
+        operations = capabilities.json()["operations"]
+        assert operations["list"] is True
+        assert operations["create"] is False
+        assert operations["manual_trigger"] is False
+        rejected = client.post(
+            "/v1/web/automations",
+            headers={
+                "Origin": origin,
+                "Content-Type": "application/json",
+                "X-Thozha-CSRF": csrf,
+                "Idempotency-Key": "automation-test-key-0001",
+            },
+            json={
+                "prompt": "Read-only synthetic status",
+                "schedule_type": "interval",
+                "schedule_value": "300",
+                "device_id": "a" * 32,
+            },
+        )
+        assert rejected.status_code in {403, 404}

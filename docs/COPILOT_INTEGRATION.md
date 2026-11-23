@@ -17,7 +17,7 @@ OpenJarvis also has general chat routes: POST /v1/chat/completions (including SS
 - Implement from the approved MagicPath Web Workspace concept. Keep preview fixtures labeled while wiring is pending; do not independently recreate or replace the design.
 - Any fixture must visibly say Preview or Sample; fixture values must never be labeled as live Mac state, real tasks, real approvals, or generated artifacts.
 - Build a typed API adapter that consumes only versioned contract types. Do not add hard-coded backend paths in screen components.
-- Current browser type definitions are in `contracts/web-api/v1.ts`; OpenAPI source is on `codex/openapi-contracts`. Types cover only implemented Web session, conversation, and memory routes. Wait for the supervisor-task/approval/device contract update before wiring those screens.
+- Current browser type definitions are in `contracts/web-api/v1.ts`; OpenAPI source is on `codex/openapi-contracts`. Types cover session, conversation, memory, task, approval, artifact, device, and automation routes. Live use requires separate browser credentials, an exact HTTPS origin, an active Link runner, and an explicit `THOZHA_WEB_ALLOWED_DEVICE_IDS` mapping; never populate these from fixtures or Android tokens.
 - Do not put a paired-device bearer token, API key, certificate private key, or pairing secret in browser local/session storage, URLs, source maps, or mock data.
 - The browser session and conversation interfaces are implemented in source and documented in contracts/web-auth/v1.md. The Web UI is not integrated. Do not use companion bearer tokens; an owner must configure separate browser credentials and an exact HTTPS origin before browser login is available. Do not expose the raw API or relay from a browser.
 - Keep actions disabled in preview mode. Do not simulate approval decisions, task execution, push notifications, or artifact delivery.
@@ -27,21 +27,23 @@ OpenJarvis also has general chat routes: POST /v1/chat/completions (including SS
 
 | Capability | Source status | Web readiness |
 |---|---|---|
-| Mac status / battery | Implemented fixed read-only route | Contracted; no browser auth or live wiring |
-| Task list and detail | Implemented persisted state/events | Contracted; polling only via available routes |
+| Mac status / battery | Implemented fixed read-only companion route | No separate Web status route yet |
+| Web task list/detail/submit/cancel/events | Implemented; mapped active device actors, persisted states, bounded resumable SSE | Contracted; no live browser credentials/device mapping configured |
 | Async task submit/status/cancel | Implemented supervisor path and Android client | Contracted; route availability depends on local gateway; no Web client |
-| Approval review and exact-digest decision | Implemented supervisor boundary and Android client | Contracted; Web controls stay preview-only until auth/design approval |
-| ZIP artifact manifest/download | Implemented in direct API, Android client, and restricted paired-device gateway | Not available to Web; no Web artifact routes |
+| Approval review and exact-digest decision | Implemented supervisor boundary and Android client | Web API reuses the same exact-digest/expiry/replay/dispatch path; no live decision was performed |
+| ZIP artifact manifest/download | Implemented in direct API, Android client, and restricted paired-device gateway | Web routes verify completed development owner and archive SHA-256; no browser download test yet |
 | FCM token registration | Registration/revoke route implemented | End-to-end delivery not verified; not a Web feature |
 | Generic OpenJarvis chat/SSE/WebSocket | Implemented in the general server | Not companion-gateway allowlisted; no browser session/auth contract |
 | OpenJarvis sessions and memory | General server routes exist | Not bound to a Thozha per-device conversation history/profile; memory may be unconfigured |
 | Web session authentication | Implemented in source; disabled without separate external owner configuration | Contracted; no credentialed Web deployment verified |
 | Owner-scoped Web conversation history | Implemented in source; tools disabled; persisted results/events; SSE uses engine stream; Codex SDK reports buffered output | Contracted; not yet consumed by Web UI. Cancellation suppresses late output; one server process per DB is required |
 | Owner-scoped Web memory | Implemented in source; separate SQLite store, quotas, idempotent writes, substring search | Contracted; no shared Android/OpenJarvis memory and no semantic retrieval |
-| Web automation route adapter | Isolated on `codex/web-automations`; not mounted; scheduler mutations unavailable without a supervisor adapter | Do not consume as a live API |
+| Web task lifecycle | Implemented in source; task owner is a mapped paired-device actor; SSE replays sanitized persisted events | Contracted; not live until browser credentials and device mapping are configured |
+| Web device status/revocation | Implemented in source; safe metadata only; revocation requires explicit confirmation | Contracted; never use this API to enroll a device |
+| Web automations | Opt-in dedicated scheduler; read_only occurrences go through durable Link supervisor tasks; update/pause/resume/soft-delete/manual trigger/history | Disabled unless `THOZHA_WEB_AUTOMATION_ENABLED=1` and an active Link runner/device mapping are available; no production schedule was created |
 | Jarvis Link encrypted relay | Versioned prototype protocol and local tests | No production deployment; not the current Android transport |
 | Live audio | Development protocol on loopback port 8766 through ADB reverse | Not available to Web and not USB-free |
-| Browser task event stream, Web approval actions, remote artifact gateway, public/Tailscale remote access | Not implemented/available | Requires separate implementation and security review |
+| Web automation scopes beyond `read_only`, notification history, public/Tailscale remote access | Not implemented/available | Requires separate security review and implementation |
 
 ## File ownership
 

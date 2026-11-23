@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import pathlib
@@ -321,6 +322,8 @@ def create_app(
     app.state._managed_runtime_stopping = False
     app.state.session_start = time.time()
     app.state.link_task_runner = None
+    app.state.web_automation_scheduler = None
+    app.state.web_automation_scheduler_store = None
 
     @app.on_event("startup")
     async def _start_durable_link_task_runner() -> None:
@@ -350,6 +353,9 @@ def create_app(
 
     @app.on_event("shutdown")
     async def _stop_durable_link_task_runner() -> None:
+        web_scheduler = getattr(app.state, "web_automation_scheduler", None)
+        if web_scheduler is not None:
+            await asyncio.to_thread(web_scheduler.close)
         link_runner = getattr(app.state, "link_task_runner", None)
         if link_runner is not None:
             await link_runner.stop()
@@ -584,6 +590,169 @@ def create_app(
                 is_web_device_mapped,
             )
         )
+
+        # Web automations are opt-in and use a dedicated, owner-only store.
+        # They never share the generic scheduler database, and the scheduler
+        # is not started unless the durable Link runner is healthy.
+        if os.environ.get("THOZHA_WEB_AUTOMATION_ENABLED", "") == "1":
+            from openjarvis.core.paths import get_config_dir
+            from openjarvis.scheduler.scheduler import (
+                TaskScheduler,
+                make_web_supervisor_dispatcher,
+            )
+            from openjarvis.scheduler.store import SchedulerStore
+            from openjarvis.server.thozha_automation_routes import (
+                create_automation_router,
+            )
+
+            automation_db = os.environ.get("THOZHA_WEB_AUTOMATION_DB")
+            if automation_db:
+                scheduler_store = SchedulerStore(automation_db)
+            else:
+                scheduler_store = SchedulerStore(
+                    get_config_dir() / "thozha_web_automations.db"
+                )
+            try:
+                poll_interval = int(
+                    os.environ.get("THOZHA_WEB_AUTOMATION_POLL_SECONDS", "5")
+                )
+                if not 1 <= poll_interval <= 120:
+                    raise ValueError("poll interval must be 1..120 seconds")
+            except ValueError as exc:
+                logger.warning(
+                    "Invalid Web automation poll interval; using safe default: %s",
+                    type(exc).__name__,
+                )
+                poll_interval = 5
+            web_scheduler = TaskScheduler(
+                scheduler_store, system=None, poll_interval=poll_interval
+            )
+            app.state.web_automation_scheduler = web_scheduler
+            app.state.web_automation_scheduler_store = scheduler_store
+
+            def web_device_ids(principal):
+                return resolve_web_device_ids(principal, app.state.supervisor_store)
+
+            def web_device_active(owner_id, device_id):
+                return is_web_device_active(
+                    owner_id, device_id, app.state.supervisor_store
+                )
+
+            def web_link_runner_ready():
+                runner = getattr(app.state, "link_task_runner", None)
+                return bool(getattr(runner, "is_running", False))
+
+            def web_automation_action(principal, action):
+                scheduler = app.state.web_automation_scheduler
+                if scheduler is None:
+                    raise NotImplementedError("Web automation scheduler is unavailable")
+                owner_id = (
+                    principal.get("user_id")
+                    if isinstance(principal, dict)
+                    else getattr(principal, "user_id", None)
+                )
+                if not isinstance(owner_id, str) or not owner_id:
+                    raise PermissionError("Web owner identity is unavailable")
+                operation = action.get("operation")
+                if operation == "create":
+                    automation = action.get("automation") or {}
+                    metadata = automation.get("metadata") or {}
+                    device_id = metadata.get("thozha_web_device_id")
+                    if (
+                        metadata.get("thozha_web_owner_id") != owner_id
+                        or not isinstance(device_id, str)
+                        or device_id not in web_device_ids(principal)
+                        or not web_device_active(owner_id, device_id)
+                    ):
+                        raise PermissionError("Web automation device is not authorized")
+                    task, created = scheduler.create_web_task(
+                        automation.get("prompt", ""),
+                        automation.get("schedule_type", ""),
+                        automation.get("schedule_value", ""),
+                        owner_id=owner_id,
+                        device_id=device_id,
+                        idempotency_key=action.get("idempotency_key", ""),
+                        timezone_name=automation.get("timezone"),
+                    )
+                    return {
+                        "task_id": task.id,
+                        "created": created,
+                        "status": task.status,
+                    }
+
+                automation_id = action.get("automation_id")
+                if not isinstance(automation_id, str):
+                    raise ValueError("automation ID is required")
+                task_record = scheduler.get_task(automation_id)
+                if task_record is None:
+                    raise KeyError("automation not found")
+                metadata = task_record.get("metadata") or {}
+                device_id = metadata.get("thozha_web_device_id")
+                if (
+                    metadata.get("thozha_web_owner_id") != owner_id
+                    or not isinstance(device_id, str)
+                    or not web_device_active(owner_id, device_id)
+                ):
+                    raise PermissionError("Web automation device is not authorized")
+
+                if operation == "update":
+                    changes = dict(action.get("changes") or {})
+                    if "timezone" in changes:
+                        changes["timezone_name"] = changes.pop("timezone")
+                    task = scheduler.update_task(automation_id, **changes)
+                    return {"task_id": task.id, "status": task.status}
+                if operation in {"enable", "resume"}:
+                    scheduler.resume_task(automation_id)
+                    return {"task_id": automation_id, "status": "active"}
+                if operation in {"disable", "pause"}:
+                    scheduler.pause_task(automation_id)
+                    return {"task_id": automation_id, "status": "paused"}
+                if operation == "delete":
+                    scheduler.delete_task(automation_id)
+                    return {"task_id": automation_id, "status": "cancelled"}
+                if operation == "manual_trigger":
+                    result = scheduler.run_task_once(
+                        automation_id,
+                        idempotency_key=action.get("idempotency_key", ""),
+                    )
+                    return {
+                        "task_id": automation_id,
+                        "supervisor_task_id": result.get("supervisor_task_id"),
+                        "state": result.get("state"),
+                        "status": result.get("state"),
+                    }
+                raise NotImplementedError("Web automation operation is unavailable")
+
+            app.include_router(
+                create_automation_router(
+                    require_web_session=require_web_session,
+                    scheduler_provider=lambda request: getattr(
+                        request.app.state, "web_automation_scheduler", None
+                    ),
+                    supervised_action=web_automation_action,
+                    resolve_web_device_ids=web_device_ids,
+                    is_web_device_active=web_device_active,
+                    supervisor_store_provider=lambda request: (
+                        request.app.state.supervisor_store
+                    ),
+                )
+            )
+
+            async def start_web_automation_scheduler() -> None:
+                if not web_link_runner_ready():
+                    logger.warning(
+                        "Web automation scheduler remains unavailable: durable Link runner is not active"
+                    )
+                    return
+                dispatcher = make_web_supervisor_dispatcher(
+                    app.state.supervisor_store,
+                    is_web_device_active=web_device_active,
+                    is_link_runner_ready=web_link_runner_ready,
+                )
+                web_scheduler.configure_web_supervisor_dispatcher(dispatcher)
+                web_scheduler.start()
+
+            app.router.add_event_handler("startup", start_web_automation_scheduler)
     elif any(
         os.environ.get(name)
         for name in (

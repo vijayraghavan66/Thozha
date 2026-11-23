@@ -49,6 +49,15 @@ class LinkTaskExecutionRunner:
         self._stopping = False
         self._loop_task: asyncio.Task | None = None
 
+    @property
+    def is_running(self) -> bool:
+        """Whether the durable queue consumer task is currently active."""
+        return bool(
+            not self._stopping
+            and self._loop_task is not None
+            and not self._loop_task.done()
+        )
+
     async def start(self) -> None:
         if self._loop_task is None:
             self._stopping = False
