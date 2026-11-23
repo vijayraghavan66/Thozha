@@ -7,6 +7,7 @@ import {
   useState,
   type FormEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   errorText,
@@ -22,6 +23,7 @@ import { Chip, Head, Loading, Modal, Notice, Panel } from '../components/ui';
 import { LiquidCard } from '../components/LiquidSurface';
 import { field, formatDate, muted, outline, solid } from '../components/styles';
 import { MarkdownMessage } from './MarkdownMessage';
+import { WaterSurface } from '../components/WaterSurface';
 import { detailKey, isPendingResponse, useConversationSnapshot } from './updates';
 
 const listKey = ['conversations'] as const;
@@ -66,15 +68,15 @@ function Message({
 }) {
   if (message.role === 'user') {
     return (
-      <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm border border-white/15 bg-[#2b2c32] px-4 py-3 text-[13px]">
+      <div className="th-v4-user-message ml-auto max-w-[85%] rounded-2xl rounded-br-sm border border-white/15 bg-[#2b2c32] px-4 py-3 text-[13px]">
         <span className="sr-only">You: </span>
         <p className="whitespace-pre-wrap break-words">{message.content}</p>
       </div>
     );
   }
   return (
-    <div className="max-w-[95%] text-[13px] leading-7 [content-visibility:auto] [contain-intrinsic-size:auto_64px]">
-      <div className="mb-2 text-[10px] font-bold tracking-widest text-[#aaacb5]">JARVIS</div>
+    <div className="th-v4-assistant-message max-w-[95%] text-[13px] leading-7 [content-visibility:auto] [contain-intrinsic-size:auto_64px]">
+      <div className="mb-2 text-[10px] font-bold tracking-widest text-[#aaacb5]">THOZHA</div>
       {message.status === 'completed' && <MarkdownMessage content={message.content} />}
       {isPendingResponse(message.status) && (
         <div className="flex flex-wrap items-center gap-3">
@@ -124,12 +126,14 @@ export default function ConversationWorkspace({
   connected,
   reduced,
   onReviewTask,
+  inspector,
 }: {
   api: WorkspaceApi;
   active: boolean;
   connected: boolean;
   reduced: boolean;
   onReviewTask: (objective: string) => void;
+  inspector: HTMLElement | null;
 }) {
   const cache = useQueryClient();
   const [selection, setSelection] = useState<string | null>(null);
@@ -151,6 +155,25 @@ export default function ConversationWorkspace({
   const fieldId = useId();
   const enabled = active && connected;
   useEffect(() => () => activeStream.current?.abort(), []);
+  useEffect(() => {
+    function selectFromLocation() {
+      if (!window.location.hash.startsWith('#/ai-workspace')) return;
+      const params = new URLSearchParams(window.location.hash.split('?')[1]);
+      if (params.has('new')) {
+        setCommandError('');
+        setDialog({ type: 'create' });
+        return;
+      }
+      const requested = params.get('conversation');
+      if (requested) {
+        setArchived(false);
+        setSelection(requested);
+      }
+    }
+    selectFromLocation();
+    window.addEventListener('hashchange', selectFromLocation);
+    return () => window.removeEventListener('hashchange', selectFromLocation);
+  }, []);
 
   const list = useQuery({ queryKey: listKey, queryFn: ({ signal }) => api.list(signal), enabled });
   const items = list.data?.items.filter(item => Boolean(item.archived_at) === archived) ?? [];
@@ -218,6 +241,7 @@ export default function ConversationWorkspace({
         }));
         setArchived(false);
         setSelection(created.id);
+        window.location.hash = `#/ai-workspace?conversation=${encodeURIComponent(created.id)}`;
         setNotice('Conversation created.');
       } else if (operation.type !== 'create') {
         const removedId = operation.conversation.id;
@@ -383,333 +407,379 @@ export default function ConversationWorkspace({
 
   return (
     <>
-      <Head
-        label="CONVERSATIONS / WEB v1"
-        title="AI Workspace"
-        desc="Continue owner-scoped conversations saved on your Thozha host."
-        action={
-          <button
-            type="button"
-            className={outline}
-            disabled={!connected || list.isPending}
-            onClick={() => openDialog({ type: 'create' })}
-          >
-            ＋ New conversation
-          </button>
-        }
-      />
-      <p role="status" className={notice ? `mb-3 ${muted}` : 'sr-only'}>
-        {notice}
-      </p>
-      <div className="grid grid-cols-[200px_minmax(0,1fr)_210px] gap-3 max-xl:grid-cols-[180px_minmax(0,1fr)] max-md:grid-cols-1">
-        <Panel cls="min-w-0 p-3">
-          <h2 className="px-2 py-2 text-xs font-semibold">Your conversations</h2>
-          <label className="flex items-center gap-2 px-2 pb-2 text-xs text-[#c4c5cb]">
-            <input
-              type="checkbox"
-              checked={archived}
-              onChange={event => {
-                setArchived(event.target.checked);
-                setSelection(null);
-              }}
-            />{' '}
-            Show archived
-          </label>
-          {list.isPending && <Loading label="Loading conversations…" />}
-          {list.isError && (
-            <Notice error retry={connected ? () => void list.refetch() : undefined}>
-              {errorText(list.error, 'load conversations')}
-            </Notice>
-          )}
-          {list.isSuccess && !items.length && (
-            <p className={`p-2 ${muted}`}>
-              {archived ? 'No archived conversations.' : 'No conversations yet.'}
-            </p>
-          )}
-          {items.length > 0 && (
-            <>
-              <label className="block px-2 text-xs md:hidden">
-                Current conversation
-                <select
-                  className={field + ' mt-2'}
-                  value={id ?? ''}
-                  onChange={event => setSelection(event.target.value)}
-                >
-                  {items.map(item => (
-                    <option value={item.id} key={item.id}>
-                      {item.title}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="hidden max-h-[530px] space-y-1 overflow-y-auto px-1 pb-2 md:block">
-                {items.map(item => (
-                  <LiquidCard
-                    key={item.id}
-                    aria-pressed={item.id === id}
-                    onClick={() => setSelection(item.id)}
-                    className={`w-full rounded-xl border px-3 py-3 text-left hover:bg-white/10 ${item.id === id ? 'border-white/25 bg-white/10' : 'border-white/10 bg-white/[.04]'}`}
-                  >
-                    <span className="block truncate text-xs">{item.title}</span>
-                    <span className="mt-2 block text-[10px] text-[#c4c5cb]">
-                      {formatDate(item.updated_at)}
-                    </span>
-                  </LiquidCard>
-                ))}
-              </div>
-            </>
-          )}
-        </Panel>
-        <Panel cls="flex min-h-[560px] min-w-0 flex-col overflow-hidden">
-          <div className="flex flex-wrap items-start justify-between gap-2 border-b border-white/10 p-5">
-            <div className="min-w-0">
-              <h2 className="break-words text-sm font-semibold">{selectedName ?? 'Jarvis'}</h2>
-              <p className="mt-1 text-[11px] text-[#c4c5cb]">
-                {archived
-                  ? 'Archived · read-only'
-                  : live?.conversationId === id && live.mode === 'buffered'
-                    ? 'Host conversation · buffered mode'
-                    : 'Host conversation · delivery depends on the configured model'}
-              </p>
-            </div>
-            <Chip>{connected ? 'WEB v1' : 'OFFLINE / UNVERIFIED'}</Chip>
-          </div>
-          {id && detail.isError && (
-            <div className="px-4 pt-4">
-              <Notice error retry={connected ? () => void detail.refetch() : undefined}>
-                {errorText(detail.error, 'load history')}
+      <div className="th-v4-chat-workspace">
+        <Head
+          label="CONVERSATIONS / WEB v1"
+          title="AI Workspace"
+          desc="A private place to think, write, and work through ideas."
+          action={
+            <button
+              type="button"
+              className={outline}
+              disabled={!connected || list.isPending}
+              onClick={() => openDialog({ type: 'create' })}
+            >
+              ＋ New conversation
+            </button>
+          }
+        />
+        <p role="status" className={notice ? `mb-3 ${muted}` : 'sr-only'}>
+          {notice}
+        </p>
+        <div className="th-v4-chat-grid">
+          <Panel cls="th-v4-conversation-list min-w-0 p-3">
+            <h2 className="px-2 py-2 text-xs font-semibold">Your conversations</h2>
+            {list.isPending && <Loading label="Loading conversations…" />}
+            {list.isError && (
+              <Notice error retry={connected ? () => void list.refetch() : undefined}>
+                {errorText(list.error, 'load conversations')}
               </Notice>
+            )}
+            {list.isSuccess && !items.length && (
+              <p className={`p-2 ${muted}`}>
+                {archived ? 'No archived conversations.' : 'No conversations yet.'}
+              </p>
+            )}
+            {items.length > 0 && (
+              <>
+                <label className="block px-2 text-xs md:hidden">
+                  Current conversation
+                  <select
+                    className={field + ' mt-2'}
+                    value={id ?? ''}
+                    onChange={event => {
+                      setSelection(event.target.value);
+                      window.location.hash = `#/ai-workspace?conversation=${encodeURIComponent(event.target.value)}`;
+                    }}
+                  >
+                    {items.map(item => (
+                      <option value={item.id} key={item.id}>
+                        {item.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="hidden max-h-[530px] space-y-1 overflow-y-auto px-1 pb-2 md:block">
+                  {items.map(item => (
+                    <LiquidCard
+                      key={item.id}
+                      aria-pressed={item.id === id}
+                      onClick={() => {
+                        setSelection(item.id);
+                        window.location.hash = `#/ai-workspace?conversation=${encodeURIComponent(item.id)}`;
+                      }}
+                      className={`w-full rounded-xl border px-3 py-3 text-left hover:bg-white/10 ${item.id === id ? 'border-white/25 bg-white/10' : 'border-white/10 bg-white/[.04]'}`}
+                    >
+                      <span className="block truncate text-xs">{item.title}</span>
+                      <span className="mt-2 block text-[10px] text-[#c4c5cb]">
+                        {formatDate(item.updated_at)}
+                      </span>
+                    </LiquidCard>
+                  ))}
+                </div>
+              </>
+            )}
+          </Panel>
+          <Panel cls="th-v4-conversation flex min-h-0 min-w-0 flex-col overflow-hidden">
+            <div className="flex flex-wrap items-start justify-between gap-2 border-b border-white/10 p-5">
+              <div className="min-w-0">
+                <h2 className="break-words text-sm font-semibold">
+                  {selectedName ?? 'A space for your next thought'}
+                </h2>
+                <p className="mt-1 text-[11px] text-[#c4c5cb]">
+                  {archived
+                    ? 'Archived · read-only'
+                    : live?.conversationId === id && live.mode === 'buffered'
+                      ? 'Host conversation · buffered mode'
+                      : 'Host conversation · delivery depends on the configured model'}
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                <label className="flex items-center gap-2 text-xs text-[#c4c5cb]">
+                  <input
+                    type="checkbox"
+                    checked={archived}
+                    onChange={event => {
+                      setArchived(event.target.checked);
+                      setSelection(null);
+                    }}
+                  />
+                  Show archived
+                </label>
+                <Chip>{connected ? 'WEB v1' : 'OFFLINE / UNVERIFIED'}</Chip>
+              </div>
             </div>
-          )}
-          {id && cancelError?.id === id && (
-            <div className="px-4 pt-4">
-              <Notice error>{cancelError.message}</Notice>
-            </div>
-          )}
-          <div
-            ref={log}
-            aria-label="Conversation messages"
-            role="region"
-            tabIndex={snapshot?.messages.length ? 0 : undefined}
-            onScroll={event => {
-              const el = event.currentTarget;
-              followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
-            }}
-            className="flex max-h-[58dvh] min-h-[335px] flex-1 flex-col gap-5 overflow-y-auto p-5"
-          >
-            {!id && list.isSuccess && (
-              <div className={`m-auto text-center ${muted}`}>
-                {archived
-                  ? 'Archived conversations appear here.'
-                  : 'Create a conversation to start chatting.'}
+            {id && detail.isError && (
+              <div className="px-4 pt-4">
+                <Notice error retry={connected ? () => void detail.refetch() : undefined}>
+                  {errorText(detail.error, 'load history')}
+                </Notice>
               </div>
             )}
-            {id && detail.isPending && (
-              <Loading
-                label={
-                  connected ? 'Loading saved history…' : 'History will load after reconnection.'
-                }
-              />
+            {id && cancelError?.id === id && (
+              <div className="px-4 pt-4">
+                <Notice error>{cancelError.message}</Notice>
+              </div>
             )}
-            {snapshot && !snapshot.messages.length && (
-              <div className={`m-auto text-center ${muted}`}>
-                What can I help you explore?
-                {!archived && (
-                  <div className="mt-4 flex flex-wrap justify-center gap-2">
-                    {['Explain Java', 'Outline a travel plan'].map(prompt => (
-                      <button
-                        type="button"
-                        className={outline}
-                        key={prompt}
-                        disabled={!canWrite}
-                        onClick={() => {
-                          setDrafts(previous => ({ ...previous, [snapshot.id]: prompt }));
-                          composer.current?.focus();
-                        }}
-                      >
-                        {prompt}
-                      </button>
-                    ))}
+            <div
+              ref={log}
+              aria-label="Conversation messages"
+              role="region"
+              tabIndex={snapshot?.messages.length ? 0 : undefined}
+              onScroll={event => {
+                const el = event.currentTarget;
+                followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+              }}
+              className="th-v4-message-log flex min-h-[230px] flex-1 flex-col gap-7 overflow-y-auto p-5"
+            >
+              {!id && list.isSuccess && (
+                <div className="th-v4-empty m-auto text-center">
+                  <span className="th-v4-empty-mark" aria-hidden="true">
+                    ✳
+                  </span>
+                  <h2>{archived ? 'Your archive is quiet.' : 'Make room for a thought.'}</h2>
+                  <p>
+                    {archived
+                      ? 'No archived conversations.'
+                      : 'Start a conversation. Your history stays on your Thozha host.'}
+                  </p>
+                  {!archived && (
+                    <button
+                      type="button"
+                      className={solid}
+                      onClick={() => openDialog({ type: 'create' })}
+                      disabled={!connected}
+                    >
+                      New conversation
+                    </button>
+                  )}
+                </div>
+              )}
+              {id && detail.isPending && (
+                <Loading
+                  label={
+                    connected ? 'Loading saved history…' : 'History will load after reconnection.'
+                  }
+                />
+              )}
+              {snapshot && !snapshot.messages.length && (
+                <div className="th-v4-empty m-auto text-center">
+                  <div className="th-v4-empty-material">
+                    <WaterSurface reduced={reduced || !active} />
+                  </div>
+                  <span className="th-v4-empty-mark" aria-hidden="true">
+                    ✳
+                  </span>
+                  <h2>Where should we begin?</h2>
+                  <p>Ask a question, draft an idea, or explore something new.</p>
+                  {!archived && (
+                    <div className="mt-4 flex flex-wrap justify-center gap-2">
+                      {['Explain Java', 'Outline a travel plan'].map(prompt => (
+                        <button
+                          type="button"
+                          className={outline}
+                          key={prompt}
+                          disabled={!canWrite}
+                          onClick={() => {
+                            setDrafts(previous => ({ ...previous, [snapshot.id]: prompt }));
+                            composer.current?.focus();
+                          }}
+                        >
+                          {prompt}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+              {messages?.map(message => {
+                const firstPrompt = message.response_to
+                  ? prompts.get(message.response_to)
+                  : undefined;
+                return (
+                  <Message
+                    key={message.id}
+                    message={message}
+                    cancellation={pendingCancellation.has(message.id)}
+                    live={live?.responseId === message.id ? live : undefined}
+                    cancel={
+                      connected && id && !cancel.isPending
+                        ? () => cancel.mutate({ conversationId: id, responseId: message.id })
+                        : undefined
+                    }
+                    reuse={
+                      firstPrompt && id && canWrite && !composerDisabled
+                        ? () => {
+                            setDrafts(previous => ({ ...previous, [id]: firstPrompt }));
+                            composer.current?.focus();
+                          }
+                        : undefined
+                    }
+                  />
+                );
+              })}
+              {awaitingHistory && (
+                <p role="status" className={muted}>
+                  Message accepted. Waiting for its saved response status…
+                </p>
+              )}
+            </div>
+            {issue && (
+              <div className="mx-4">
+                <Notice error>
+                  {issue.message}
+                  {issue.uncertain &&
+                    ' The server may have accepted it. A safe retry uses the original submission key.'}
+                </Notice>
+                {issue.uncertain && (
+                  <div className="my-2 flex flex-wrap gap-2">
+                    <button
+                      className={outline}
+                      type="button"
+                      disabled={!connected || send.isPending}
+                      onClick={() => beginSend(issue.attempt, true)}
+                    >
+                      Retry send safely
+                    </button>
+                    <button
+                      className={outline}
+                      type="button"
+                      disabled={send.isPending}
+                      onClick={() => {
+                        setIssues(previous => ({ ...previous, [issue.attempt.id]: undefined }));
+                        setDrafts(previous => ({ ...previous, [issue.attempt.id]: '' }));
+                        void cache.invalidateQueries({ queryKey: detailKey(issue.attempt.id) });
+                        setNotice(
+                          'Draft discarded. Check saved history to see whether the message was accepted.'
+                        );
+                      }}
+                    >
+                      Discard draft and check history
+                    </button>
                   </div>
                 )}
               </div>
             )}
-            {messages?.map(message => {
-              const firstPrompt = message.response_to
-                ? prompts.get(message.response_to)
-                : undefined;
-              return (
-                <Message
-                  key={message.id}
-                  message={message}
-                  cancellation={pendingCancellation.has(message.id)}
-                  live={live?.responseId === message.id ? live : undefined}
-                  cancel={
-                    connected && id && !cancel.isPending
-                      ? () => cancel.mutate({ conversationId: id, responseId: message.id })
-                      : undefined
-                  }
-                  reuse={
-                    firstPrompt && id && canWrite && !composerDisabled
-                      ? () => {
-                          setDrafts(previous => ({ ...previous, [id]: firstPrompt }));
-                          composer.current?.focus();
-                        }
-                      : undefined
-                  }
+            {!archived && (
+              <form
+                onSubmit={submit}
+                className="m-4 rounded-2xl border border-white/20 bg-[#222329] p-2"
+              >
+                <textarea
+                  ref={composer}
+                  rows={2}
+                  maxLength={maxMessageLength}
+                  value={draft}
+                  readOnly={!canWrite || sending || Boolean(issue?.uncertain)}
+                  onChange={event => {
+                    if (id) setDrafts(previous => ({ ...previous, [id]: event.target.value }));
+                  }}
+                  onKeyDown={event => {
+                    if (
+                      event.key === 'Enter' &&
+                      !event.shiftKey &&
+                      !event.nativeEvent.isComposing
+                    ) {
+                      event.preventDefault();
+                      event.currentTarget.form?.requestSubmit();
+                    }
+                  }}
+                  placeholder="Message Thozha…"
+                  aria-label="Message Jarvis"
+                  aria-describedby={fieldId}
+                  className="min-h-[48px] w-full resize-y rounded-lg bg-transparent px-3 py-2 text-xs leading-6 text-white placeholder:text-[#a4a5af]"
                 />
-              );
-            })}
-            {awaitingHistory && (
-              <p role="status" className={muted}>
-                Message accepted. Waiting for its saved response status…
-              </p>
-            )}
-          </div>
-          {issue && (
-            <div className="mx-4">
-              <Notice error>
-                {issue.message}
-                {issue.uncertain &&
-                  ' The server may have accepted it. A safe retry uses the original submission key.'}
-              </Notice>
-              {issue.uncertain && (
-                <div className="my-2 flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1">
+                  <span id={fieldId} className="text-[10px] text-[#a4a5af]">
+                    Enter to send · Shift+Enter for newline
+                  </span>
                   <button
-                    className={outline}
-                    type="button"
-                    disabled={!connected || send.isPending}
-                    onClick={() => beginSend(issue.attempt, true)}
+                    disabled={composerDisabled || !draft.trim()}
+                    className={solid}
+                    type="submit"
                   >
-                    Retry send safely
-                  </button>
-                  <button
-                    className={outline}
-                    type="button"
-                    disabled={send.isPending}
-                    onClick={() => {
-                      setIssues(previous => ({ ...previous, [issue.attempt.id]: undefined }));
-                      setDrafts(previous => ({ ...previous, [issue.attempt.id]: '' }));
-                      void cache.invalidateQueries({ queryKey: detailKey(issue.attempt.id) });
-                      setNotice(
-                        'Draft discarded. Check saved history to see whether the message was accepted.'
-                      );
-                    }}
-                  >
-                    Discard draft and check history
+                    {sending ? 'Sending…' : 'Send ↑'}
                   </button>
                 </div>
-              )}
-            </div>
-          )}
-          {!archived && (
-            <form
-              onSubmit={submit}
-              className="m-4 rounded-2xl border border-white/20 bg-[#222329] p-2"
-            >
-              <textarea
-                ref={composer}
-                rows={2}
-                maxLength={maxMessageLength}
-                value={draft}
-                readOnly={!canWrite || sending || Boolean(issue?.uncertain)}
-                onChange={event => {
-                  if (id) setDrafts(previous => ({ ...previous, [id]: event.target.value }));
-                }}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                    event.preventDefault();
-                    event.currentTarget.form?.requestSubmit();
-                  }
-                }}
-                placeholder="Ask Jarvis anything…"
-                aria-label="Message Jarvis"
-                aria-describedby={fieldId}
-                className="min-h-[48px] w-full resize-y rounded-lg bg-transparent px-3 py-2 text-xs leading-6 text-white placeholder:text-[#a4a5af]"
-              />
-              <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1">
-                <span id={fieldId} className="text-[10px] text-[#a4a5af]">
-                  Enter to send · Shift+Enter for newline
-                </span>
-                <button
-                  disabled={composerDisabled || !draft.trim()}
-                  className={solid}
-                  type="submit"
-                >
-                  {sending ? 'Sending…' : 'Send ↑'}
-                </button>
-              </div>
-            </form>
-          )}
-        </Panel>
-        <Panel cls="h-fit min-w-0 p-5 md:max-xl:col-span-2">
-          <div className="mb-4 flex flex-wrap justify-between gap-2">
-            <h2 className="text-xs font-semibold">Context</h2>
-            <Chip>WEB v1</Chip>
-          </div>
-          <div className="rounded-xl border border-white/10 bg-white/[.04] p-4">
-            <b className="text-xs">Conversation only</b>
-            <p className={`mt-2 ${muted}`}>
-              Jarvis can use this conversation’s history. Browser chat cannot run Mac tools.
-              Incremental replies require a streaming model.
-            </p>
-            <button
-              type="button"
-              className={`${outline} mt-3`}
-              disabled={!connected}
-              onClick={() => onReviewTask(draft.trim())}
-            >
-              Review as supervisor task
-            </button>
-            <p className={`mt-2 ${muted}`}>
-              Open a separate task form, optionally with your current draft. Nothing is submitted
-              automatically.
-            </p>
-          </div>
-          {snapshot && (
-            <details className="mt-4">
-              <summary className="text-xs font-semibold">
-                Response events ({snapshot.events.length})
-              </summary>
-              {snapshot.events.length ? (
-                <ol className="mt-3 max-h-64 space-y-2 overflow-auto border-l border-white/20 pl-3">
-                  {snapshot.events.map(event => (
-                    <li key={event.sequence} className="text-[11px] text-[#c4c5cb]">
-                      <p>{eventLabels[event.event_type]}</p>
-                      <time className="text-[10px] text-[#a4a5af]" dateTime={event.created_at}>
-                        {formatDate(event.created_at)}
-                      </time>
-                    </li>
-                  ))}
-                </ol>
-              ) : (
-                <p className={`mt-3 ${muted}`}>No response events yet.</p>
-              )}
-            </details>
-          )}
-          {selected && snapshot && (
-            <div className="mt-4 flex flex-wrap gap-2">
-              {!archived && (
-                <button
-                  type="button"
-                  disabled={!connected || pending || awaitingHistory || sending}
-                  onClick={() => openDialog({ type: 'archive', conversation: selected })}
-                  className={outline}
-                >
-                  Archive
-                </button>
-              )}
-              <button
-                type="button"
-                disabled={!connected || pending || awaitingHistory || sending}
-                onClick={() => openDialog({ type: 'delete', conversation: selected })}
-                className={outline}
-              >
-                Delete
-              </button>
-            </div>
-          )}
-        </Panel>
+              </form>
+            )}
+          </Panel>
+          {inspector &&
+            createPortal(
+              <div className="th-v4-chat-context">
+                <div className="mb-4 flex flex-wrap justify-between gap-2">
+                  <h2 className="text-xs font-semibold">Context</h2>
+                  <Chip>WEB v1</Chip>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-white/[.04] p-4">
+                  <b className="text-xs">Conversation only</b>
+                  <p className={`mt-2 ${muted}`}>
+                    Jarvis can use this conversation’s history. Browser chat cannot run Mac tools.
+                    Incremental replies require a streaming model.
+                  </p>
+                  <button
+                    type="button"
+                    className={`${outline} mt-3`}
+                    disabled={!connected}
+                    onClick={() => onReviewTask(draft.trim())}
+                  >
+                    Review as supervisor task
+                  </button>
+                  <p className={`mt-2 ${muted}`}>
+                    Open a separate task form, optionally with your current draft. Nothing is
+                    submitted automatically.
+                  </p>
+                </div>
+                {snapshot && (
+                  <details className="mt-4">
+                    <summary className="text-xs font-semibold">
+                      Response events ({snapshot.events.length})
+                    </summary>
+                    {snapshot.events.length ? (
+                      <ol className="mt-3 max-h-64 space-y-2 overflow-auto border-l border-white/20 pl-3">
+                        {snapshot.events.map(event => (
+                          <li key={event.sequence} className="text-[11px] text-[#c4c5cb]">
+                            <p>{eventLabels[event.event_type]}</p>
+                            <time
+                              className="text-[10px] text-[#a4a5af]"
+                              dateTime={event.created_at}
+                            >
+                              {formatDate(event.created_at)}
+                            </time>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p className={`mt-3 ${muted}`}>No response events yet.</p>
+                    )}
+                  </details>
+                )}
+                {selected && snapshot && (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {!archived && (
+                      <button
+                        type="button"
+                        disabled={!connected || pending || awaitingHistory || sending}
+                        onClick={() => openDialog({ type: 'archive', conversation: selected })}
+                        className={outline}
+                      >
+                        Archive
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={!connected || pending || awaitingHistory || sending}
+                      onClick={() => openDialog({ type: 'delete', conversation: selected })}
+                      className={outline}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                )}
+              </div>,
+              inspector
+            )}
+        </div>
       </div>
       {dialog && (
         <Modal

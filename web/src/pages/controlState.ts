@@ -47,5 +47,5 @@ export function controlError(error: unknown, action: string) {
 }
 
 export function taskHref(taskId: string) {
-  return `#/developer-studio?task=${encodeURIComponent(taskId)}`;
+  return `#/tasks?task=${encodeURIComponent(taskId)}`;
 }

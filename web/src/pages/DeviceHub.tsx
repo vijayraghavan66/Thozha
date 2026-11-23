@@ -107,62 +107,68 @@ export default function DeviceHub({ api, connected }: { api: WorkspaceApi; conne
           </p>
         </Panel>
       )}
-      <div className="grid grid-cols-4 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
-        {items.map(item => (
-          <LiquidCard
-            key={item.device_id}
-            aria-pressed={item.device_id === deviceId}
-            onClick={() => {
-              select(item.device_id);
-              setMessage('');
-            }}
-            className={`flex min-h-[145px] min-w-0 flex-col items-start rounded-2xl border p-5 text-left ${item.device_id === deviceId ? 'border-white/40 bg-[#292a30]' : 'border-white/10 bg-[#17181b]'}`}
-          >
-            <span aria-hidden="true" className="text-3xl">
-              ⌘
-            </span>
-            <b className="mt-5 w-full break-words text-sm">{item.device_name}</b>
-            <p className={`mt-2 ${muted}`}>Active pairing · {item.device_id.slice(0, 8)}</p>
-          </LiquidCard>
-        ))}
+      <div className="th-v4-device-layout">
+        <div className="th-v4-device-list">
+          {items.map(item => (
+            <LiquidCard
+              key={item.device_id}
+              aria-pressed={item.device_id === deviceId}
+              onClick={() => {
+                select(item.device_id);
+                setMessage('');
+              }}
+              className={`flex min-w-0 items-center gap-3 rounded-xl border p-4 text-left ${item.device_id === deviceId ? 'border-white/40 bg-[#292a30]' : 'border-white/10 bg-[#17181b]'}`}
+            >
+              <span aria-hidden="true" className="text-xl">
+                ⌘
+              </span>
+              <span className="min-w-0">
+                <b className="block truncate text-sm">{item.device_name}</b>
+                <span className={`block ${muted}`}>
+                  Active pairing · {item.device_id.slice(0, 8)}
+                </span>
+              </span>
+            </LiquidCard>
+          ))}
+        </div>
+        {deviceId && (
+          <Panel key={deviceId} cls="th-enter min-w-0 p-6">
+            <h2 className="font-semibold">Pairing details</h2>
+            {detail.isPending && connected && <Loading label="Loading pairing details…" />}
+            {detail.isError && (
+              <Notice error retry={connected ? () => void detail.refetch() : undefined}>
+                {controlError(detail.error, 'read pairing details')}
+              </Notice>
+            )}
+            {pairing && (
+              <>
+                <Row
+                  main={pairing.device_name}
+                  sub={pairing.device_id}
+                  right={<Chip>ACTIVE PAIRING</Chip>}
+                />
+                <Row main="Paired" sub={formatDate(pairing.created_at)} />
+                <Row main="Expires" sub={formatDate(pairing.expires_at)} />
+                <p className={`my-3 ${muted}`}>
+                  Web v1 does not expose network presence, discovery, enrollment or permission
+                  editing.
+                </p>
+                <button
+                  type="button"
+                  className={outline}
+                  onClick={() => {
+                    revoke.reset();
+                    setConfirm(pairing);
+                  }}
+                  disabled={!connected || devices.isFetching}
+                >
+                  Revoke device
+                </button>
+              </>
+            )}
+          </Panel>
+        )}
       </div>
-      {deviceId && (
-        <Panel key={deviceId} cls="th-enter mt-5 p-6">
-          <h2 className="font-semibold">Pairing details</h2>
-          {detail.isPending && connected && <Loading label="Loading pairing details…" />}
-          {detail.isError && (
-            <Notice error retry={connected ? () => void detail.refetch() : undefined}>
-              {controlError(detail.error, 'read pairing details')}
-            </Notice>
-          )}
-          {pairing && (
-            <>
-              <Row
-                main={pairing.device_name}
-                sub={pairing.device_id}
-                right={<Chip>ACTIVE PAIRING</Chip>}
-              />
-              <Row main="Paired" sub={formatDate(pairing.created_at)} />
-              <Row main="Expires" sub={formatDate(pairing.expires_at)} />
-              <p className={`my-3 ${muted}`}>
-                Web v1 does not expose network presence, discovery, enrollment or permission
-                editing.
-              </p>
-              <button
-                type="button"
-                className={outline}
-                onClick={() => {
-                  revoke.reset();
-                  setConfirm(pairing);
-                }}
-                disabled={!connected || devices.isFetching}
-              >
-                Revoke device
-              </button>
-            </>
-          )}
-        </Panel>
-      )}
       {confirm && (
         <Modal
           title="Revoke paired device?"

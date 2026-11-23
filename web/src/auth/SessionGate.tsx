@@ -254,25 +254,20 @@ export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
   }
 
   return (
-    <main className="th-workspace grid min-h-dvh items-center bg-[#08090b] p-4 text-[#ececf0] md:p-10">
-      <div className="th-enter mx-auto grid w-full max-w-[960px] overflow-hidden rounded-[24px] border border-white/10 bg-[#101114] shadow-[0_40px_130px_rgba(0,0,0,.5)] md:grid-cols-[1.1fr_1fr]">
-        <div className="relative overflow-hidden bg-[#202126] p-8 md:p-10">
+    <main className="th-workspace th-v4-auth grid min-h-dvh items-center bg-[#0e0f11] p-4 text-[#ececf0] md:p-10">
+      <div className="th-enter mx-auto w-full max-w-[440px] overflow-hidden rounded-[22px] border border-white/10 bg-[#17181b] shadow-[0_40px_130px_rgba(0,0,0,.32)]">
+        <div className="relative overflow-hidden border-b border-white/10 p-7">
           <WaterSurface quiet />
           <div className="relative">
             <Crest />
-            <p className="mt-8 text-[10px] font-semibold tracking-[.25em] text-[#c4c5cb]">
-              THOZHA / WEB ALPHA
+            <p className="mt-4 text-lg font-semibold tracking-tight">
+              thozha<span className="text-[#858690]">.</span>
             </p>
-            <p className="mt-4 text-3xl font-medium leading-tight tracking-[-.055em] md:text-[42px]">
-              Intelligence,
-              <br />
-              <span className="text-[#aeb0b9]">without the noise.</span>
-            </p>
-            <p className={`mt-4 ${muted}`}>Your private, personal workspace.</p>
+            <p className={`mt-1 ${muted}`}>Your private AI workspace</p>
           </div>
         </div>
-        <div className="p-5 md:p-8">
-          <Panel cls="p-5 md:p-6">
+        <div className="p-5 md:p-7">
+          <Panel cls="border-0 bg-transparent p-0 shadow-none">
             <Chip>OWNER SESSION</Chip>
             <h1 className="mb-4 mt-4 text-2xl font-semibold tracking-tight">Sign in to Thozha</h1>
             {(state.kind === 'checking' || state.kind === 'signing-out') && (

@@ -7,5 +7,5 @@ export async function signIn(page: Page, path = '/') {
   await page.getByLabel('Workspace ID').fill('web-e2e-owner');
   await page.getByLabel('Password').fill(password);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByText('WEB ALPHA', { exact: true })).toBeVisible();
+  await expect(page.locator('.th-workspace.th-v4')).toBeVisible();
 }

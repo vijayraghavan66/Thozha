@@ -1,6 +1,6 @@
-# Thozha Web Alpha 0.1
+# Thozha Web Workspace
 
-The Web Workspace is a React, TypeScript, Vite, and Tailwind application in the Copilot-owned `web/` directory. It integrates the approved MagicPath export `sunnily-current-6815` (project `475494667987865600`, component `475494671267811328`). The original graphite shell, sidebar, panel layouts, Trading Lab interactions, Inter typography, and water keyframes were carried forward. The export contained no separate image assets. Its ZIP SHA-256 was `714a01526bc5ba8365aa81ddac11ff687bbbe373d3745006c9b6c1c9a78df111`.
+The Web Workspace is a React, TypeScript, Vite, and Tailwind application in the Copilot-owned `web/` directory. The 4.0 interface replaces the original MagicPath-derived Overview-first dashboard with a conversation-first desktop workspace. The earlier export `sunnily-current-6815` (project `475494667987865600`, component `475494671267811328`) remains provenance, not the current layout. Its ZIP SHA-256 was `714a01526bc5ba8365aa81ddac11ff687bbbe373d3745006c9b6c1c9a78df111`.
 
 ## Run locally
 
@@ -9,7 +9,7 @@ The Web Workspace is a React, TypeScript, Vite, and Tailwind application in the 
 3. For loopback development only, configure `THOZHA_WEB_ORIGIN=http://127.0.0.1:5173` and `THOZHA_WEB_ALLOW_INSECURE_LOOPBACK_DEV=1` on the backend. Start `npm run dev` in `web/` and open `http://127.0.0.1:5173` (not `localhost`). If the backend uses a different loopback port, set `THOZHA_WEB_UPSTREAM=http://127.0.0.1:<port>` on the **Vite process**.
 4. Sign in with the browser owner ID and password. There is no default owner or frontend authentication bypass. `npm run build` produces `dist/`. For local production preview, use `npm run preview` and configure the backend origin to `http://127.0.0.1:4173` instead.
 
-Use `Ctrl+K` / `⌘K` to jump to pages, `Escape` to close dialogs, and `Enter` / `Shift+Enter` to send / insert a newline. The workspace respects system and in-app reduced-motion preferences. On desktop the 237px navigation rail and top bar stay in place; only the active page scrolls. At narrow widths the rail becomes a focus-managed navigation drawer. Settings groups browser session, visual preferences, and unavailable integrations; the sign-out control remains reachable when zoomed or on short screens.
+Use `Ctrl+K` / `⌘K` to jump to pages, `Escape` to close dialogs and the mobile context sheet, and `Enter` / `Shift+Enter` to send / insert a newline. The workspace respects system and in-app reduced-motion preferences. AI Workspace opens first. On desktop the 252px rail can contract to 68px; the inspector can close to return space to the conversation. The header stays fixed while only the active view or message log scrolls. On smaller screens the rail becomes a focus-managed navigation drawer and the inspector a dismissible sheet. Settings and sign-out remain accessible when zoomed or on short screens.
 
 ### Run alongside an existing OpenJarvis service
 
@@ -47,7 +47,7 @@ The backend sets and validates the opaque `HttpOnly`, `SameSite=Strict` cookie. 
 
 | Workspace area        | Alpha behavior                                                                                                                                                                                                                                                                                                                                                                       |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Overview and Settings | Live owner-scoped task, mapped-pairing and pending-approval snapshots where available. Browser session verification, expiry and sign-out. No claim about Mac reachability or model health.                                                                                                                                                                                           |
+| Settings              | Browser session verification, expiry, sign-out, motion preference, and honestly labeled unavailable integrations. No claim about Mac reachability or model health.                                                                                                                                                                                                                   |
 | AI Workspace          | Owner-scoped conversations, persisted history, archival/deletion, Markdown, submission, replay and cancellation. **Review as supervisor task** prefills a separate form from the current draft. It does not send a chat message, submit a task, or authorize a tool.                                                                                                                 |
 | Conversation delivery | Incremental SSE only when the engine reports actual deltas; Codex SDK is buffered. A missing SSE route falls back to the verified `202` API and persisted status. Cancellation suppresses late output but cannot forcibly interrupt a blocking model call.                                                                                                                           |
 | Memory Center         | Owner-scoped create, list, detail, substring search and confirmed delete. No update, automatic retention or semantic retrieval in Web v1.                                                                                                                                                                                                                                            |
@@ -60,6 +60,26 @@ The backend sets and validates the opaque `HttpOnly`, `SameSite=Strict` cookie. 
 | Other integrations    | No GitHub/CI provider, notification history, unread counts, or standard browser route for live host/device presence.                                                                                                                                                                                                                                                                 |
 
 Demo chats, approvals, and fake device/task results from the export are deliberately not migrated into the live workspace.
+
+## 4.0 functional inventory and information architecture
+
+The redesign kept the established request clients and query keys. [`SessionGate`](./src/auth/SessionGate.tsx) verifies the cookie before private UI or queries mount and owns sign-out and private-cache disposal. The shell reads the existing conversation list for recent history, and the center [`ConversationWorkspace`](./src/chat/ConversationWorkspace.tsx) still owns creation, saved messages, stream/buffer fallback, idempotent retry, cancellation, archive/delete, Markdown/code copying, and unsent drafts. Its contextual task-review action opens a **separate** form without submission. Conversation IDs remain server-issued; the hash only selects them.
+
+| Destination            | Center workspace                                                           | Context and authorized data                                                                                                                 |
+| ---------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| AI Workspace (landing) | Conversation reader, multiline composer, saved history and response states | Collapsible conversation events and draft-to-task review, active supervisor tasks and pending approval links; unavailable access is labeled |
+| Tasks                  | Supervisor submission and persisted task timeline                          | Collapsible active-task links; task detail follows replayable SSE, cancellation and verified result/artifact download                       |
+| Approvals              | Exact-operation review queue and decision modal                            | Mapped-device list used for backend-enforced identity, digest and expiry                                                                    |
+| Automations            | Capability-gated schedule form, list, selected details and run history     | No invented schedules when the backend feature is disabled                                                                                  |
+| Memory Center          | Create/search form beside saved entries and selected detail                | Confirmed deletion and explicit retention limits                                                                                            |
+| Device Hub             | Mapped-pairing list and selected-device details                            | Confirmed revocation; no browser discovery or token exposure                                                                                |
+| Trading Lab            | Explicitly fictional paper portfolio, ticket, positions and ledger         | Browser-local only; no market feed or real orders                                                                                           |
+| Developer Studio       | Supervisor evidence timeline and approval queue                            | GitHub/CI status explicitly unconnected; no fabricated build results                                                                        |
+| Settings               | Session, visual preferences, integration limitations                       | Backend-origin session check and sign-out                                                                                                   |
+
+[`controlState`](./src/pages/controlState.ts) shares backend task, approval and device queries between the shell and pages. [`TaskDetail`](./src/pages/TaskDetail.tsx) keeps SSE replay and artifact integrity verification; [`api/`](./src/api) and generated contracts are unchanged. The inspector does not claim presence or model health. Compact AI empty states use the existing bounded Water Lab engine behind a small masked material; the shader pauses when chat is inactive and no other UI control creates a WebGL context. Anchored search/notifications and the traveling nav indicator keep the original keyboard and reduced-motion behavior.
+
+The Chromium walkthrough in [`workspace.spec.ts`](./e2e/workspace.spec.ts) captures the actual desktop and mobile state of all nine destinations plus a browser screencast started **after** fixture sign-in. Test sessions are isolated; screenshots of unavailable capabilities report their true state. The live supervisor worker remains a separate backend prerequisite, not a feature supplied by this redesign.
 
 ## Verification
 
@@ -85,8 +105,8 @@ A separate Chromium attempt against the unmodified backend with its actual Ollam
 ### Latest verification
 
 - Strict TypeScript, ESLint, the production build, and all 15 Vitest unit/component tests passed.
-- All 22 Chromium tests passed (16 workspace, 6 supervisor control), plus a separate buffered-chat case. Axe found no violations on the scanned screens, including the schedule history view.
-- The production build reported 124.12 kB of entry JavaScript and 9.23 kB of CSS gzipped. One warm Chromium loopback navigation measured 6 ms to `DOMContentLoaded`; none of the AI Workspace, Trading Lab, or Memory Center chunks loaded on Overview. This is not a deployment or model latency benchmark.
+- The 4.0 suite covers 25 Chromium cases (19 workspace, 6 supervisor control) plus a separate buffered-chat case. It retains cookie-session, conversation, cancellation, memory, approval, device, automation, SSE, artifact and integrity checks while adding lazy chat entry, rail/inspector, all-route layout and Water Lab lifecycle checks. Axe found no violations on scanned desktop and mobile views.
+- A production build measured 126.30 kB of entry JavaScript and 10.75 kB of CSS gzipped. One loopback navigation measured 6 ms to `DOMContentLoaded`; Trading Lab and Memory Center stayed lazy on the AI landing. In a short Chromium run on this Mac, navigation at 1440×900 without recording had a 16.7 ms p95 browser frame interval, with zero intervals over 25 ms among 146 samples. During the walkthrough recording it was 16.8 ms p95 with two intervals over 25 ms among 1,060 samples. These are browser frame intervals, not shader timings, battery metrics, or low-end hardware evidence.
 
 Archival Alpha screenshots (the conversation uses the labeled test engine): [Sign-in](./docs/alpha-visuals/sign-in.png) · [Desktop Overview](./docs/alpha-visuals/desktop-overview.png) · [Desktop conversation](./docs/alpha-visuals/desktop-conversation.png) · [Mobile conversation](./docs/alpha-visuals/mobile-conversation.png).
 
@@ -104,7 +124,7 @@ The lab uses a Node static server, JavaScript springs, WebGL 2 / GLSL ES 3.00, a
 
 ### Measured on this Mac
 
-Headless Chromium 159 on Apple M5 / ANGLE Metal, 1280×800 at 1×. Recording was off during measurements. The Thozha rows use the production builds with the same pointer sweep over approximately six seconds; lab rows are short ambient samples of the original fullscreen demos.
+**Archival 3.0 comparison, before the 4.0 shell:** Headless Chromium 159 on Apple M5 / ANGLE Metal, 1280×800 at 1×. Recording was off during measurements. The Thozha rows use the then-current production builds with the same pointer sweep over approximately six seconds; lab rows are short ambient samples of the original fullscreen demos. The 4.0 chat material is much smaller; these GPU and memory values must not be presented as its benchmark.
 
 | Case                              | Browser frame interval p95 | Browser intervals > 25 ms | Main-thread task time per elapsed second | GPU draw p95 |
 | --------------------------------- | -------------------------: | ------------------------: | ---------------------------------------: | -----------: |
@@ -118,7 +138,7 @@ The integrated hero rendered into an 883×294 buffer for a 943×314 CSS-pixel ar
 
 ### Workspace layout and motion history
 
-The approved monochrome surfaces and navigation were retained. The first refinement used layered SVG wave contours and pointer parallax. Header search expanded left from its fixed magnifier/X, and the mobile drawer retained native focus and dismissal. Desktop navigation used one sliding active surface.
+The prior Overview hero used a large Water Lab surface. The 4.0 workspace does not render that hero: its default route is AI Workspace, and only the compact conversation empty state invokes the GPU material. Header search still expands left from its fixed magnifier/X, the mobile drawer retains focus and dismissal, and desktop navigation uses one sliding active surface. The remaining measurements and screenshots below describe previous UI milestones, not the current layout.
 
 Chromium layout checks cover all eight routes at 1440×900, 1280×800, 1024×768, 768×1024, 390×844, and a 720×450 CSS-pixel viewport at 2× device scale (the effective viewport of a 1440×900 window at 200% zoom). They verify fixed shell and header geometry, 237px desktop rail, scrollable content/chat, reachable Settings controls, no document or horizontal overflow, drawer focus restoration, and mobile Settings accessibility. Separate interaction tests verify the search anchor stays put as the field expands left, keyboard destination selection, focus return, hamburger state, active navigation highlight geometry, and outside-click/Escape drawer dismissal. Axe has no WCAG 2.x A/AA violations on Overview, search, mobile navigation, and chat. Before refinement, Settings made the document 1,131px high at 1280×800; afterward the document stays 800px, with 829px of Settings content scrolling inside its 704px main pane. A 1.2-second local Chromium requestAnimationFrame sample observed 73 frames (median and p95 interval 16.7ms); this measures browser pacing only, not GPU cost or low-end-device performance. Two hero captures 2 seconds apart changed 24,102 pixels above a 5-level RGB threshold; computed water transforms changed while both reduced-motion modes set animation to `none`.
 

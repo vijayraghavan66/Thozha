@@ -135,7 +135,7 @@ export default function MemoryCenter({
       <p role="status" className={notice ? `mb-4 ${muted}` : 'sr-only'}>
         {notice}
       </p>
-      <div className="grid grid-cols-2 gap-4 max-lg:grid-cols-1">
+      <div className="grid grid-cols-[minmax(260px,0.8fr)_minmax(0,1.4fr)] items-start gap-4 max-lg:grid-cols-1">
         <Panel cls="h-fit min-w-0 p-6">
           <h2 className="font-semibold">Add a memory</h2>
           <p className={`mt-2 ${muted}`}>

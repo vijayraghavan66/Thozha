@@ -45,7 +45,7 @@ test('prefills without execution, resumes real supervisor SSE, and reloads the v
   page,
 }) => {
   await signIn(page, '/#/ai-workspace');
-  await page.getByRole('button', { name: /New conversation/ }).click();
+  await page.locator('main').getByRole('button', { name: '＋ New conversation' }).click();
   await page.getByLabel('Conversation title (optional)').fill('Supervisor handoff fixture');
   await page.getByRole('button', { name: 'Create conversation' }).click();
   await page.getByRole('textbox', { name: 'Message Jarvis' }).fill('Fixture slow task');
@@ -150,7 +150,10 @@ test('reviews the exact operation, rejects digest mismatch, and records explicit
   await signIn(page, studio);
   const headers = await authHeaders(page);
   for (const choice of ['Reject', 'Approve'] as const) {
+    await page.goto(studio);
     const task = await submitTask(page, `Fixture approval: ${choice}`, 'assistant');
+    await page.getByRole('link', { name: 'Approvals' }).click();
+    await expect(page.getByRole('heading', { name: 'Approvals', exact: true })).toBeVisible();
     const review = page.waitForResponse(response =>
       /\/v1\/web\/approvals\/[a-f0-9]{32}$/.test(response.url())
     );
@@ -298,7 +301,7 @@ test('creates and updates a read-only schedule, pauses, resumes, runs and retain
 
 test('shows real mapped pairings and requires a confirmed revocation', async ({ page }) => {
   await signIn(page);
-  await expect(page.getByText('Active pairings mapped to you')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
   await page.getByRole('link', { name: 'Device Hub' }).click();
   await page.getByRole('button', { name: /Revocation test pairing/ }).click();
   await expect(page.getByText('ACTIVE PAIRING', { exact: true })).toBeVisible();

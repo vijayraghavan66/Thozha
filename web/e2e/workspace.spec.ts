@@ -1,5 +1,8 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 import { signIn } from './session';
 
 declare global {
@@ -56,7 +59,7 @@ function waterBackingSize(canvas: Locator) {
 }
 
 async function createConversation(page: Page, title: string) {
-  await page.getByRole('button', { name: /New conversation/ }).click();
+  await page.locator('main').getByRole('button', { name: '＋ New conversation' }).click();
   await page.getByLabel('Conversation title (optional)').fill(title);
   await page.getByRole('button', { name: 'Create conversation' }).click();
   await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
@@ -146,7 +149,11 @@ test('renders the reported SSE mode, persists context, copies code and supports 
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
   await page.getByRole('button', { name: 'Delete permanently' }).click();
   await expect(page.getByText('Conversation and history deleted.')).toBeVisible();
-  await expect(page.getByText('No archived conversations.')).toBeVisible();
+  await expect(
+    page
+      .getByRole('region', { name: 'Conversation messages' })
+      .getByText('No archived conversations.')
+  ).toBeVisible();
 });
 
 test('persists actual cancellation and exposes engine failure and prompt recovery', async ({
@@ -232,7 +239,7 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await signIn(page);
-  await expect(page.locator('main .th-liquid-field')).toHaveAttribute('data-water', 'poster');
+  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
   await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('link', { name: 'Trading Lab' }).click();
   await expect(page.getByRole('heading', { name: 'Trading Lab' })).toBeVisible();
@@ -308,12 +315,9 @@ test('header search morphs in place, supports keyboard selection and closes pred
   await expect(input).toHaveValue('');
   await expect(input).toBeFocused();
   await input.press('ArrowDown');
-  await expect(input).toHaveAttribute(
-    'aria-activedescendant',
-    'workspace-search-option-ai-workspace'
-  );
+  await expect(input).toHaveAttribute('aria-activedescendant', 'workspace-search-option-tasks');
   await input.press('Enter');
-  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
   await expect(trigger).toHaveAttribute('aria-expanded', 'false');
 
   await trigger.click();
@@ -328,6 +332,60 @@ test('header search morphs in place, supports keyboard selection and closes pred
   await trigger.click();
   await page.mouse.click(100, 360);
   await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('conversation-first navigation and contextual inspector remain reversible and keyboard accessible', async ({
+  page,
+}) => {
+  await signIn(page);
+  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'A quieter kind of control.' })).toHaveCount(0);
+  await createConversation(page, 'Sidebar history item');
+  await page.getByRole('link', { name: 'Tasks', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Sidebar history item' }).click();
+  await expect(page.getByRole('heading', { name: 'Sidebar history item' })).toBeVisible();
+
+  const rail = page.getByRole('complementary', { name: 'Workspace sidebar' });
+  await expect(rail).toHaveCSS('width', '252px');
+  await page.getByRole('button', { name: 'Collapse sidebar' }).click();
+  await expect(rail).toHaveCSS('width', '68px');
+  await page.getByRole('button', { name: 'Expand sidebar' }).click();
+  await expect(rail).toHaveCSS('width', '252px');
+
+  await page.getByRole('button', { name: 'Close context panel' }).first().click();
+  await expect(page.getByRole('complementary', { name: 'Context inspector' })).toHaveAttribute(
+    'inert',
+    ''
+  );
+  await page.getByRole('button', { name: 'Open context panel' }).click();
+  await expect(page.getByRole('button', { name: 'Review as supervisor task' })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Open context panel' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Context inspector' });
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByRole('button', { name: 'Close context panel' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Open context panel' })).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+});
+
+test('new conversation from another section waits for the real chat module and keeps server history', async ({
+  page,
+}) => {
+  await signIn(page, '/#/settings');
+  await page
+    .getByRole('complementary', { name: 'Workspace sidebar' })
+    .getByRole('button', { name: 'New conversation' })
+    .click();
+  await expect(page.getByRole('dialog', { name: 'New conversation' })).toBeVisible();
+  await page.getByLabel('Conversation title (optional)').fill('Created from Settings');
+  await page.getByRole('button', { name: 'Create conversation' }).click();
+  await expect(page.getByRole('heading', { name: 'Created from Settings' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('link', { name: 'Created from Settings' })).toBeVisible();
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.getByRole('button', { name: 'Delete permanently' }).click();
 });
 
 test('mobile menu morphs into a close state and its drawer closes outside or with Escape', async ({
@@ -348,7 +406,7 @@ test('mobile menu morphs into a close state and its drawer closes outside or wit
   ).toEqual([]);
   await expect(page.getByTestId('navigation-trigger')).toHaveAttribute('aria-expanded', 'true');
   await expect(page.locator('.th-menu-top')).toHaveClass(/is-open/);
-  await expect(dialog.getByRole('link', { name: 'Overview' })).toBeFocused();
+  await expect(dialog.getByRole('link', { name: 'AI Workspace' })).toBeFocused();
   await page.mouse.click(370, 420);
   await expect(dialog).toHaveClass(/is-closing/);
   await expect(dialog).toHaveCSS('animation-name', 'th-drawer-out');
@@ -391,12 +449,13 @@ test('notifications unfold from the fixed bell and reverse without trapping focu
   await expect(bell).toHaveAttribute('aria-expanded', 'false');
 });
 
-test('Water Lab hero draws ripples, resizes to budget and releases GPU work on navigation', async ({
+test('the compact Water Lab material draws ripples, resizes and releases GPU work on navigation', async ({
   page,
 }) => {
   await observeWater(page);
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await signIn(page);
+  await createConversation(page, 'Water material verification');
   const water = page.locator('main .th-liquid-field');
   const canvas = water.locator('canvas');
   const canRender = await canvas.evaluate(el =>
@@ -433,10 +492,10 @@ test('Water Lab hero draws ripples, resizes to budget and releases GPU work on n
       return width * height;
     })
     .toBeLessThanOrEqual(96_000);
-  expect((await waterBackingSize(canvas))[0]).toBeLessThan(size[0]);
-  await page.getByRole('button', { name: 'Enter the workspace' }).click();
-  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
-  await expect(water).toHaveCount(0);
+  expect((await waterBackingSize(canvas))[0]).toBeLessThanOrEqual(size[0]);
+  await page.goto('/#/tasks');
+  await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
+  await expect(water).toBeHidden();
   expect(await page.evaluate(() => window.waterProbe.deletes)).toBeGreaterThan(0);
   await expectNoWaterDraws(page);
 });
@@ -448,6 +507,7 @@ test('Water Lab suspension stops actual draws, and a restored WebGL context resu
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await observeWater(page);
   await signIn(page);
+  await createConversation(page, 'Water lifecycle verification');
   const water = page.locator('main .th-liquid-field');
   const canvas = water.locator('canvas');
   const canRender = await canvas.evaluate(el =>
@@ -459,11 +519,15 @@ test('Water Lab suspension stops actual draws, and a restored WebGL context resu
   );
   test.skip(!canRender, 'Chromium has no accelerated WebGL 2 context.');
   await expect(water).toHaveAttribute('data-water', 'webgl');
-  const main = page.locator('#main-content');
-  await main.evaluate(el => (el.scrollTop = el.scrollHeight));
+  const host = page.locator('.th-v4-empty-material');
+  await host.evaluate(el => {
+    (el as HTMLElement).style.transform = 'translate(-50%, 1200px)';
+  });
   await expect(water).toHaveAttribute('data-motion', 'paused');
   await expectNoWaterDraws(page);
-  await main.evaluate(el => (el.scrollTop = 0));
+  await host.evaluate(el => {
+    (el as HTMLElement).style.transform = '';
+  });
   await expect(water).toHaveAttribute('data-motion', 'running');
   await page.evaluate(() => {
     Object.defineProperty(document, 'hidden', { configurable: true, value: true });
@@ -505,6 +569,7 @@ test('the shader stays off for reduced motion and the renderer has a still fallb
   await observeWater(page, true);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await signIn(page);
+  await createConversation(page, 'Water fallback verification');
   const water = page.locator('main .th-liquid-field');
   await expect(water).toHaveAttribute('data-water', 'poster');
   await expect(water).toHaveAttribute('data-motion', 'paused');
@@ -519,10 +584,10 @@ test('the shader stays off for reduced motion and the renderer has a still fallb
   await expectNoWaterDraws(page);
 
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.getByRole('link', { name: 'Settings' }).click();
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Reduce motion: off' }).click();
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await page.getByRole('link', { name: 'Overview' }).click();
+  await page.getByRole('link', { name: 'AI Workspace' }).click();
   await page.reload();
   await expect(water).toHaveAttribute('data-water', 'poster');
   await expect(water).toHaveAttribute('data-motion', 'paused');
@@ -535,8 +600,9 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
   test.setTimeout(120_000);
   await signIn(page);
   const routes = [
-    ['overview', 'A quieter kind of control.'],
     ['ai-workspace', 'AI Workspace'],
+    ['tasks', 'Tasks'],
+    ['approvals', 'Approvals'],
     ['trading-lab', 'Trading Lab'],
     ['device-hub', 'Device Hub'],
     ['automations', 'Automations'],
@@ -619,14 +685,14 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
         height + 1
       );
       expect(metrics.shell).toBe(height);
-      expect(metrics.sidebar).toBe(width >= 1024 ? 237 : 0);
+      expect(metrics.sidebar).toBe(width >= 1024 ? 252 : 0);
       if (width >= 1024) {
         expect(metrics.navHighlight).toBeDefined();
         expect(metrics.activeNav).toBeDefined();
         expect(metrics.navHighlight!.y).toBeCloseTo(metrics.activeNav!.y, 0);
         expect(metrics.navHighlight!.height).toBeCloseTo(metrics.activeNav!.height, 0);
       }
-      expect(metrics.mainOverflow).toBe('auto');
+      expect(metrics.mainOverflow).toBe(slug === 'ai-workspace' ? 'hidden' : 'auto');
       expect(metrics.mainScrollWidth, `${width}px ${slug} main width`).toBeLessThanOrEqual(
         metrics.mainWidth + 1
       );
@@ -642,13 +708,13 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
       }
     }
     if (width === 1280) {
-      await page.getByRole('link', { name: 'Overview' }).click();
+      await page.getByRole('link', { name: 'Tasks' }).click();
       await expect(page.locator('#main-content')).toHaveJSProperty('scrollTop', 0);
     }
   }
   await page.getByRole('button', { name: 'Open navigation' }).click();
   await expect(page.getByRole('dialog', { name: 'Workspace navigation' })).toBeVisible();
-  await expect(page.getByRole('dialog').getByRole('link', { name: 'Overview' })).toBeFocused();
+  await expect(page.getByRole('dialog').getByRole('link', { name: 'AI Workspace' })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeFocused();
   expect(
@@ -702,32 +768,29 @@ test('captures the approved desktop and mobile design and checks accessibility',
   ).toEqual([]);
   await page.screenshot({ path: info.outputPath('sign-in.png') });
   await signIn(page);
-  await expect(page.getByRole('heading', { name: 'A quieter kind of control.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
   const initialNavigation = await page.evaluate(() => {
     const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming;
     return {
       domContentLoadedMs: Math.round(navigation.domContentLoadedEventEnd),
-      lazyChunksOnOverview: performance
+      lazyChunksOnLanding: performance
         .getEntriesByType('resource')
-        .filter(entry =>
-          /\/(?:ConversationWorkspace|MemoryCenter|TradingLab)-[^/]+\.js$/.test(entry.name)
-        ).length,
+        .filter(entry => /\/(?:MemoryCenter|TradingLab)-[^/]+\.js$/.test(entry.name)).length,
     };
   });
-  expect(initialNavigation.lazyChunksOnOverview).toBe(0);
-  await info.attach('overview-navigation.json', {
+  expect(initialNavigation.lazyChunksOnLanding).toBe(0);
+  await info.attach('workspace-navigation.json', {
     contentType: 'application/json',
     body: JSON.stringify(initialNavigation),
   });
   console.log(
-    `Local Chromium navigation: DOMContentLoaded ${initialNavigation.domContentLoadedMs} ms; advanced chunks on Overview: ${initialNavigation.lazyChunksOnOverview}`
+    `Local Chromium navigation: DOMContentLoaded ${initialNavigation.domContentLoadedMs} ms; unrelated chunks on AI Workspace: ${initialNavigation.lazyChunksOnLanding}`
   );
   expect(
     (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
       .violations
   ).toEqual([]);
-  await page.screenshot({ path: info.outputPath('desktop-overview.png') });
-  await page.getByRole('link', { name: 'AI Workspace' }).click();
+  await page.screenshot({ path: info.outputPath('desktop-workspace.png') });
   await createConversation(page, 'Web Alpha verification');
   await send(page, 'Show a test response with a code block.');
   await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
@@ -740,4 +803,153 @@ test('captures the approved desktop and mobile design and checks accessibility',
   await expect(page.getByLabel('Current conversation')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   await page.screenshot({ path: info.outputPath('mobile-conversation.png'), fullPage: true });
+});
+
+test.describe('Thozha 4 product walkthrough', () => {
+  test('records all primary sections on desktop and mobile without invented data', async ({
+    page,
+  }, info) => {
+    test.setTimeout(120_000);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await signIn(page);
+    await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
+    await page.screenshot({ path: info.outputPath('desktop-empty-workspace.png') });
+    await createConversation(page, 'Product walkthrough');
+    await expect(page.getByRole('heading', { name: 'Where should we begin?' })).toBeVisible();
+    await page.screenshot({ path: info.outputPath('desktop-empty-conversation.png') });
+    await send(page, 'Show a test response with a code block.');
+    await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
+    const destinations = [
+      ['ai-workspace', 'AI Workspace'],
+      ['tasks', 'Tasks'],
+      ['approvals', 'Approvals'],
+      ['automations', 'Automations'],
+      ['memory-center', 'Memory Center'],
+      ['device-hub', 'Device Hub'],
+      ['trading-lab', 'Trading Lab'],
+      ['developer-studio', 'Developer Studio'],
+      ['settings', 'Settings'],
+    ] as const;
+    const intervals: number[] = [];
+    const cdp = await page.context().newCDPSession(page);
+    let captures: Buffer[] = [];
+    cdp.on('Page.screencastFrame', frame => {
+      captures.push(Buffer.from(frame.data, 'base64'));
+      void cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId });
+    });
+    await page.evaluate(() => {
+      (window as Window & { startFrames?: () => void }).startFrames = () => {
+        let last = 0;
+        const samples: number[] = [];
+        (window as Window & { frameSamples?: number[] }).frameSamples = samples;
+        function tick(now: number) {
+          if (last) samples.push(now - last);
+          last = now;
+          requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      };
+    });
+    await page.evaluate(() => (window as Window & { startFrames?: () => void }).startFrames?.());
+    try {
+      for (const [width, height, label] of [
+        [1440, 900, 'desktop'],
+        [390, 844, 'mobile'],
+      ] as const) {
+        await page.setViewportSize({ width, height });
+        await page.waitForTimeout(150);
+        captures = [];
+        await cdp.send('Page.startScreencast', {
+          format: 'jpeg',
+          quality: 76,
+          maxWidth: label === 'desktop' ? 1280 : 390,
+          maxHeight: label === 'desktop' ? 800 : 844,
+          everyNthFrame: 1,
+        });
+        for (const [slug, heading] of destinations) {
+          await page.goto(`/#/${slug}`);
+          await expect(page.locator('#main-content h1:visible')).toHaveText(heading);
+          await page.waitForTimeout(320);
+          expect(
+            await page.evaluate(() => document.documentElement.scrollWidth)
+          ).toBeLessThanOrEqual(width + 1);
+          await page.screenshot({ path: info.outputPath(`${label}-${slug}.png`) });
+        }
+        await cdp.send('Page.stopScreencast');
+        expect(captures.length).toBeGreaterThan(20);
+        const directory = info.outputPath(`${label}-capture-frames`);
+        await mkdir(directory, { recursive: true });
+        await Promise.all(
+          captures.map((image, index) =>
+            writeFile(join(directory, `frame-${String(index).padStart(5, '0')}.jpg`), image)
+          )
+        );
+        const encoded = spawnSync(
+          'ffmpeg',
+          [
+            '-v',
+            'error',
+            '-y',
+            '-framerate',
+            '12',
+            '-i',
+            join(directory, 'frame-%05d.jpg'),
+            '-c:v',
+            'libvpx-vp9',
+            '-b:v',
+            '0',
+            '-crf',
+            '35',
+            info.outputPath(`${label}-walkthrough.webm`),
+          ],
+          { encoding: 'utf8' }
+        );
+        if (encoded.status !== 0)
+          throw new Error(`Could not encode the ${label} recording: ${encoded.stderr}`);
+        await rm(directory, { recursive: true });
+      }
+    } finally {
+      await cdp.detach();
+    }
+    intervals.push(
+      ...(await page.evaluate(
+        () => (window as Window & { frameSamples?: number[] }).frameSamples ?? []
+      ))
+    );
+    const sorted = intervals.filter(value => value > 0).sort((a, b) => a - b);
+    const metrics = {
+      frameCount: sorted.length,
+      p95FrameIntervalMs: sorted[Math.floor(sorted.length * 0.95)] ?? null,
+      intervalsOver25ms: sorted.filter(value => value > 25).length,
+    };
+    expect(metrics.frameCount).toBeGreaterThan(30);
+    await info.attach('interaction-frames.json', {
+      body: JSON.stringify(metrics),
+      contentType: 'application/json',
+    });
+    await writeFile(info.outputPath('interaction-frames.json'), JSON.stringify(metrics, null, 2));
+    console.log(
+      `Recorded interaction frame intervals: p95 ${metrics.p95FrameIntervalMs?.toFixed(2)} ms, ${metrics.intervalsOver25ms} over 25 ms in ${metrics.frameCount} frames (recording on).`
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.evaluate(() => (window as Window & { startFrames?: () => void }).startFrames?.());
+    for (let index = 0; index < 8; index++) {
+      await page.goto(index % 2 ? '/#/ai-workspace' : '/#/tasks');
+      await page.waitForTimeout(300);
+    }
+    const unrecorded = await page.evaluate(
+      () => (window as Window & { frameSamples?: number[] }).frameSamples ?? []
+    );
+    const stable = unrecorded.filter(value => value > 0).sort((a, b) => a - b);
+    const runtime = {
+      frameCount: stable.length,
+      p95FrameIntervalMs: stable[Math.floor(stable.length * 0.95)] ?? null,
+      intervalsOver25ms: stable.filter(value => value > 25).length,
+    };
+    expect(runtime.frameCount).toBeGreaterThan(30);
+    await writeFile(info.outputPath('unrecorded-frames.json'), JSON.stringify(runtime, null, 2));
+    console.log(
+      `Unrecorded navigation frame intervals: p95 ${runtime.p95FrameIntervalMs?.toFixed(2)} ms, ${runtime.intervalsOver25ms} over 25 ms in ${runtime.frameCount} frames.`
+    );
+  });
 });

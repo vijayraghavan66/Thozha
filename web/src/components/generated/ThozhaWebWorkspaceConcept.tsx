@@ -1,6 +1,10 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import type { WorkspaceApi } from '../../api/client';
-import { Overview, Settings } from '../../pages/WorkspacePages';
+import { errorText } from '../../api/client';
+import { Settings } from '../../pages/WorkspacePages';
+import { useApprovals, useDevices, useTasks, taskHref, httpStatus } from '../../pages/controlState';
+import { Approvals } from '../../pages/Approvals';
 import { Chip, Crest, Loading, Modal, Notice } from '../ui';
 import { AnchoredSurface, NotificationPanel, TravelingSurface } from '../LiquidSurface';
 import { muted } from '../styles';
@@ -12,18 +16,19 @@ const DeveloperStudio = lazy(() => import('../../pages/DeveloperStudio'));
 const DeviceHub = lazy(() => import('../../pages/DeviceHub'));
 const AutomationStudio = lazy(() => import('../../pages/AutomationStudio'));
 const sections = [
-  ['Overview', 'overview', '◫'],
-  ['AI Workspace', 'ai-workspace', '◉'],
-  ['Trading Lab', 'trading-lab', '⌁'],
-  ['Device Hub', 'device-hub', '▣'],
+  ['AI Workspace', 'ai-workspace', '✳'],
+  ['Tasks', 'tasks', '◷'],
+  ['Approvals', 'approvals', '✓'],
   ['Automations', 'automations', '◇'],
   ['Memory Center', 'memory-center', '◎'],
+  ['Device Hub', 'device-hub', '▣'],
   ['Developer Studio', 'developer-studio', '⌘'],
+  ['Trading Lab', 'trading-lab', '⌁'],
   ['Settings', 'settings', '⚙'],
 ] as const;
 type Section = (typeof sections)[number][0];
 const currentPage = (hash: string) =>
-  sections.find(([, slug]) => hash.split('?')[0] === `#/${slug}`)?.[0] ?? 'Overview';
+  sections.find(([, slug]) => hash.split('?')[0] === `#/${slug}`)?.[0] ?? 'AI Workspace';
 const motionKey = 'thozha-web.motion.v1';
 
 function SearchGlyph({ open }: { open: boolean }) {
@@ -72,10 +77,12 @@ function WorkspaceNavigation({
   page,
   drawer = false,
   onNavigate,
+  collapsed = false,
 }: {
   page: Section;
   drawer?: boolean;
   onNavigate: () => void;
+  collapsed?: boolean;
 }) {
   const nav = useRef<HTMLElement>(null);
   return (
@@ -83,15 +90,19 @@ function WorkspaceNavigation({
       <TravelingSurface container={nav} selection={page} />
       {sections.map(([name, slug, symbol], index) => (
         <div key={slug} className="relative z-[1]">
-          {index === 5 && (
-            <div className="px-3 pb-2 pt-7 text-[10px] tracking-[.18em] text-[#a4a5af]">SYSTEM</div>
+          {(index === 3 || index === 6 || index === 8) && !collapsed && (
+            <div className="px-3 pb-2 pt-5 text-[10px] tracking-[.18em] text-[#a4a5af]">
+              {index === 3 ? 'ORGANIZE' : index === 6 ? 'LAB & TOOLS' : 'PREFERENCES'}
+            </div>
           )}
           <a
             href={`#/${slug}`}
             data-dialog-focus={drawer && index === 0 ? '' : undefined}
+            title={collapsed ? name : undefined}
+            aria-label={collapsed ? name : undefined}
             onClick={onNavigate}
             aria-current={page === name ? 'page' : undefined}
-            className={`flex w-full items-center gap-3 rounded-xl border border-transparent px-3 py-3 text-left text-[12px] transition-colors duration-200 ease-out ${
+            className={`flex w-full items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 text-left text-[12px] transition-colors duration-200 ease-out ${collapsed ? 'justify-center' : ''} ${
               page === name
                 ? 'font-semibold text-white'
                 : 'text-[#a0a2a9] hover:bg-white/[.06] hover:text-white'
@@ -100,7 +111,7 @@ function WorkspaceNavigation({
             <span aria-hidden="true" className="w-5 text-center text-lg font-light">
               {symbol}
             </span>
-            <span>{name}</span>
+            {!collapsed && <span>{name}</span>}
           </a>
         </div>
       ))}
@@ -144,6 +155,12 @@ export function ThozhaWebWorkspaceConcept({
   const [visitedChat, setVisitedChat] = useState(
     () => currentPage(window.location.hash) === 'AI Workspace'
   );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(
+    () => !window.matchMedia('(max-width: 1023px)').matches
+  );
+  const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 1023px)').matches);
+  const [inspectorSlot, setInspectorSlot] = useState<HTMLDivElement | null>(null);
   const [dialog, setDialog] = useState<'navigation' | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [drawerClosing, setDrawerClosing] = useState(false);
@@ -155,12 +172,23 @@ export function ThozhaWebWorkspaceConcept({
   const searchAnchor = useRef<HTMLDivElement>(null);
   const searchTrigger = useRef<HTMLButtonElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
+  const inspectorTrigger = useRef<HTMLButtonElement>(null);
+  const inspectorPanel = useRef<HTMLElement>(null);
   const focusAfterNavigation = useRef(false);
   const drawerClosingRef = useRef(false);
   const drawerCloseTimer = useRef<number | null>(null);
   const matching = sections.filter(([name]) =>
     name.toLowerCase().includes(query.trim().toLowerCase())
   );
+  const conversations = useQuery({
+    queryKey: ['conversations'],
+    queryFn: ({ signal }) => api.list(signal),
+    enabled: !problem,
+  });
+  const tasks = useTasks(api, 'active', !problem && (page === 'AI Workspace' || page === 'Tasks'));
+  const approvals = useApprovals(api, !problem && page === 'AI Workspace');
+  const devices = useDevices(api, !problem && page === 'Approvals');
+  const hasInspector = page === 'AI Workspace' || page === 'Tasks';
 
   useEffect(() => {
     function onNavigate() {
@@ -185,6 +213,43 @@ export function ThozhaWebWorkspaceConcept({
     main.current?.focus({ preventScroll: true });
     main.current?.scrollTo({ top: 0, behavior: 'instant' });
   }, [page]);
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 1023px)');
+    function resize() {
+      setCompact(query.matches);
+      setInspectorOpen(!query.matches);
+    }
+    query.addEventListener('change', resize);
+    return () => query.removeEventListener('change', resize);
+  }, []);
+  useEffect(() => {
+    if (!hasInspector || !inspectorOpen) return;
+    function onEscape(event: KeyboardEvent) {
+      if (!compact || document.querySelector('dialog[open]')) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setInspectorOpen(false);
+        inspectorTrigger.current?.focus({ preventScroll: true });
+      } else if (event.key === 'Tab') {
+        const focusable = inspectorPanel.current?.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), a[href], input:not(:disabled), summary'
+        );
+        if (!focusable?.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    if (compact) inspectorPanel.current?.querySelector<HTMLElement>('button')?.focus();
+    document.addEventListener('keydown', onEscape);
+    return () => document.removeEventListener('keydown', onEscape);
+  }, [hasInspector, inspectorOpen, compact]);
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
       if (
@@ -295,7 +360,7 @@ export function ThozhaWebWorkspaceConcept({
 
   return (
     <div
-      className={`th-workspace h-dvh min-h-0 overflow-hidden bg-[#08090b] p-3 text-[#ececf0] selection:bg-white/25 ${motion.reduced ? 'th-stop-motion' : ''}`}
+      className={`th-workspace th-v4 h-dvh min-h-0 overflow-hidden bg-[#08090b] text-[#ececf0] selection:bg-white/25 ${sidebarCollapsed ? 'th-rail-collapsed' : ''} ${motion.reduced ? 'th-stop-motion' : ''}`}
     >
       <a
         href="#main-content"
@@ -307,26 +372,86 @@ export function ThozhaWebWorkspaceConcept({
       >
         Skip to content
       </a>
-      <div className="relative mx-auto flex h-full min-h-0 min-w-0 max-w-[1550px] overflow-hidden rounded-[24px] border border-white/[.1] bg-[#101114] shadow-[0_40px_130px_rgba(0,0,0,.5)]">
-        <aside className="z-30 hidden w-[237px] shrink-0 flex-col overflow-hidden border-r border-white/[.08] bg-[#131417] p-4 lg:flex">
-          <div className="mb-10 flex shrink-0 items-center gap-3 px-2 pt-3">
+      <div className="relative flex h-full min-h-0 min-w-0 overflow-hidden bg-[#101114]">
+        <aside
+          aria-label="Workspace sidebar"
+          className="th-v4-rail z-30 hidden shrink-0 flex-col overflow-hidden border-r border-white/[.08] bg-[#131417] p-3 lg:flex"
+        >
+          <div className="mb-5 flex shrink-0 items-center gap-3 px-2 pt-3">
             <Crest />
-            <div>
-              <div className="text-[21px] font-semibold tracking-[-.06em]">
-                thozha<span className="text-[#858690]">.</span>
+            {!sidebarCollapsed && (
+              <div>
+                <div className="text-[21px] font-semibold tracking-[-.06em]">
+                  thozha<span className="text-[#858690]">.</span>
+                </div>
+                <p className="text-[9px] font-semibold tracking-[.17em] text-[#a4a5af]">
+                  PERSONAL WORKSPACE
+                </p>
               </div>
-              <p className="text-[9px] font-semibold tracking-[.17em] text-[#a4a5af]">
-                PERSONAL WORKSPACE
-              </p>
-            </div>
+            )}
           </div>
-          <div className="mb-3 shrink-0 px-3 text-[10px] font-semibold tracking-[.18em] text-[#a4a5af]">
-            WORKSPACE
-          </div>
+          <button
+            type="button"
+            className="th-v4-new"
+            onClick={() => {
+              window.location.hash = `#/ai-workspace?new=${crypto.randomUUID()}`;
+            }}
+            title={sidebarCollapsed ? 'New conversation' : undefined}
+            aria-label="New conversation"
+          >
+            <span aria-hidden="true">＋</span>
+            {!sidebarCollapsed && <span>New conversation</span>}
+          </button>
           <div className="min-h-0 flex-1 overflow-y-auto">
-            <WorkspaceNavigation page={page} onNavigate={() => setDialog(null)} />
+            <WorkspaceNavigation
+              page={page}
+              onNavigate={() => setDialog(null)}
+              collapsed={sidebarCollapsed}
+            />
+            {!sidebarCollapsed && (
+              <div className="th-v4-history">
+                <p className="th-v4-eyebrow">RECENT CONVERSATIONS</p>
+                {conversations.isPending && !problem && <p className={muted}>Loading history…</p>}
+                {conversations.isError && (
+                  <p role="alert" className={muted}>
+                    {errorText(conversations.error, 'load conversations')}
+                  </p>
+                )}
+                {conversations.isSuccess &&
+                  !conversations.data.items.some(item => !item.archived_at) && (
+                    <p className={muted}>No conversations yet.</p>
+                  )}
+                {conversations.data?.items
+                  .filter(item => !item.archived_at)
+                  .slice(0, 12)
+                  .map(item => (
+                    <a
+                      key={item.id}
+                      href={`#/ai-workspace?conversation=${encodeURIComponent(item.id)}`}
+                      className="th-v4-history-link"
+                      aria-current={
+                        page === 'AI Workspace' &&
+                        new URLSearchParams(hash.split('?')[1]).get('conversation') === item.id
+                          ? 'page'
+                          : undefined
+                      }
+                    >
+                      <span className="truncate">{item.title}</span>
+                    </a>
+                  ))}
+              </div>
+            )}
           </div>
-          <div className="mt-4 shrink-0 rounded-2xl border border-white/[.08] bg-[#1c1d21] p-3">
+          <button
+            type="button"
+            className="th-v4-collapse"
+            onClick={() => setSidebarCollapsed(value => !value)}
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-expanded={!sidebarCollapsed}
+          >
+            {sidebarCollapsed ? '›' : '‹  Collapse sidebar'}
+          </button>
+          <div className="mt-2 shrink-0 rounded-xl border border-white/[.08] bg-[#1c1d21] p-2">
             <div className="flex items-center gap-3">
               <span
                 aria-hidden="true"
@@ -334,17 +459,19 @@ export function ThozhaWebWorkspaceConcept({
               >
                 {userId.slice(0, 1).toUpperCase()}
               </span>
-              <div className="min-w-0">
-                <p className="truncate text-xs font-medium">Personal workspace</p>
-                <p className="mt-1 text-[10px] text-[#a4a5af]">
-                  {problem ? 'Connection uncertain' : 'Signed in · Web v1'}
-                </p>
-              </div>
+              {!sidebarCollapsed && (
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-medium">Personal workspace</p>
+                  <p className="mt-1 text-[10px] text-[#a4a5af]">
+                    {problem ? 'Connection uncertain' : 'Signed in · Web v1'}
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </aside>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <header className="relative z-10 flex min-h-[70px] shrink-0 items-center justify-between gap-1 border-b border-white/[.08] px-8 max-md:px-3">
+          <header className="relative z-10 flex min-h-[62px] shrink-0 items-center justify-between gap-1 border-b border-white/[.08] px-6 max-md:px-3">
             <div className="flex min-w-0 items-center gap-2 sm:gap-3">
               <button
                 type="button"
@@ -357,14 +484,25 @@ export function ThozhaWebWorkspaceConcept({
               >
                 <MenuGlyph open={dialog === 'navigation'} />
               </button>
-              <span className="hidden text-xs text-[#a4a5af] sm:inline">Workspace</span>
+              <span className="hidden text-xs text-[#a4a5af] sm:inline">Thozha</span>
               <span aria-hidden="true" className="hidden text-[#777985] sm:inline">
                 /
               </span>
               <span className="truncate text-xs font-medium">{page}</span>
             </div>
             <div className="flex shrink-0 items-center gap-1 sm:gap-3">
-              <Chip>WEB ALPHA</Chip>
+              {hasInspector && (
+                <button
+                  type="button"
+                  ref={inspectorTrigger}
+                  className="th-v4-inspector-toggle"
+                  aria-label={inspectorOpen ? 'Close context panel' : 'Open context panel'}
+                  aria-expanded={inspectorOpen}
+                  onClick={() => setInspectorOpen(value => !value)}
+                >
+                  ◫ <span className="hidden sm:inline">Context</span>
+                </button>
+              )}
               <div
                 ref={searchAnchor}
                 className="relative h-10 w-10 shrink-0"
@@ -493,95 +631,189 @@ export function ThozhaWebWorkspaceConcept({
               </NotificationPanel>
             </div>
           </header>
-          <main
-            id="main-content"
-            tabIndex={-1}
-            ref={main}
-            className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-9 py-8 outline-none max-md:px-4 max-md:py-6"
-          >
-            {problem && (
-              <div className="mb-5">
-                <Notice error retry={checkSession}>
-                  {problem}
-                </Notice>
-              </div>
-            )}
-            {page !== 'AI Workspace' && (
-              <div key={page} className="th-enter">
-                {page === 'Overview' && (
-                  <Overview
-                    api={api}
-                    onChat={() => go('AI Workspace')}
-                    onDevices={() => go('Device Hub')}
-                    onSupervisor={() => go('Developer Studio')}
-                    onSettings={() => go('Settings')}
-                    connected={!problem}
-                    reduced={motion.reduced}
-                  />
-                )}
-                {page === 'Trading Lab' && (
-                  <Suspense fallback={<Loading label="Loading Trading Lab…" />}>
-                    <TradingLab />
-                  </Suspense>
-                )}
-                {page === 'Device Hub' && (
-                  <Suspense fallback={<Loading label="Loading Device Hub…" />}>
-                    <DeviceHub api={api} connected={!problem} />
-                  </Suspense>
-                )}
-                {page === 'Automations' && (
-                  <Suspense fallback={<Loading label="Loading Automations…" />}>
-                    <AutomationStudio api={api} connected={!problem} />
-                  </Suspense>
-                )}
-                {page === 'Memory Center' && (
-                  <Suspense fallback={<Loading label="Loading Memory Center…" />}>
-                    <MemoryCenter api={api} connected={!problem} />
-                  </Suspense>
-                )}
-                {page === 'Developer Studio' && (
-                  <Suspense fallback={<Loading label="Loading Developer Studio…" />}>
-                    <DeveloperStudio
-                      api={api}
+          <div className="th-v4-content-row flex min-h-0 min-w-0 flex-1">
+            <main
+              id="main-content"
+              data-workspace={page}
+              tabIndex={-1}
+              ref={main}
+              className={`relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain outline-none ${page === 'AI Workspace' ? 'th-v4-chat-main' : 'th-v4-page-main'}`}
+            >
+              {problem && (
+                <div className="mb-5">
+                  <Notice error retry={checkSession}>
+                    {problem}
+                  </Notice>
+                </div>
+              )}
+              {page !== 'AI Workspace' && (
+                <div key={page} className="th-enter">
+                  {page === 'Trading Lab' && (
+                    <Suspense fallback={<Loading label="Loading Trading Lab…" />}>
+                      <TradingLab />
+                    </Suspense>
+                  )}
+                  {page === 'Device Hub' && (
+                    <Suspense fallback={<Loading label="Loading Device Hub…" />}>
+                      <DeviceHub api={api} connected={!problem} />
+                    </Suspense>
+                  )}
+                  {page === 'Automations' && (
+                    <Suspense fallback={<Loading label="Loading Automations…" />}>
+                      <AutomationStudio api={api} connected={!problem} />
+                    </Suspense>
+                  )}
+                  {page === 'Memory Center' && (
+                    <Suspense fallback={<Loading label="Loading Memory Center…" />}>
+                      <MemoryCenter api={api} connected={!problem} />
+                    </Suspense>
+                  )}
+                  {(page === 'Developer Studio' || page === 'Tasks') && (
+                    <Suspense fallback={<Loading label="Loading Developer Studio…" />}>
+                      <DeveloperStudio
+                        api={api}
+                        connected={!problem}
+                        taskId={taskId}
+                        draft={taskDraft}
+                        clearDraft={() => setTaskDraft(undefined)}
+                        view={page === 'Tasks' ? 'tasks' : 'developer'}
+                      />
+                    </Suspense>
+                  )}
+                  {page === 'Approvals' && (
+                    <div className="th-v4-approvals-page">
+                      <div className="th-v4-page-heading">
+                        <p className="th-v4-eyebrow">REQUIRES YOUR DECISION</p>
+                        <h1>Approvals</h1>
+                        <p>
+                          Review the exact operation, device, and expiry before deciding. Nothing is
+                          approved implicitly.
+                        </p>
+                      </div>
+                      <Approvals
+                        api={api}
+                        devices={devices.data?.devices ?? []}
+                        connected={!problem}
+                      />
+                    </div>
+                  )}
+                  {page === 'Settings' && (
+                    <Settings
+                      userId={userId}
+                      expiresAt={expiresAt}
+                      checkedAt={checkedAt}
                       connected={!problem}
-                      taskId={taskId}
-                      draft={taskDraft}
-                      clearDraft={() => setTaskDraft(undefined)}
+                      reduced={motion.reduced}
+                      motionProblem={motion.problem}
+                      toggleMotion={toggleMotion}
+                      checkSession={checkSession}
+                      logout={logout}
+                    />
+                  )}
+                </div>
+              )}
+              {(visitedChat || page === 'AI Workspace') && (
+                <div hidden={page !== 'AI Workspace'} className="th-enter">
+                  <Suspense fallback={<Loading label="Loading AI Workspace…" />}>
+                    <ConversationWorkspace
+                      api={api}
+                      active={page === 'AI Workspace'}
+                      connected={!problem}
+                      reduced={motion.reduced}
+                      onReviewTask={objective => {
+                        setTaskDraft(objective);
+                        go('Tasks');
+                      }}
+                      inspector={inspectorSlot}
                     />
                   </Suspense>
-                )}
-                {page === 'Settings' && (
-                  <Settings
-                    userId={userId}
-                    expiresAt={expiresAt}
-                    checkedAt={checkedAt}
-                    connected={!problem}
-                    reduced={motion.reduced}
-                    motionProblem={motion.problem}
-                    toggleMotion={toggleMotion}
-                    checkSession={checkSession}
-                    logout={logout}
-                  />
-                )}
-              </div>
-            )}
-            {(visitedChat || page === 'AI Workspace') && (
-              <div hidden={page !== 'AI Workspace'} className="th-enter">
-                <Suspense fallback={<Loading label="Loading AI Workspace…" />}>
-                  <ConversationWorkspace
-                    api={api}
-                    active={page === 'AI Workspace'}
-                    connected={!problem}
-                    reduced={motion.reduced}
-                    onReviewTask={objective => {
-                      setTaskDraft(objective);
-                      go('Developer Studio');
+                </div>
+              )}
+            </main>
+            {hasInspector && (
+              <aside
+                ref={inspectorPanel}
+                role={compact && inspectorOpen ? 'dialog' : undefined}
+                aria-modal={compact && inspectorOpen ? true : undefined}
+                aria-label="Context inspector"
+                className={`th-v4-inspector ${inspectorOpen ? 'is-open' : ''}`}
+                inert={!inspectorOpen}
+              >
+                <div className="th-v4-inspector-head">
+                  <span>CONTEXT</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInspectorOpen(false);
+                      inspectorTrigger.current?.focus();
                     }}
-                  />
-                </Suspense>
-              </div>
+                    aria-label="Close context panel"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="th-v4-inspector-scroll">
+                  {page === 'AI Workspace' && <div ref={setInspectorSlot} />}
+                  <section className="th-v4-inspector-section">
+                    <h2>Active tasks</h2>
+                    {tasks.isPending && !problem && <p className={muted}>Checking supervisor…</p>}
+                    {tasks.isError && (
+                      <p className={muted}>
+                        {httpStatus(tasks.error) === 403
+                          ? 'Supervisor unavailable for this owner.'
+                          : errorText(tasks.error, 'load tasks')}
+                      </p>
+                    )}
+                    {tasks.data?.tasks.length === 0 && <p className={muted}>No active tasks.</p>}
+                    {tasks.data?.tasks.slice(0, 4).map(item => (
+                      <a
+                        key={item.task_id}
+                        href={taskHref(item.task_id)}
+                        className="th-v4-inspector-link"
+                      >
+                        <span className="truncate">
+                          {item.summary || `Task ${item.task_id.slice(0, 8)}`}
+                        </span>
+                        <small>{item.state.replace(/_/g, ' ')}</small>
+                      </a>
+                    ))}
+                  </section>
+                  {page === 'AI Workspace' && (
+                    <section className="th-v4-inspector-section">
+                      <h2>Pending approvals</h2>
+                      {approvals.isPending && !problem && (
+                        <p className={muted}>Checking approvals…</p>
+                      )}
+                      {approvals.isError && (
+                        <p className={muted}>
+                          {httpStatus(approvals.error) === 403
+                            ? 'Approval access unavailable for this owner.'
+                            : errorText(approvals.error, 'load approvals')}
+                        </p>
+                      )}
+                      {approvals.data?.count === 0 && (
+                        <p className={muted}>No pending approvals.</p>
+                      )}
+                      {approvals.data?.approvals.slice(0, 3).map(item => (
+                        <a key={item.id} href="#/approvals" className="th-v4-inspector-link">
+                          <span className="truncate">{item.operation}</span>
+                          <small>Review required</small>
+                        </a>
+                      ))}
+                    </section>
+                  )}
+                </div>
+              </aside>
             )}
-          </main>
+            {hasInspector && inspectorOpen && (
+              <button
+                className="th-v4-inspector-backdrop"
+                type="button"
+                aria-label="Close context panel"
+                onClick={() => setInspectorOpen(false)}
+              />
+            )}
+          </div>
         </div>
       </div>
       {dialog === 'navigation' && (
@@ -593,7 +825,33 @@ export function ThozhaWebWorkspaceConcept({
           }`}
           id="workspace-navigation"
         >
+          <button
+            type="button"
+            className="th-v4-new mb-3 w-full"
+            onClick={() => {
+              closeNavigation();
+              window.location.hash = `#/ai-workspace?new=${crypto.randomUUID()}`;
+            }}
+          >
+            ＋ New conversation
+          </button>
           <WorkspaceNavigation page={page} drawer onNavigate={closeNavigation} />
+          <div className="th-v4-history">
+            <p className="th-v4-eyebrow">RECENT CONVERSATIONS</p>
+            {conversations.data?.items
+              .filter(item => !item.archived_at)
+              .slice(0, 8)
+              .map(item => (
+                <a
+                  key={item.id}
+                  href={`#/ai-workspace?conversation=${encodeURIComponent(item.id)}`}
+                  onClick={closeNavigation}
+                  className="th-v4-history-link"
+                >
+                  {item.title}
+                </a>
+              ))}
+          </div>
         </Modal>
       )}
     </div>

@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { mayHaveBeenAccepted, type WorkspaceApi } from '../api/client';
 import { type PairedDevice, type TaskInput, type TaskScope } from '../api/control';
 import { field, muted, outline, solid } from '../components/styles';
-import { Chip, Head, Loading, Notice, Panel, Row, Stat } from '../components/ui';
+import { Chip, Head, Loading, Notice, Panel, Row } from '../components/ui';
 import { Approvals } from './Approvals';
 import { controlError, taskHref, tasksKey, useDevices, useTasks } from './controlState';
 import { DevicePicker } from './DevicePicker';
@@ -145,12 +145,14 @@ export default function DeveloperStudio({
   taskId,
   draft,
   clearDraft,
+  view = 'developer',
 }: {
   api: WorkspaceApi;
   connected: boolean;
   taskId?: string;
   draft?: string;
   clearDraft: () => void;
+  view?: 'tasks' | 'developer';
 }) {
   const [builder, setBuilder] = useState(false);
   const [filter, setFilter] = useState<'active' | 'completed' | 'all'>('all');
@@ -161,9 +163,13 @@ export default function DeveloperStudio({
   return (
     <>
       <Head
-        label="EXECUTION / EVIDENCE"
-        title="Developer Studio"
-        desc="Submit and inspect supervisor tasks, review exact-operation approvals, and retrieve authorized evidence."
+        label={view === 'tasks' ? 'SUPERVISOR / HISTORY' : 'EXECUTION / EVIDENCE'}
+        title={view === 'tasks' ? 'Tasks' : 'Developer Studio'}
+        desc={
+          view === 'tasks'
+            ? 'Submit, follow, and review authorized work on your Thozha host.'
+            : 'Inspect supervisor activity, execution evidence, and available development diagnostics.'
+        }
         action={
           <button
             type="button"
@@ -192,20 +198,15 @@ export default function DeveloperStudio({
           }}
         />
       )}
-      <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
-        <Stat label="REPOSITORY" value="Thozha" detail="Workspace name; no GitHub connection" />
-        <Stat label="CI" value="—" detail="Build and test results not connected" />
-        <Stat
-          label="SUPERVISOR TASKS"
-          value={tasks.isSuccess ? String(tasks.data.tasks.length) : '—'}
-          detail={
-            tasks.isSuccess
-              ? `Tasks in this view · up to ${filter === 'active' ? 100 : 50}`
-              : 'Requires Web supervisor access'
-          }
-        />
-      </div>
-      <div className="mt-5 grid grid-cols-2 items-start gap-4 max-lg:grid-cols-1">
+      {view === 'developer' && (
+        <p className={`${muted} th-v4-diagnostics-note`}>
+          GitHub and CI are not connected in Web v1. The supervisor timeline below contains only
+          server-saved tasks; it is not a fabricated build feed.
+        </p>
+      )}
+      <div
+        className={`mt-5 grid items-start gap-4 ${view === 'tasks' ? 'grid-cols-1' : 'grid-cols-[minmax(0,1.5fr)_minmax(280px,1fr)] max-lg:grid-cols-1'}`}
+      >
         <Panel cls="min-w-0 p-5">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <h2 className="font-semibold">Task timeline</h2>
@@ -272,7 +273,7 @@ export default function DeveloperStudio({
             Run project checks
           </button>
         </Panel>
-        <Approvals api={api} devices={mapped} connected={connected} />
+        {view === 'developer' && <Approvals api={api} devices={mapped} connected={connected} />}
       </div>
     </>
   );
