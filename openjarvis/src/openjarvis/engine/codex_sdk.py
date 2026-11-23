@@ -201,6 +201,42 @@ def _config_overrides(mode: str, *, disable_tools: bool = False) -> tuple[str, .
         context = current_task_context()
     except Exception:
         context = None
+    if (
+        context is not None
+        and re.fullmatch(r"[0-9a-f]{32}", context.task_id)
+        and context.source == "jarvis_link"
+        and context.scope == "read_only"
+    ):
+        # Read-only Link tasks get only fixed disk usage, not arbitrary shell
+        # or inherited MCP tools. Bind the MCP child to the same task store so
+        # its content-free execution event is durably correlated.
+        names = _configured_mcp_server_names() | {"jarvis_mac", "jarvis_dev"}
+        overrides = [
+            f"mcp_servers.{name}.enabled={'true' if name == 'jarvis_mac' else 'false'}"
+            for name in sorted(names)
+        ] + [
+            f'mcp_servers.jarvis_mac.command="{PYTHON}"',
+            f'mcp_servers.jarvis_mac.args=["{MAC_MCP}"]',
+            'mcp_servers.jarvis_mac.env.JARVIS_DESKTOP_MODE="basic"',
+            'mcp_servers.jarvis_mac.env.JARVIS_MCP_OPEN_APP_ENABLED="0"',
+            'mcp_servers.jarvis_dev.command="/usr/bin/false"',
+            "mcp_servers.jarvis_dev.args=[]",
+            "features.shell_tool=false",
+            "features.unified_exec=false",
+            "features.unified_exec_tty=false",
+        ]
+        from openjarvis.tasks.supervisor import get_supervisor_store
+
+        supervisor_db = str(get_supervisor_store().db_path)
+        overrides.extend(
+            (
+                f'mcp_servers.jarvis_mac.env.JARVIS_SUPERVISOR_TASK_ID="{context.task_id}"',
+                'mcp_servers.jarvis_mac.env.JARVIS_SUPERVISOR_TASK_SOURCE="jarvis_link"',
+                'mcp_servers.jarvis_mac.env.JARVIS_SUPERVISOR_TASK_SCOPE="read_only"',
+                f"mcp_servers.jarvis_mac.env.JARVIS_SUPERVISOR_DB={json.dumps(supervisor_db)}",
+            )
+        )
+        return tuple(overrides)
     if mode == "mac_read":
         # A narrowly-scoped Link task may use only the fixed Mac read-only
         # bridge. Do not inherit user-configured MCP servers or shell tools.

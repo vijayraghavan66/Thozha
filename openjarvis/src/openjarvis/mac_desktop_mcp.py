@@ -246,20 +246,29 @@ def system_info():
 
 
 def _begin_mac_read_audit(operation: str):
-    """Validate server-issued task scope and persist a content-free start event.
+    """Validate server-issued read scope and persist a content-free start event.
 
     This executes inside the MCP server process. It deliberately opens the
     supervisor database with recovery disabled so a short-lived MCP process
     cannot alter task recovery state.
     """
-    if MODE != "mac_read":
+    task_source = os.environ.get("JARVIS_SUPERVISOR_TASK_SOURCE", "")
+    task_scope = os.environ.get("JARVIS_SUPERVISOR_TASK_SCOPE", "")
+    if MODE == "mac_read":
+        expected_scope = "mac_read"
+        allowed_operations = {"get_disk_usage", "get_system_info"}
+    elif MODE == "basic" and task_source == "jarvis_link" and task_scope == "read_only":
+        expected_scope = "read_only"
+        allowed_operations = {"get_disk_usage"}
+    else:
         return "", None
     task_id = os.environ.get("JARVIS_SUPERVISOR_TASK_ID", "")
     if not re.fullmatch(r"[0-9a-f]{32}", task_id):
         raise PermissionError("supervisor_task_context_missing")
     if (
-        os.environ.get("JARVIS_SUPERVISOR_TASK_SOURCE") != "jarvis_link"
-        or os.environ.get("JARVIS_SUPERVISOR_TASK_SCOPE") != "mac_read"
+        task_source != "jarvis_link"
+        or task_scope != expected_scope
+        or operation not in allowed_operations
     ):
         raise PermissionError("supervisor_task_scope_mismatch")
     from openjarvis.core.paths import get_config_dir
@@ -279,7 +288,7 @@ def _begin_mac_read_audit(operation: str):
             task is None
             or task.get("state") != "RUNNING"
             or metadata.get("source") != "jarvis_link"
-            or metadata.get("capability_scope") != ["mac_read"]
+            or metadata.get("capability_scope") != [expected_scope]
         ):
             raise PermissionError("supervisor_task_not_authorized")
         store.record_event(
@@ -329,7 +338,30 @@ def call_tool(name,args):
             return text_result("This task has no screen observation capability.", True)
         if args:
             return text_result("Read-only Mac tools do not accept arguments.", True)
-        if name == "get_disk_usage": return disk_usage()
+        if name == "get_disk_usage":
+            task_id, audit_store = _begin_mac_read_audit("get_disk_usage")
+            try:
+                result = disk_usage()
+                if audit_store is not None:
+                    audit_store.record_event(
+                        task_id,
+                        "mac.read_only_tool.completed",
+                        {"operation": "get_disk_usage", "success": not bool(result.get("isError"))},
+                    )
+                return result
+            except Exception as exc:
+                if audit_store is not None:
+                    audit_store.record_event(
+                        task_id,
+                        "mac.read_only_tool.failed",
+                        {"operation": "get_disk_usage", "error_code": type(exc).__name__},
+                    )
+                return text_result(
+                    f"Disk usage could not be read ({type(exc).__name__}).", True
+                )
+            finally:
+                if audit_store is not None:
+                    audit_store.close()
         if name == "get_system_info": return system_info()
         if name == "get_active_app": return text_result(active_app())
         if name == "capture_screen": return screenshot()

@@ -179,6 +179,40 @@ def test_supervised_assistant_mcp_receives_its_task_store_path(tmp_path, monkeyp
     assert any("JARVIS_SUPERVISOR_DB" in value and task_db in value for value in overrides)
 
 
+def test_read_only_link_scope_enables_only_fixed_disk_tool(tmp_path, monkeypatch):
+    from openjarvis.tasks import supervisor
+    from openjarvis.tasks.supervisor import bind_task
+
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        '[mcp_servers.extra]\ncommand="/usr/bin/true"\n'
+        '[mcp_servers.jarvis_dev]\ncommand="/usr/bin/true"\n',
+        encoding="utf-8",
+    )
+    task_id = "a" * 32
+    task_db = str(tmp_path / "supervisor.db")
+    monkeypatch.setattr(codex_sdk, "CODEX_HOME", codex_home)
+    monkeypatch.setattr(
+        supervisor,
+        "get_supervisor_store",
+        lambda: SimpleNamespace(db_path=task_db),
+    )
+    with bind_task(task_id, source="jarvis_link", scope="read_only"):
+        overrides = set(codex_sdk._config_overrides("basic"))
+    assert "mcp_servers.extra.enabled=false" in overrides
+    assert "mcp_servers.jarvis_dev.enabled=false" in overrides
+    assert 'mcp_servers.jarvis_dev.command="/usr/bin/false"' in overrides
+    assert "mcp_servers.jarvis_mac.enabled=true" in overrides
+    assert 'mcp_servers.jarvis_mac.env.JARVIS_DESKTOP_MODE="basic"' in overrides
+    assert "features.shell_tool=false" in overrides
+    assert "features.unified_exec=false" in overrides
+    assert "features.unified_exec_tty=false" in overrides
+    assert any(f"JARVIS_SUPERVISOR_TASK_ID=\"{task_id}\"" in value for value in overrides)
+    assert 'JARVIS_SUPERVISOR_TASK_SCOPE="read_only"' in " ".join(overrides)
+    assert any("JARVIS_SUPERVISOR_DB" in value and task_db in value for value in overrides)
+
+
 def test_mac_mcp_uses_explicit_supervisor_db_path(monkeypatch, tmp_path):
     import importlib.util
     from openjarvis.tasks import supervisor
@@ -424,3 +458,91 @@ def test_mac_read_mcp_refuses_missing_supervisor_task_context(monkeypatch):
     response = module.call_tool("get_system_info", {})
     assert response["isError"] is True
     assert "PermissionError" in response["content"][0]["text"]
+
+    monkeypatch.setenv("JARVIS_DESKTOP_MODE", "basic")
+    monkeypatch.setenv("JARVIS_SUPERVISOR_TASK_SOURCE", "jarvis_link")
+    monkeypatch.setenv("JARVIS_SUPERVISOR_TASK_SCOPE", "read_only")
+    monkeypatch.delenv("JARVIS_SUPERVISOR_TASK_ID", raising=False)
+    monkeypatch.delenv("JARVIS_SUPERVISOR_DB", raising=False)
+    basic_spec = importlib.util.spec_from_file_location(
+        "thozha_test_basic_read_no_context", module_path
+    )
+    assert basic_spec is not None and basic_spec.loader is not None
+    basic_module = importlib.util.module_from_spec(basic_spec)
+    basic_spec.loader.exec_module(basic_module)
+    monkeypatch.setattr(
+        basic_module,
+        "disk_usage",
+        lambda: (_ for _ in ()).throw(AssertionError("Mac tool must not execute")),
+    )
+    denied = basic_module.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "get_disk_usage", "arguments": {}},
+        }
+    )
+    assert denied["result"]["isError"] is True
+    assert "PermissionError" in denied["result"]["content"][0]["text"]
+
+
+def test_read_only_link_disk_tool_persists_content_free_execution_audit(
+    tmp_path, monkeypatch
+):
+    from openjarvis.tasks.supervisor import SupervisorStore
+
+    home = tmp_path / "isolated-openjarvis"
+    monkeypatch.setenv("OPENJARVIS_HOME", str(home))
+    monkeypatch.setenv("JARVIS_DESKTOP_MODE", "basic")
+    task_db = home / "supervisor.db"
+    store = SupervisorStore(str(task_db), run_recovery=False)
+    key = "readonly-link-disk-audit-test-001"
+    run = store.create_link_task(
+        "Check Mac disk space",
+        capability_scope=["read_only"],
+        idempotency_key=key,
+        owner_actor="device:" + ("a" * 32),
+    )
+    task_id = run["task_id"]
+    store.start_link_task(
+        task_id,
+        objective_digest=run["objective_digest"],
+        objective_text_digest=run["objective_digest"],
+        capability_scope=["read_only"],
+        idempotency_key=key,
+    )
+    monkeypatch.setenv("JARVIS_SUPERVISOR_TASK_ID", task_id)
+    monkeypatch.setenv("JARVIS_SUPERVISOR_TASK_SOURCE", "jarvis_link")
+    monkeypatch.setenv("JARVIS_SUPERVISOR_TASK_SCOPE", "read_only")
+    monkeypatch.setenv("JARVIS_SUPERVISOR_DB", str(task_db))
+    module_path = codex_sdk.Path(__file__).resolve().parents[2] / "src" / "openjarvis" / "mac_desktop_mcp.py"
+    spec = importlib.util.spec_from_file_location("thozha_test_basic_disk_audit", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(
+        module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=1_000_000_000, free=500_000_000),
+    )
+
+    names = {item["name"] for item in module.tool_list()}
+    assert names == {"get_disk_usage"}
+    response = module.call_tool("get_disk_usage", {})
+    assert response.get("isError") is not True
+    facts = json.loads(response["content"][0]["text"])
+    assert facts["mount"] == "/"
+    assert facts["free_gb"] == 0.5
+    audit = [
+        event
+        for event in store.events(task_id)
+        if event["event_type"].startswith("mac.read_only_tool.")
+    ]
+    assert [event["event_type"] for event in audit] == [
+        "mac.read_only_tool.started",
+        "mac.read_only_tool.completed",
+    ]
+    assert audit[-1]["payload"] == {"operation": "get_disk_usage", "success": True}
+    assert "free_gb" not in json.dumps([event["payload"] for event in audit])
+    store.close()
