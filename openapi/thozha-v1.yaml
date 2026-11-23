@@ -715,6 +715,272 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
         '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/automations:
+    get:
+      operationId: listWebAutomations
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1, browser auth, active device mapping, and Link runner
+      tags: [automation]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, paused, completed, cancelled] }
+      responses:
+        '200':
+          description: Owner-scoped Web automation records.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/WebAutomation' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    post:
+      operationId: createWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1, browser auth, active device mapping, and Link runner
+      tags: [automation]
+      description: >
+        Read-only scheduled requests only. Each occurrence is a durable Link
+        task bound to the selected active paired device and uses the ordinary
+        read_only supervisor scope. No arbitrary tools are scheduled.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebAutomationCreate' }
+      responses:
+        '202':
+          description: Persisted automation record.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, automation]
+                properties:
+                  status: { type: string, const: created }
+                  automation: { $ref: '#/components/schemas/WebAutomation' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/automations/capabilities:
+    get:
+      operationId: getWebAutomationCapabilities
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth; reports unavailable operations when feature is disabled
+      tags: [automation]
+      responses:
+        '200':
+          description: Capability availability based on active scheduler, mapping, and Link runner.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAutomationCapabilities' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/automations/{automation_id}:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    get:
+      operationId: getWebAutomation
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      responses:
+        '200':
+          description: Owner-scoped automation with latest correlated supervisor state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAutomationDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    patch:
+      operationId: updateWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      description: Update only an owned Web schedule; supported scope remains read_only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebAutomationUpdate' }
+      responses:
+        '200':
+          description: Updated owner-scoped automation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAutomation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+    delete:
+      operationId: deleteWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      description: Soft-cancels an owned schedule; history is retained.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200': { description: Automation cancelled; history retained. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/automations/{automation_id}/history:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    get:
+      operationId: getWebAutomationHistory
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Persisted occurrence history with current correlated Link task status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/WebAutomationRun' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/automations/{automation_id}/enable:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    post:
+      operationId: enableWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200': { description: Automation resumed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/automations/{automation_id}/disable:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    post:
+      operationId: disableWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200': { description: Automation paused. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/automations/{automation_id}/pause:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    post:
+      operationId: pauseWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200': { description: Automation paused. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/automations/{automation_id}/trigger:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    post:
+      operationId: triggerWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1, mapped active device, and Link runner
+      tags: [automation]
+      description: Runs one read_only occurrence through a durable supervisor Link task.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200':
+          description: Manual occurrence dispatch state and supervisor task correlation.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
   /v1/jarvis/system/info:
     get:
       operationId: getMacSystemInfo
@@ -1297,6 +1563,64 @@ components:
         status: { type: string, enum: [revoked, already_revoked] }
         device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
         notification_token_cleanup: { type: string, enum: [none, revoked] }
+    WebAutomationCreate:
+      type: object
+      additionalProperties: false
+      required: [prompt, schedule_type, schedule_value, device_id]
+      properties:
+        prompt: { type: string, minLength: 1, maxLength: 2000 }
+        schedule_type: { type: string, enum: [once, interval, cron] }
+        schedule_value: { type: string, minLength: 1, maxLength: 200 }
+        timezone: { type: [string, 'null'], maxLength: 80 }
+        device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+    WebAutomationUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        prompt: { type: string, minLength: 1, maxLength: 2000 }
+        schedule_type: { type: string, enum: [once, interval, cron] }
+        schedule_value: { type: string, minLength: 1, maxLength: 200 }
+        timezone: { type: string, maxLength: 80 }
+    WebAutomation:
+      type: object
+      required: [id, prompt, schedule_type, schedule_value, status, last_supervisor_task_id]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{16}$' }
+        prompt: { type: string }
+        schedule_type: { type: string, enum: [once, interval, cron] }
+        schedule_value: { type: string }
+        timezone: { type: [string, 'null'] }
+        status: { type: string, enum: [active, paused, completed, cancelled] }
+        next_run: { type: [string, 'null'], format: date-time }
+        last_run: { type: [string, 'null'], format: date-time }
+        last_supervisor_task_id: { type: [string, 'null'], pattern: '^[0-9a-f]{32}$' }
+    WebAutomationDetail:
+      type: object
+      required: [automation, latest_supervisor_task]
+      properties:
+        automation: { $ref: '#/components/schemas/WebAutomation' }
+        latest_supervisor_task: { type: [object, 'null'], additionalProperties: true }
+    WebAutomationCapabilities:
+      type: object
+      required: [status, operations, unavailable_reasons]
+      properties:
+        status: { type: string, const: available }
+        operations: { type: object, additionalProperties: { type: boolean } }
+        unavailable_reasons: { type: object, additionalProperties: { type: string } }
+    WebAutomationRun:
+      type: object
+      required: [started_at, finished_at, success, state, result, error, supervisor_task]
+      properties:
+        started_at: { type: string, format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time }
+        success: { type: boolean }
+        state: { type: string }
+        supervisor_task_id: { type: [string, 'null'], pattern: '^[0-9a-f]{32}$' }
+        idempotency_key: { type: [string, 'null'] }
+        result: { type: string }
+        error: { type: string }
+        supervisor_task: { type: [object, 'null'], additionalProperties: true }
     MacSystemInfo:
       type: object
       required: [online, uptime]
@@ -1455,7 +1779,7 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
   x-thozha-not-implemented:
     - semantic or embedding-backed Web memory retrieval
-    - automation schedule CRUD API
+    - Web automation scopes beyond read_only
     - notification history/read state API
     - FCM delivery through verified project credentials
     - Trading Lab broker integration (paper-trading only remains the boundary)
