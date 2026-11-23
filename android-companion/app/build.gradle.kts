@@ -17,7 +17,6 @@ val jarvisLabRoot = generateSequence(rootProject.projectDir) { it.parentFile }
     .firstOrNull { it.resolve("jarvis-link/companion/src/main/kotlin").isDirectory }
     ?: error("Could not locate Jarvis-Lab/jarvis-link companion sources.")
 val jarvisLinkRoot = jarvisLabRoot.resolve("jarvis-link")
-val connectivityPocRoot = jarvisLabRoot.resolve("connectivity-poc")
 
 android {
     namespace = "com.jarvis.companion"
@@ -239,7 +238,7 @@ tasks.register<JavaExec>("verifyTelegramTunnel") {
         layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
     ) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.telegram.TelegramTunnelChecksKt")
-    args(connectivityPocRoot.resolve("telegram_adapter/tunnel-v1.fixture.json").absolutePath)
+    args(layout.projectDirectory.file("src/test/resources/telegram_adapter/tunnel-v1.fixture.json").asFile.absolutePath)
 }
 
 // ---- Jarvis Link transport (shared source with jarvis-link/companion; the Android app compiles it too) ----

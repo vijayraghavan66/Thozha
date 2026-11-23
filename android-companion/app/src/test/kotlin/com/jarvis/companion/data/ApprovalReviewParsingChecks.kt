@@ -18,8 +18,8 @@ fun main() {
         "max_duration_s" to 1_800L,
         "ttl_s" to 1_800L,
     )
-    val planDigest = "7fa780c010332ef3f18985c8b4abf3c6c3745311251daec14cc0c4b146e7acc5"
-    val operationDigest = "12be6b00fd5eba1b10aa88c47aded2654e7915ec448936d1179b65c46f945d19"
+    val planDigest = "c4fe9653d9e3a6932af2f124fa6d79ea5d83feb823c7c6dcde663ce07c69678e"
+    val operationDigest = "3db28592ee5bd44a6e3b5598cd9bc322df30eaa802097086cc8b809f16c52d8f"
     val approvalPayload = mapOf(
         "canonical_arguments" to mapOf("plan" to plan, "plan_digest" to planDigest),
     )

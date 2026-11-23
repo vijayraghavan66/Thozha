@@ -8,7 +8,9 @@ Use Companion HTTP API v1 as the route inventory. It distinguishes direct loopba
 
 Implemented backend operations include read-only Mac status, task listing/detail, async Link task submission and status, cancellation, pending approval review/decision, and direct-API artifact listing/download. Approval decisions remain bound to the task, exact operation digest, paired-device owner, expiry and single-use authorization.
 
-The Android client implements authenticated request shapes in android-companion/app/src/main/kotlin/com/jarvis/companion/data/JarvisApi.kt. Backend routes live in openjarvis/src/openjarvis/server/supervisor_routes.py; the restricted transport allowlist lives in openjarvis/src/openjarvis/server/companion_gateway.py. These are source references, not a claim that every route is available remotely or on the public Internet.
+The Android client implements authenticated request shapes in android-companion/app/src/main/kotlin/com/jarvis/companion/data/JarvisApi.kt. Backend routes live in openjarvis/src/openjarvis/server/supervisor_routes.py; the restricted transport allowlist lives in openjarvis/src/openjarvis/server/companion_gateway.py. The local source commit 13ddffc5 also includes the encrypted, optional FCM token store/sender; its credentials are external to Git and real delivery is unverified. These are source references, not a claim that every route is available remotely or on the public Internet.
+
+OpenJarvis also has general chat routes: POST /v1/chat/completions (including SSE where the selected engine supports streaming), WebSocket /v1/chat/stream, GET /v1/sessions, and several /v1/memory routes. They are not in the companion-gateway allowlist and are not a browser-safe authorization model. SessionStore/trace and memory-backend records should not be treated as a per-device conversation history without a separate user/device binding contract. The Codex SDK path is not certified for sub-3-second first-token latency.
 
 ## Frontend rules before design approval
 
@@ -30,6 +32,8 @@ The Android client implements authenticated request shapes in android-companion/
 | Approval review and exact-digest decision | Implemented supervisor boundary and Android client | Contracted; Web controls stay preview-only until auth/design approval |
 | ZIP artifact manifest/download | Implemented in direct loopback API and Android client | Not in gateway allowlist; no Web delivery |
 | FCM token registration | Registration/revoke route implemented | End-to-end delivery not verified; not a Web feature |
+| Generic OpenJarvis chat/SSE/WebSocket | Implemented in the general server | Not companion-gateway allowlisted; no browser session/auth contract |
+| OpenJarvis sessions and memory | General server routes exist | Not bound to a Thozha per-device conversation history/profile; memory may be unconfigured |
 | Jarvis Link encrypted relay | Versioned prototype protocol and local tests | No production deployment; not the current Android transport |
 | Live audio | Development protocol on loopback port 8766 through ADB reverse | Not available to Web and not USB-free |
 | Browser auth, task event stream, remote artifact gateway, public/Tailscale remote access | Not implemented in the published contract | Requires separate design/security review |

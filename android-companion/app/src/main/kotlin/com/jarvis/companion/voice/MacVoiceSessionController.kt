@@ -268,7 +268,8 @@ class MacVoiceSessionController(context: Context, private val listener: Listener
             record.startRecording()
             running = true
             recordThread = Thread({ captureLoop(record) }, "thozha-live-capture").apply { isDaemon = true; start() }
-            Log.i(TAG, "event=capture_started sample_rate=16000 frame_ms=20 audio_mode=${audioManager.mode} route_type=${audioManager.communicationDevice?.type ?: -1} aec=${echoCanceler?.enabled == true} ns=${noiseSuppressor?.enabled == true} elapsed_ms=${SystemClock.elapsedRealtime()}")
+            val routeType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) audioManager.communicationDevice?.type ?: -1 else -1
+            Log.i(TAG, "event=capture_started sample_rate=16000 frame_ms=20 audio_mode=${audioManager.mode} route_type=$routeType aec=${echoCanceler?.enabled == true} ns=${noiseSuppressor?.enabled == true} elapsed_ms=${SystemClock.elapsedRealtime()}")
             true
         } catch (t: Throwable) {
             stopCapture()

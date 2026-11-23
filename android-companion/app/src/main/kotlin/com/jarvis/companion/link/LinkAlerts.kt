@@ -1,5 +1,6 @@
 package com.jarvis.companion.link
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
@@ -62,6 +63,7 @@ object LinkAlerts {
         return notifyApprovalPointer(context, approval.id, "supervisor")
     }
 
+    @SuppressLint("MissingPermission") // canPost checks POST_NOTIFICATIONS and app-level notification state.
     private fun notifyApprovalPointer(context: Context, approvalId: String, source: String): Boolean {
         if (!canPost(context)) return false
         ensureChannels(context)
@@ -93,6 +95,7 @@ object LinkAlerts {
 
 
     /** Posts only new, persisted Mac lifecycle events. Stable notification IDs update a task card in place. */
+    @SuppressLint("MissingPermission") // canPost checks POST_NOTIFICATIONS and app-level notification state.
     fun notifyTaskUpdates(context: Context, updates: List<Map<String, Any>>) {
         if (!LinkSettings(context).taskNotificationsEnabled || !canPost(context)) return
         ensureChannels(context)

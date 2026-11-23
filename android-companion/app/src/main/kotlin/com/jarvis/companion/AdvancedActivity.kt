@@ -24,6 +24,7 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import com.jarvis.companion.data.JarvisApi
 import com.jarvis.companion.data.PairingInvitationSignature
 import com.jarvis.companion.data.SecureStore
@@ -93,6 +94,9 @@ class AdvancedActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() = handleScreenBack()
+        })
         store = SecureStore(this)
         api = JarvisApi(this, store)
         worker = Executors.newSingleThreadExecutor()
@@ -220,15 +224,14 @@ class AdvancedActivity : ComponentActivity() {
     }
 
 
-    @Suppress("DEPRECATION")
-    override fun onBackPressed() {
+    private fun handleScreenBack() {
         when (screen) {
             Screen.TASK_DETAIL, Screen.APPROVAL_DETAIL -> {
                 screen = if (screen == Screen.TASK_DETAIL) Screen.TASKS else Screen.APPROVALS
                 errorMessage = ""
                 render()
             }
-            else -> super.onBackPressed()
+            else -> finish()
         }
     }
 
@@ -301,7 +304,7 @@ class AdvancedActivity : ComponentActivity() {
         }
         top.addView(brand, LinearLayout.LayoutParams(0, -2, 1f))
         if (screen == Screen.TASK_DETAIL || screen == Screen.APPROVAL_DETAIL) {
-            top.addView(smallAction("Back") { onBackPressed() })
+            top.addView(smallAction("Back") { handleScreenBack() })
         } else if (screen != Screen.DEVICE && isPaired()) {
             top.addView(smallAction(if (isBusy) "Working…" else "Refresh") { refreshCurrent() })
         }
@@ -1498,7 +1501,9 @@ class AdvancedActivity : ComponentActivity() {
             if (mono) typeface = Typeface.create("monospace", Typeface.NORMAL)
             gravity = Gravity.START
             setLineSpacing(dp(2).toFloat(), 1f)
-            breakStrategy = android.text.Layout.BREAK_STRATEGY_SIMPLE
+            if (Build.VERSION.SDK_INT >= 29) {
+                breakStrategy = android.graphics.text.LineBreaker.BREAK_STRATEGY_SIMPLE
+            }
         }
     }
 

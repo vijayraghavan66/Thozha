@@ -6,7 +6,7 @@ Audit date: 2026-11-23. This report covers the sanitized source-history copies p
 
 - Android companion: source branch integration/telegram-ui, original HEAD 372a364.
 - Jarvis Link: source branch fix/full-assistant-response, original HEAD 018276f.
-- OpenJarvis: source branch main, original HEAD c4cd0c82. The original checkout had pre-existing dirty/untracked work; none of that work was staged or included.
+- OpenJarvis: source branch main, original HEAD 13ddffc5. This includes the reviewed encrypted FCM registration/sender module and tests, committed after its focused tests passed. The original checkout still has unrelated dirty/untracked work; none of the remaining unrelated paths were included.
 
 The monorepo imports each project's reachable branch history under its own directory. Sanitization rewrites commit IDs in the export only; the original repositories retain their commits and branches.
 
@@ -23,7 +23,7 @@ A pattern scan covered all reachable text and binary blobs in the filtered Andro
 
 The scan also found six Slack-token-shaped strings in OpenJarvis redaction/security tests and documentation; targeted review classified them as synthetic fixtures used to verify log sanitization, not account credentials.
 
-A separate read-only review of the unfiltered OpenJarvis history found no established live private key, device token, bot token, or privileged service credential. Its uncertain historical key-shaped documentation examples and the public-role JWT were replaced in the sanitized export. The original checkout was not rewritten.
+A separate read-only review of the unfiltered OpenJarvis history found no established live private key, device token, bot token, or privileged service credential. Its uncertain historical key-shaped documentation examples and the public-role JWT were replaced in the sanitized export. The FCM sender is optional and fails closed without local service-account/application-default credentials; none are stored in the repository, and delivery was not verified against Firebase. The original checkout history was not rewritten.
 
 ## Scope and limitations
 
