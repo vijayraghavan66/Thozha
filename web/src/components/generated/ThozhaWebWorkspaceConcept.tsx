@@ -5,7 +5,8 @@ import { errorText } from '../../api/client';
 import { Settings } from '../../pages/WorkspacePages';
 import { useApprovals, useDevices, useTasks, taskHref, httpStatus } from '../../pages/controlState';
 import { Approvals } from '../../pages/Approvals';
-import { Chip, Crest, Loading, Modal, Notice } from '../ui';
+import { Chip, Loading, Modal, Notice } from '../ui';
+import { LivingPulseMark } from '../../auth/LivingPulseStartup';
 import { AnchoredSurface, NotificationPanel, TravelingSurface } from '../LiquidSurface';
 import { muted } from '../styles';
 import {
@@ -144,6 +145,7 @@ export function ThozhaWebWorkspaceConcept({
   checkedAt,
   logout,
   checkSession,
+  replayIntroduction,
 }: {
   api: WorkspaceApi;
   userId: string;
@@ -152,6 +154,7 @@ export function ThozhaWebWorkspaceConcept({
   checkedAt: number;
   logout: () => void;
   checkSession: () => void;
+  replayIntroduction: () => void;
 }) {
   const [hash, setHash] = useState(() => window.location.hash);
   const page = currentPage(hash);
@@ -167,6 +170,7 @@ export function ThozhaWebWorkspaceConcept({
   );
   const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 1023px)').matches);
   const [inspectorSlot, setInspectorSlot] = useState<HTMLDivElement | null>(null);
+  const [chatTitleSlot, setChatTitleSlot] = useState<HTMLDivElement | null>(null);
   const [dialog, setDialog] = useState<'navigation' | null>(null);
   const [conversationAction, setConversationAction] = useState<ConversationAction | null>(null);
   const [conversationNotice, setConversationNotice] = useState('');
@@ -426,7 +430,9 @@ export function ThozhaWebWorkspaceConcept({
           className="th-v4-rail z-30 hidden shrink-0 flex-col overflow-hidden border-r border-white/[.08] bg-[#131417] p-3 lg:flex"
         >
           <div className="mb-5 flex shrink-0 items-center gap-3 px-2 pt-3">
-            <Crest />
+            <span data-pulse-slot className="th-pulse-slot">
+              <LivingPulseMark />
+            </span>
             {!sidebarCollapsed && (
               <div>
                 <div className="text-[21px] font-semibold tracking-[-.06em]">
@@ -500,11 +506,20 @@ export function ThozhaWebWorkspaceConcept({
               >
                 <MenuGlyph open={dialog === 'navigation'} />
               </button>
-              <span className="hidden text-xs text-[#a4a5af] sm:inline">Thozha</span>
-              <span aria-hidden="true" className="hidden text-[#777985] sm:inline">
-                /
+              <span data-pulse-slot className="th-pulse-slot th-pulse-slot-mobile lg:hidden">
+                <LivingPulseMark />
               </span>
-              <span className="truncate text-xs font-medium">{page}</span>
+              {page === 'AI Workspace' ? (
+                <div ref={setChatTitleSlot} className="min-w-0" />
+              ) : (
+                <>
+                  <span className="hidden text-xs text-[#a4a5af] sm:inline">Thozha</span>
+                  <span aria-hidden="true" className="hidden text-[#777985] sm:inline">
+                    /
+                  </span>
+                  <span className="truncate text-xs font-medium">{page}</span>
+                </>
+              )}
             </div>
             <div className="flex shrink-0 items-center gap-1 sm:gap-3">
               {hasInspector && (
@@ -724,6 +739,7 @@ export function ThozhaWebWorkspaceConcept({
                       toggleMotion={toggleMotion}
                       checkSession={checkSession}
                       logout={logout}
+                      replayIntroduction={replayIntroduction}
                     />
                   )}
                 </div>
@@ -741,6 +757,7 @@ export function ThozhaWebWorkspaceConcept({
                         go('Tasks');
                       }}
                       inspector={inspectorSlot}
+                      titleSlot={chatTitleSlot}
                       onManageConversation={openConversationAction}
                       changedConversationId={changedConversationId}
                     />

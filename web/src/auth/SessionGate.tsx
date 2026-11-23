@@ -9,11 +9,11 @@ import {
   type WebApi,
   type WebSession,
 } from '../api/client';
-import { Chip, Crest, Loading, Notice, Panel } from '../components/ui';
+import { Chip, Loading, Notice, Panel } from '../components/ui';
 import { WaterSurface } from '../components/WaterSurface';
 import { field, muted, outline, solid } from '../components/styles';
 import { ThozhaWebWorkspaceConcept } from '../components/generated/ThozhaWebWorkspaceConcept';
-import { LivingPulseStartup } from './LivingPulseStartup';
+import { LivingPulseIntroduction, LivingPulseMark } from './LivingPulseStartup';
 
 type Ready = {
   kind: 'ready';
@@ -30,24 +30,15 @@ type State =
   | Ready;
 
 const webApi = createWebApi();
-const startupKey = 'thozha-web.startup-seen.v1';
-
 function shouldAnimateStartup() {
   try {
     return (
-      !sessionStorage.getItem(startupKey) &&
+      document.visibilityState === 'visible' &&
+      window.matchMedia?.('(prefers-reduced-motion: no-preference)').matches === true &&
       localStorage.getItem('thozha-web.motion.v1') !== 'reduce'
     );
   } catch {
     return false;
-  }
-}
-
-function markStartupSeen() {
-  try {
-    sessionStorage.setItem(startupKey, '1');
-  } catch {
-    // Storage is optional; it only controls decoration.
   }
 }
 
@@ -57,12 +48,14 @@ function SignedIn({
   onUnauthorized,
   logout,
   check,
+  replayIntroduction,
 }: {
   state: Ready;
   backend: WebApi;
   onUnauthorized: (version: number) => void;
   logout: () => void;
   check: () => void;
+  replayIntroduction: () => void;
 }) {
   const [cache] = useState(
     () =>
@@ -89,6 +82,7 @@ function SignedIn({
         checkedAt={state.checkedAt}
         logout={logout}
         checkSession={check}
+        replayIntroduction={replayIntroduction}
       />
     </QueryClientProvider>
   );
@@ -96,6 +90,10 @@ function SignedIn({
 
 export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
   const [state, setState] = useState<State>({ kind: 'startup' });
+  const [intro, setIntro] = useState(() => shouldAnimateStartup());
+  const root = useRef<HTMLDivElement>(null);
+  const dismissIntro = useCallback(() => setIntro(false), []);
+  const replayIntro = useCallback(() => setIntro(shouldAnimateStartup()), []);
   const current = useRef<State>(state);
   const request = useRef<AbortController | null>(null);
   const version = useRef(0);
@@ -147,7 +145,6 @@ export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
         );
       }
     } finally {
-      if (previous.kind === 'startup' && !controller.signal.aborted) markStartupSeen();
       if (request.current === controller) request.current = null;
     }
   }, [backend, commit]);
@@ -219,8 +216,10 @@ export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
         if (isUnauthorized(error)) throw new Error('cookie-not-accepted');
         throw error;
       });
-      if (!controller.signal.aborted)
+      if (!controller.signal.aborted) {
+        replayIntro();
         commit({ kind: 'ready', session, checkedAt: Date.now(), version: ++version.current });
+      }
     } catch (error) {
       if (controller.signal.aborted) return;
       const message = isUnauthorized(error)
@@ -237,6 +236,7 @@ export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
   async function logout() {
     const active = current.current;
     if (active.kind !== 'ready' && active.kind !== 'logout-error') return;
+    dismissIntro();
     request.current?.abort();
     request.current = null;
     commit({ kind: 'signing-out' });
@@ -251,22 +251,6 @@ export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
     }
   }
 
-  if (state.kind === 'startup')
-    return <LivingPulseStartup animateOnMount={shouldAnimateStartup()} />;
-
-  if (state.kind === 'ready') {
-    return (
-      <SignedIn
-        key={state.version}
-        state={state}
-        backend={backend}
-        onUnauthorized={invalidate}
-        logout={() => void logout()}
-        check={() => void verify()}
-      />
-    );
-  }
-
   function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const values = new FormData(event.currentTarget);
@@ -278,84 +262,121 @@ export function SessionGate({ backend = webApi }: { backend?: WebApi }) {
     });
   }
 
+  const arriving = state.kind === 'ready' || state.kind === 'signed-out';
   return (
-    <main className="th-workspace th-v4-auth grid min-h-dvh items-center bg-[#0e0f11] p-4 text-[#ececf0] md:p-10">
-      <div className="th-enter mx-auto w-full max-w-[440px] overflow-hidden rounded-[22px] border border-white/10 bg-[#17181b] shadow-[0_40px_130px_rgba(0,0,0,.32)]">
-        <div className="relative overflow-hidden border-b border-white/10 p-7">
-          <WaterSurface quiet />
-          <div className="relative">
-            <Crest />
-            <p className="mt-4 text-lg font-semibold tracking-tight">
-              thozha<span className="text-[#858690]">.</span>
+    <>
+      <div ref={root}>
+        {state.kind === 'startup' ? (
+          <main className="th-startup-wait">
+            {!intro && <LivingPulseMark />}
+            <p role="status" className="sr-only">
+              Checking browser session…
             </p>
-            <p className={`mt-1 ${muted}`}>Your private AI workspace</p>
-          </div>
-        </div>
-        <div className="p-5 md:p-7">
-          <Panel cls="border-0 bg-transparent p-0 shadow-none">
-            <Chip>OWNER SESSION</Chip>
-            <h1 className="mb-4 mt-4 text-2xl font-semibold tracking-tight">Sign in to Thozha</h1>
-            {(state.kind === 'checking' || state.kind === 'signing-out') && (
-              <Loading
-                label={state.kind === 'checking' ? 'Checking browser session…' : 'Signing out…'}
-              />
-            )}
-            {state.kind === 'unavailable' && (
-              <Notice error retry={() => void verify()}>
-                {state.message}
-              </Notice>
-            )}
-            {state.kind === 'logout-error' && (
-              <>
-                <Notice error>
-                  Sign-out not confirmed. Workspace data is hidden. {state.message}
-                </Notice>
-                <button type="button" className={outline + ' mt-4'} onClick={() => void logout()}>
-                  Retry sign-out
-                </button>
-              </>
-            )}
-            {(state.kind === 'signed-out' || state.kind === 'signing-in') && (
-              <form className="space-y-4" onSubmit={handleLogin}>
-                {state.kind === 'signed-out' && state.message && (
-                  <Notice error>{state.message}</Notice>
-                )}
-                <label className="block text-xs">
-                  Workspace ID
-                  <input
-                    name="username"
-                    className={field + ' mt-2'}
-                    autoComplete="username"
-                    maxLength={128}
-                    required
-                  />
-                </label>
-                <label className="block text-xs">
-                  Password
-                  <input
-                    name="password"
-                    type="password"
-                    className={field + ' mt-2'}
-                    autoComplete="current-password"
-                    maxLength={1024}
-                    required
-                  />
-                </label>
-                <p className={muted}>
-                  Use the browser owner credential configured on your Thozha host.
-                </p>
-                <button
-                  type="submit"
-                  className={solid + ' w-full'}
-                  disabled={state.kind === 'signing-in'}
-                >
-                  {state.kind === 'signing-in' ? 'Signing in…' : 'Sign in'}
-                </button>
-              </form>
-            )}
-          </Panel>
-        </div>
+          </main>
+        ) : state.kind === 'ready' ? (
+          <SignedIn
+            key={state.version}
+            state={state}
+            backend={backend}
+            onUnauthorized={invalidate}
+            logout={() => void logout()}
+            check={() => void verify()}
+            replayIntroduction={replayIntro}
+          />
+        ) : (
+          <main className="th-workspace th-v4-auth grid min-h-dvh items-center bg-[#0e0f11] p-4 text-[#ececf0] md:p-10">
+            <div className="mx-auto w-full max-w-[440px] overflow-hidden rounded-[22px] border border-white/10 bg-[#17181b] shadow-[0_40px_130px_rgba(0,0,0,.32)]">
+              <div className="relative overflow-hidden border-b border-white/10 p-7">
+                <WaterSurface quiet />
+                <div className="relative">
+                  <span data-pulse-slot className="th-pulse-slot">
+                    <LivingPulseMark />
+                  </span>
+                  <p className="mt-4 text-lg font-semibold tracking-tight">
+                    thozha<span className="text-[#858690]">.</span>
+                  </p>
+                  <p className={`mt-1 ${muted}`}>Your private AI workspace</p>
+                </div>
+              </div>
+              <div className="p-5 md:p-7">
+                <Panel cls="border-0 bg-transparent p-0 shadow-none">
+                  <Chip>OWNER SESSION</Chip>
+                  <h1 className="mb-4 mt-4 text-2xl font-semibold tracking-tight">
+                    Sign in to Thozha
+                  </h1>
+                  {(state.kind === 'checking' || state.kind === 'signing-out') && (
+                    <Loading
+                      label={
+                        state.kind === 'checking' ? 'Checking browser session…' : 'Signing out…'
+                      }
+                    />
+                  )}
+                  {state.kind === 'unavailable' && (
+                    <Notice error retry={() => void verify()}>
+                      {state.message}
+                    </Notice>
+                  )}
+                  {state.kind === 'logout-error' && (
+                    <>
+                      <Notice error>
+                        Sign-out not confirmed. Workspace data is hidden. {state.message}
+                      </Notice>
+                      <button
+                        type="button"
+                        className={outline + ' mt-4'}
+                        onClick={() => void logout()}
+                      >
+                        Retry sign-out
+                      </button>
+                    </>
+                  )}
+                  {(state.kind === 'signed-out' || state.kind === 'signing-in') && (
+                    <form className="space-y-4" onSubmit={handleLogin}>
+                      {state.kind === 'signed-out' && state.message && (
+                        <Notice error>{state.message}</Notice>
+                      )}
+                      <label className="block text-xs">
+                        Workspace ID
+                        <input
+                          name="username"
+                          className={field + ' mt-2'}
+                          autoComplete="username"
+                          maxLength={128}
+                          required
+                        />
+                      </label>
+                      <label className="block text-xs">
+                        Password
+                        <input
+                          name="password"
+                          type="password"
+                          className={field + ' mt-2'}
+                          autoComplete="current-password"
+                          maxLength={1024}
+                          required
+                        />
+                      </label>
+                      <p className={muted}>
+                        Use the browser owner credential configured on your Thozha host.
+                      </p>
+                      <button
+                        type="submit"
+                        className={solid + ' w-full'}
+                        disabled={state.kind === 'signing-in'}
+                      >
+                        {state.kind === 'signing-in' ? 'Signing in…' : 'Sign in'}
+                      </button>
+                    </form>
+                  )}
+                </Panel>
+              </div>
+            </div>
+          </main>
+        )}
       </div>
-    </main>
+      {intro && (state.kind === 'startup' || arriving) && (
+        <LivingPulseIntroduction root={root} ready={arriving} dismiss={dismissIntro} />
+      )}
+    </>
   );
 }

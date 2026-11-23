@@ -46,8 +46,7 @@ async function submitTask(page: Page, objective?: string, scope = 'read_only') {
 test('prefills without execution, resumes real supervisor SSE, and reloads the verified result', async ({
   page,
 }) => {
-  await signIn(page, '/#/ai-workspace');
-  await page.locator('main').getByRole('button', { name: '＋ New conversation' }).click();
+  await signIn(page, '/#/ai-workspace?new=1');
   const composer = page.getByRole('textbox', { name: 'Message Jarvis' });
   await composer.fill('/task Fixture slow task');
   const writes: string[] = [];
@@ -107,8 +106,7 @@ test('prefills without execution, resumes real supervisor SSE, and reloads the v
 test('does not post a slash task if the mapped worker becomes unavailable after review', async ({
   page,
 }) => {
-  await signIn(page, '/#/ai-workspace');
-  await page.locator('main').getByRole('button', { name: '＋ New conversation' }).click();
+  await signIn(page, '/#/ai-workspace?new=1');
   await page.getByRole('textbox', { name: 'Message Jarvis' }).fill('/task Read host status');
   await page.getByRole('button', { name: 'Review task', exact: true }).click();
   await pairedDevice(page);
@@ -190,7 +188,10 @@ test('reviews the exact operation, rejects digest mismatch, and records explicit
   for (const choice of ['Reject', 'Approve'] as const) {
     await page.goto(studio);
     const task = await submitTask(page, `Fixture approval: ${choice}`, 'assistant');
-    await page.getByRole('link', { name: 'Approvals' }).click();
+    await page
+      .getByRole('navigation', { name: 'Main navigation' })
+      .getByRole('link', { name: 'Approvals', exact: true })
+      .click();
     await expect(page.getByRole('heading', { name: 'Approvals', exact: true })).toBeVisible();
     const review = page.waitForResponse(response =>
       /\/v1\/web\/approvals\/[a-f0-9]{32}$/.test(response.url())
@@ -334,7 +335,7 @@ test('creates and updates a read-only schedule, pauses, resumes, runs and retain
 
 test('shows real mapped pairings and requires a confirmed revocation', async ({ page }) => {
   await signIn(page);
-  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
+  await expect(page.getByTestId('chat-title')).toBeVisible();
   await page.getByRole('link', { name: 'Device Hub' }).click();
   await page.getByRole('button', { name: /Revocation test pairing/ }).click();
   await expect(page.getByText('ACTIVE PAIRING', { exact: true })).toBeVisible();

@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   WebApiError,
@@ -169,73 +169,198 @@ export function ConversationHistory({
         <p className={muted}>{archived ? 'No archived conversations.' : 'No conversations yet.'}</p>
       )}
       <ul className="th-history-rows">
-        {rows.map(item => {
-          const expanded = open === item.id;
-          const panelId = `${actionsId}-${item.id}`;
-          return (
-            <li
-              key={item.id}
-              onBlur={event => {
-                if (expanded && !event.currentTarget.contains(event.relatedTarget))
-                  setOpen(undefined);
-              }}
-              onKeyDown={event => {
-                if (!expanded || event.key !== 'Escape') return;
-                event.preventDefault();
-                event.stopPropagation();
-                event.currentTarget.querySelector('button')?.focus();
-                setOpen(undefined);
-              }}
-            >
-              <div className="th-history-row">
-                <a
-                  href={`#/ai-workspace?conversation=${encodeURIComponent(item.id)}${archived ? '&archive=1' : ''}`}
-                  className="th-v4-history-link"
-                  aria-current={selectedId === item.id ? 'page' : undefined}
-                  onClick={() => {
-                    setOpen(undefined);
-                    onSelect?.();
-                  }}
-                >
-                  {item.title}
-                </a>
-                <button
-                  type="button"
-                  className="th-history-more"
-                  aria-label={`Actions for ${item.title}`}
-                  aria-expanded={expanded}
-                  aria-controls={panelId}
-                  onClick={event => {
-                    event.currentTarget.focus({ preventScroll: true });
-                    setOpen(expanded ? undefined : item.id);
-                  }}
-                >
-                  <span aria-hidden="true">···</span>
-                </button>
-              </div>
-              <div id={panelId} hidden={!expanded} className="th-history-actions">
-                {(!archived ? (['archive', 'delete'] as const) : (['delete'] as const)).map(
-                  type => (
-                    <button
-                      key={type}
-                      type="button"
-                      disabled={!connected}
-                      onClick={event => {
-                        const row = event.currentTarget.closest('li');
-                        row?.querySelector('button')?.focus();
-                        setOpen(undefined);
-                        onAction({ type, conversation: item }, historyToggle.current);
-                      }}
-                    >
-                      {type === 'archive' ? 'Archive' : 'Delete'}
-                    </button>
-                  )
-                )}
-              </div>
-            </li>
-          );
-        })}
+        {rows.map(item => (
+          <ConversationPill
+            key={item.id}
+            panelId={`${actionsId}-${item.id}`}
+            item={item}
+            selected={selectedId === item.id}
+            expanded={open === item.id}
+            connected={connected}
+            setOpen={setOpen}
+            onSelect={onSelect}
+            onAction={type => onAction({ type, conversation: item }, historyToggle.current)}
+          />
+        ))}
       </ul>
     </section>
+  );
+}
+
+function ConversationPill({
+  panelId,
+  item,
+  selected,
+  expanded,
+  connected,
+  setOpen,
+  onSelect,
+  onAction,
+}: {
+  panelId: string;
+  item: Conversation;
+  selected: boolean;
+  expanded: boolean;
+  connected: boolean;
+  setOpen: React.Dispatch<React.SetStateAction<string | undefined>>;
+  onSelect?: () => void;
+  onAction: (type: ConversationAction['type']) => void;
+}) {
+  const row = useRef<HTMLLIElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const actions = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (expanded)
+      actions.current
+        ?.querySelector<HTMLButtonElement>('button:not(:disabled)')
+        ?.focus({ preventScroll: true });
+  }, [expanded]);
+  useEffect(() => {
+    if (!expanded) return;
+    const outside = (event: PointerEvent) => {
+      if (row.current && !event.composedPath().includes(row.current)) {
+        if (row.current.contains(document.activeElement))
+          trigger.current?.focus({ preventScroll: true });
+        setOpen(current => (current === item.id ? undefined : current));
+      }
+    };
+    document.addEventListener('pointerdown', outside, true);
+    return () => document.removeEventListener('pointerdown', outside, true);
+  }, [expanded, item.id, setOpen]);
+
+  function close() {
+    trigger.current?.focus({ preventScroll: true });
+    setOpen(undefined);
+  }
+
+  return (
+    <li
+      ref={row}
+      className="th-history-row"
+      data-actions={expanded}
+      data-selected={selected}
+      onBlur={event => {
+        if (expanded && !event.currentTarget.contains(event.relatedTarget))
+          setOpen(current => (current === item.id ? undefined : current));
+      }}
+      onKeyDown={event => {
+        if (!expanded || event.key !== 'Escape') return;
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+      }}
+    >
+      <a
+        href={`#/ai-workspace?conversation=${encodeURIComponent(item.id)}${item.archived_at ? '&archive=1' : ''}`}
+        className="th-v4-history-link"
+        title={item.title}
+        aria-current={selected ? 'page' : undefined}
+        aria-hidden={expanded}
+        inert={expanded}
+        onClick={() => {
+          setOpen(undefined);
+          onSelect?.();
+        }}
+      >
+        {item.title}
+      </a>
+      <div
+        ref={actions}
+        id={panelId}
+        className="th-history-actions"
+        role="group"
+        aria-label="Conversation actions"
+        aria-hidden={!expanded}
+        inert={!expanded}
+      >
+        {!item.archived_at && (
+          <button
+            type="button"
+            title="Archive"
+            aria-label="Archive"
+            disabled={!connected}
+            onClick={() => {
+              close();
+              onAction('archive');
+            }}
+          >
+            <svg
+              viewBox="0 0 16 16"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M2 3h12v3H2z M3 6v7h10V6 M6.5 9h3" />
+            </svg>
+          </button>
+        )}
+        <button
+          type="button"
+          title="Delete"
+          aria-label="Delete"
+          className="th-history-delete"
+          disabled={!connected}
+          onClick={() => {
+            close();
+            onAction('delete');
+          }}
+        >
+          <svg
+            viewBox="0 0 16 16"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M2.5 4.5h11 M6 4.5V2.75h4V4.5 M4 4.5l.75 8.75h6.5L12 4.5 M7 7v3.5 M9 7v3.5" />
+          </svg>
+        </button>
+      </div>
+      <button
+        ref={trigger}
+        type="button"
+        className="th-history-more"
+        title={expanded ? 'Close actions' : 'Conversation actions'}
+        aria-label={`${expanded ? 'Close actions for' : 'Actions for'} ${item.title}`}
+        aria-expanded={expanded}
+        aria-controls={panelId}
+        onClick={() => (expanded ? close() : setOpen(item.id))}
+      >
+        <svg
+          className="th-history-dots"
+          viewBox="0 0 16 16"
+          width="16"
+          height="16"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <circle cx="3" cy="8" r="1.25" />
+          <circle cx="8" cy="8" r="1.25" />
+          <circle cx="13" cy="8" r="1.25" />
+        </svg>
+        <svg
+          className="th-history-close"
+          viewBox="0 0 16 16"
+          width="16"
+          height="16"
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeWidth="1.3"
+          aria-hidden="true"
+        >
+          <path d="m4.5 4.5 7 7m0-7-7 7" />
+        </svg>
+      </button>
+    </li>
   );
 }

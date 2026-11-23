@@ -19,11 +19,10 @@ import {
   type WorkspaceApi,
 } from '../api/client';
 import type { WebConversationStreamMode } from '../../../contracts/web-api/v1';
-import { Chip, Head, Loading, Notice, Panel } from '../components/ui';
-import { LiquidCard } from '../components/LiquidSurface';
-import { field, formatDate, muted, outline, solid } from '../components/styles';
+import { Chip, Loading, Notice } from '../components/ui';
+import { formatDate, muted, outline, solid } from '../components/styles';
 import { MarkdownMessage } from './MarkdownMessage';
-import { WaterSurface } from '../components/WaterSurface';
+import { LivingPulseMark } from '../auth/LivingPulseStartup';
 import {
   conversationListKey as listKey,
   detailKey,
@@ -35,6 +34,11 @@ import { CommandResult } from './CommandResult';
 import { parseSlash, slashCommands, titleFromMessage } from './slashCommands';
 
 const maxMessageLength = 16_000;
+const starters = [
+  ['Explore an idea', 'Help me explore an idea: '],
+  ['Write some code', 'Help me write code to '],
+  ['Start a task', '/task '],
+] as const;
 const eventLabels: Record<ConversationEvent['event_type'], string> = {
   accepted: 'Message accepted',
   queued: 'Response queued',
@@ -146,6 +150,7 @@ export default function ConversationWorkspace({
   reduced,
   onReviewTask,
   inspector,
+  titleSlot,
   onManageConversation,
   changedConversationId,
 }: {
@@ -155,6 +160,7 @@ export default function ConversationWorkspace({
   reduced: boolean;
   onReviewTask: (objective: string) => void;
   inspector: HTMLElement | null;
+  titleSlot: HTMLElement | null;
   onManageConversation: (action: ConversationAction) => void;
   changedConversationId?: string;
 }) {
@@ -175,6 +181,7 @@ export default function ConversationWorkspace({
   const [notice, setNotice] = useState('');
   const log = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const composerOrigin = useRef<number | undefined>(undefined);
   const focusDraft = useRef(false);
   const createLock = useRef(false);
   const createUncertain = useRef(false);
@@ -235,7 +242,12 @@ export default function ConversationWorkspace({
       ),
     [messages]
   );
-  const draft = id ? (drafts[id] ?? '') : fresh ? firstDraft : '';
+  const writingNew = !archived && !id && (fresh || list.isSuccess);
+  const welcome =
+    !archived &&
+    (writingNew || snapshot?.messages.length === 0) &&
+    !(id && (receipts[id] || live?.conversationId === id));
+  const draft = id ? (drafts[id] ?? '') : writingNew ? firstDraft : '';
   const slash = parseSlash(draft);
   const candidates = slash?.completing
     ? slashCommands.filter(entry => !('deferred' in entry) && entry.name.startsWith(slash.name))
@@ -250,8 +262,29 @@ export default function ConversationWorkspace({
     messages?.some(message => message.role === 'assistant' && isPendingResponse(message.status))
   );
   const canWrite = Boolean(
-    !archived && connected && (fresh || (id && snapshot && !detail.isError))
+    !archived && connected && (writingNew || (id && snapshot && !detail.isError))
   );
+
+  useLayoutEffect(() => {
+    if (welcome) return;
+    const origin = composerOrigin.current;
+    composerOrigin.current = undefined;
+    const form = composer.current?.form;
+    if (
+      !form ||
+      origin === undefined ||
+      reduced ||
+      matchMedia('(prefers-reduced-motion: reduce)').matches
+    )
+      return;
+    const offset = origin - form.getBoundingClientRect().top;
+    if (Math.abs(offset) < 2) return;
+    const animation = form.animate([{ translate: `0 ${offset}px` }, { translate: '0 0' }], {
+      duration: 360,
+      easing: 'cubic-bezier(.22,.8,.27,1)',
+    });
+    return () => animation.cancel();
+  }, [welcome, reduced]);
 
   useLayoutEffect(() => {
     if (active && canWrite && focusDraft.current && composer.current) {
@@ -284,6 +317,7 @@ export default function ConversationWorkspace({
     mutationFn: (text: string) => api.create({ title: titleFromMessage(text) }),
     onSuccess: async (created, text) => {
       await cache.cancelQueries({ queryKey: listKey });
+      if (active) measureComposerOrigin();
       cache.setQueryData<{ items: Conversation[] }>(listKey, initial => ({
         items: [created, ...(initial?.items ?? []).filter(item => item.id !== created.id)],
       }));
@@ -311,6 +345,7 @@ export default function ConversationWorkspace({
   });
 
   function recordAcceptance(attempt: Attempt, responseId: string) {
+    if (active && welcome && id === attempt.id) measureComposerOrigin();
     followLatest.current = true;
     setReceipts(previous => ({ ...previous, [attempt.id]: responseId }));
     setIssues(previous => ({ ...previous, [attempt.id]: undefined }));
@@ -422,6 +457,10 @@ export default function ConversationWorkspace({
     send.mutate({ attempt, recovery });
   }
 
+  function measureComposerOrigin() {
+    composerOrigin.current = composer.current?.form?.getBoundingClientRect().top;
+  }
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = draft.trim();
@@ -450,7 +489,7 @@ export default function ConversationWorkspace({
       return;
     }
     if (id) beginSend({ id, key: crypto.randomUUID(), text: value });
-    else if (fresh && !createUncertain.current && !activeSend.current.size) {
+    else if (writingNew && !createUncertain.current && !activeSend.current.size) {
       createLock.current = true;
       setSlashError('');
       command.mutate(value);
@@ -461,6 +500,7 @@ export default function ConversationWorkspace({
     if (createLock.current) return;
     focusDraft.current = true;
     createUncertain.current = false;
+    composerOrigin.current = undefined;
     setFresh(true);
     setArchived(false);
     setFirstDraft('');
@@ -473,7 +513,10 @@ export default function ConversationWorkspace({
 
   function updateDraft(text: string) {
     if (id) setDrafts(previous => ({ ...previous, [id]: text }));
-    else if (fresh) setFirstDraft(text);
+    else if (writingNew) {
+      setFresh(true);
+      setFirstDraft(text);
+    }
     setSlashError('');
     setPaletteDismissed(false);
     setPaletteIndex(0);
@@ -485,483 +528,364 @@ export default function ConversationWorkspace({
     composer.current?.focus({ preventScroll: true });
   }
 
-  const selectedName = fresh ? 'New chat' : (snapshot?.title ?? selected?.title);
+  const selectedName = snapshot?.title ?? selected?.title ?? (archived ? 'Archive' : 'New chat');
 
   return (
     <>
+      {active &&
+        titleSlot &&
+        createPortal(
+          <h1
+            data-testid="chat-title"
+            className="truncate text-sm font-medium"
+            title={selectedName}
+          >
+            {selectedName}
+          </h1>,
+          titleSlot
+        )}
       <div className="th-v4-chat-workspace">
-        <Head
-          label="CONVERSATIONS / WEB v1"
-          title="AI Workspace"
-          desc="A private place to think, write, and work through ideas."
-          action={
-            <button
-              type="button"
-              className={outline}
-              disabled={!connected || list.isPending || command.isPending}
-              onClick={startConversation}
-            >
-              ＋ New conversation
-            </button>
-          }
-        />
-        <p role="status" className={notice ? `mb-3 ${muted}` : 'sr-only'}>
-          {notice}
-        </p>
-        <div className="th-v4-chat-grid">
-          <Panel cls="th-v4-conversation-list min-w-0 p-3">
-            <h2 className="px-2 py-2 text-xs font-semibold">Your conversations</h2>
-            {list.isPending && <Loading label="Loading conversations…" />}
-            {list.isError && (
+        <div
+          className={`th-v4-conversation flex min-h-0 min-w-0 flex-col overflow-hidden ${welcome ? 'is-welcome' : ''}`}
+        >
+          <p role="status" className={notice || archived ? `px-5 pt-3 ${muted}` : 'sr-only'}>
+            {notice || (archived ? 'Archived · read-only' : '')}
+          </p>
+          {list.isPending && connected && !fresh && <Loading label="Loading conversations…" />}
+          {list.isError && (
+            <div className="px-4 pt-3">
               <Notice error retry={connected ? () => void list.refetch() : undefined}>
                 {errorText(list.error, 'load conversations')}
               </Notice>
+            </div>
+          )}
+          {id && detail.isError && (
+            <div className="px-4 pt-4">
+              <Notice error retry={connected ? () => void detail.refetch() : undefined}>
+                {errorText(detail.error, 'load history')}
+              </Notice>
+            </div>
+          )}
+          {id && cancelError?.id === id && (
+            <div className="px-4 pt-4">
+              <Notice error>{cancelError.message}</Notice>
+            </div>
+          )}
+          <div
+            ref={log}
+            aria-label="Conversation messages"
+            role="region"
+            tabIndex={snapshot?.messages.length ? 0 : undefined}
+            onScroll={event => {
+              const el = event.currentTarget;
+              followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+            }}
+            className="th-v4-message-log flex min-h-[230px] flex-1 flex-col gap-7 overflow-y-auto p-5"
+          >
+            {welcome && (
+              <div className="th-v4-empty th-v4-welcome text-center">
+                <div className="th-v4-welcome-mark" aria-hidden="true">
+                  <LivingPulseMark />
+                </div>
+                <h2>What's on your mind?</h2>
+                <p>An idea, a question, or something worth building.</p>
+              </div>
             )}
-            {list.isSuccess && !items.length && (
-              <p className={`p-2 ${muted}`}>
-                {archived ? 'No archived conversations.' : 'No conversations yet.'}
+            {id && detail.isPending && (
+              <Loading
+                label={
+                  connected ? 'Loading saved history…' : 'History will load after reconnection.'
+                }
+              />
+            )}
+            {archived && list.isSuccess && (!id || snapshot?.messages.length === 0) && (
+              <div className="th-v4-empty m-auto text-center">
+                <h2>{id ? 'No messages in this conversation.' : 'No archived conversations.'}</h2>
+              </div>
+            )}
+            {messages?.map(message => {
+              const firstPrompt = message.response_to
+                ? prompts.get(message.response_to)
+                : undefined;
+              return (
+                <Message
+                  key={message.id}
+                  message={message}
+                  cancellation={pendingCancellation.has(message.id)}
+                  live={live?.responseId === message.id ? live : undefined}
+                  cancel={
+                    connected && id && !cancel.isPending
+                      ? () => cancel.mutate({ conversationId: id, responseId: message.id })
+                      : undefined
+                  }
+                  reuse={
+                    firstPrompt && id && canWrite && !composerDisabled
+                      ? () => {
+                          setDrafts(previous => ({ ...previous, [id]: firstPrompt }));
+                          composer.current?.focus();
+                        }
+                      : undefined
+                  }
+                />
+              );
+            })}
+            {awaitingHistory && (
+              <p role="status" className={muted}>
+                Message accepted. Waiting for its saved response status…
               </p>
             )}
-            {items.length > 0 && (
-              <>
-                <label className="block px-2 text-xs md:hidden">
-                  Current conversation
-                  <select
-                    className={field + ' mt-2'}
-                    value={id ?? ''}
-                    onChange={event => {
-                      setSelection(event.target.value);
-                      window.location.hash = `#/ai-workspace?conversation=${encodeURIComponent(event.target.value)}${archived ? '&archive=1' : ''}`;
+          </div>
+          {issue && (
+            <div className="mx-4">
+              <Notice error>
+                {issue.message}
+                {issue.uncertain &&
+                  ' The server may have accepted it. A safe retry uses the original submission key.'}
+              </Notice>
+              {issue.uncertain && (
+                <div className="my-2 flex flex-wrap gap-2">
+                  <button
+                    className={outline}
+                    type="button"
+                    disabled={!connected || send.isPending}
+                    onClick={() => beginSend(issue.attempt, true)}
+                  >
+                    Retry send safely
+                  </button>
+                  <button
+                    className={outline}
+                    type="button"
+                    disabled={send.isPending}
+                    onClick={() => {
+                      setIssues(previous => ({ ...previous, [issue.attempt.id]: undefined }));
+                      setDrafts(previous => ({ ...previous, [issue.attempt.id]: '' }));
+                      void cache.invalidateQueries({ queryKey: detailKey(issue.attempt.id) });
+                      setNotice(
+                        'Draft discarded. Check saved history to see whether the message was accepted.'
+                      );
                     }}
                   >
-                    {items.map(item => (
-                      <option value={item.id} key={item.id}>
-                        {item.title}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="hidden max-h-[530px] space-y-1 overflow-y-auto px-1 pb-2 md:block">
-                  {items.map(item => (
-                    <LiquidCard
-                      key={item.id}
-                      aria-pressed={item.id === id}
-                      onClick={() => {
-                        setSelection(item.id);
-                        window.location.hash = `#/ai-workspace?conversation=${encodeURIComponent(item.id)}${archived ? '&archive=1' : ''}`;
-                      }}
-                      className={`w-full rounded-xl border px-3 py-3 text-left hover:bg-white/10 ${item.id === id ? 'border-white/25 bg-white/10' : 'border-white/10 bg-white/[.04]'}`}
-                    >
-                      <span className="block truncate text-xs">{item.title}</span>
-                      <span className="mt-2 block text-[10px] text-[#c4c5cb]">
-                        {formatDate(item.updated_at)}
-                      </span>
-                    </LiquidCard>
-                  ))}
+                    Discard draft and check history
+                  </button>
                 </div>
-              </>
-            )}
-          </Panel>
-          <Panel cls="th-v4-conversation flex min-h-0 min-w-0 flex-col overflow-hidden">
-            <div className="flex flex-wrap items-start justify-between gap-2 border-b border-white/10 p-5">
-              <div className="min-w-0">
-                <h2 className="break-words text-sm font-semibold">
-                  {selectedName ?? 'A space for your next thought'}
-                </h2>
-                <p className="mt-1 text-[11px] text-[#c4c5cb]">
-                  {archived
-                    ? 'Archived · read-only'
-                    : live?.conversationId === id && live.mode === 'buffered'
-                      ? 'Host conversation · buffered mode'
-                      : 'Host conversation · delivery depends on the configured model'}
-                </p>
-              </div>
-              <div className="flex items-center gap-3">
-                <label className="flex items-center gap-2 text-xs text-[#c4c5cb]">
-                  <input
-                    type="checkbox"
-                    checked={archived}
-                    onChange={event => {
-                      setArchived(event.target.checked);
-                      setSelection(null);
-                    }}
-                  />
-                  Show archived
-                </label>
-                <Chip>{connected ? 'WEB v1' : 'OFFLINE / UNVERIFIED'}</Chip>
-              </div>
+              )}
             </div>
-            {id && detail.isError && (
-              <div className="px-4 pt-4">
-                <Notice error retry={connected ? () => void detail.refetch() : undefined}>
-                  {errorText(detail.error, 'load history')}
-                </Notice>
-              </div>
-            )}
-            {id && cancelError?.id === id && (
-              <div className="px-4 pt-4">
-                <Notice error>{cancelError.message}</Notice>
-              </div>
-            )}
-            <div
-              ref={log}
-              aria-label="Conversation messages"
-              role="region"
-              tabIndex={fresh || snapshot?.messages.length ? 0 : undefined}
-              onScroll={event => {
-                const el = event.currentTarget;
-                followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
-              }}
-              className="th-v4-message-log flex min-h-[230px] flex-1 flex-col gap-7 overflow-y-auto p-5"
+          )}
+          {!archived && (id || writingNew) && (
+            <form
+              data-intro-composer
+              onSubmit={submit}
+              className="m-4 rounded-2xl border border-white/20 bg-[#222329] p-2"
             >
-              {!id && list.isSuccess && (
-                <div className="th-v4-empty m-auto text-center">
-                  {fresh && (
-                    <div className="th-v4-empty-material">
-                      <WaterSurface reduced={reduced || !active} />
-                    </div>
-                  )}
-                  <span className="th-v4-empty-mark" aria-hidden="true">
-                    ✳
-                  </span>
-                  <h2>
-                    {fresh
-                      ? 'Where should we begin?'
-                      : archived
-                        ? 'Your archive is quiet.'
-                        : 'Make room for a thought.'}
-                  </h2>
-                  <p>
-                    {archived
-                      ? 'No archived conversations.'
-                      : fresh
-                        ? 'Send your first message to save this chat.'
-                        : 'Start a conversation. Your history stays on your Thozha host.'}
-                  </p>
-                  {!archived && !fresh && (
-                    <button
-                      type="button"
-                      className={solid}
-                      onClick={startConversation}
-                      disabled={!connected}
-                    >
-                      New conversation
-                    </button>
+              {paletteOpen && (
+                <div className="mb-2 rounded-xl border border-white/15 bg-[#1c1d22] px-2 py-1 text-xs">
+                  <p className="px-2 py-1 text-[#c4c5cb]">Composer commands</p>
+                  <ul
+                    id={paletteId}
+                    role="listbox"
+                    aria-label="Composer commands"
+                    className="max-h-[min(30dvh,12rem)] overflow-y-auto"
+                  >
+                    {candidates.map(entry => (
+                      <li
+                        key={entry.name}
+                        id={`${paletteId}-${entry.name}`}
+                        role="option"
+                        aria-selected={highlighted?.name === entry.name}
+                        className="cursor-pointer rounded-md px-2 py-2 aria-selected:bg-white/15 hover:bg-white/10"
+                        onMouseDown={event => event.preventDefault()}
+                        onClick={() => completeCommand(entry.name)}
+                      >
+                        <code>{entry.usage}</code>
+                        <span className="ml-2 text-[#c4c5cb]">{entry.description}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  {!candidates.length && (
+                    <p role="status" className="px-2 py-1">
+                      No matching commands. Use /help for the command list.
+                    </p>
                   )}
                 </div>
               )}
-              {id && detail.isPending && (
-                <Loading
-                  label={
-                    connected ? 'Loading saved history…' : 'History will load after reconnection.'
+              {slashError && <Notice error>{slashError}</Notice>}
+              {slash?.command && !('deferred' in slash.command) && (
+                <div className="px-2 pt-1">
+                  <Chip>{slash.command.usage} · Command</Chip>
+                </div>
+              )}
+              <textarea
+                ref={composer}
+                rows={2}
+                maxLength={maxMessageLength}
+                value={draft}
+                readOnly={!canWrite || command.isPending || sending || Boolean(issue?.uncertain)}
+                onChange={event => updateDraft(event.target.value)}
+                onKeyDown={event => {
+                  if (event.nativeEvent.isComposing) return;
+                  if (paletteOpen && event.key === 'Escape') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setPaletteDismissed(true);
+                    return;
                   }
-                />
-              )}
-              {snapshot && !snapshot.messages.length && (
-                <div className="th-v4-empty m-auto text-center">
-                  <div className="th-v4-empty-material">
-                    <WaterSurface reduced={reduced || !active} />
-                  </div>
-                  <span className="th-v4-empty-mark" aria-hidden="true">
-                    ✳
-                  </span>
-                  <h2>Where should we begin?</h2>
-                  <p>Ask a question, draft an idea, or explore something new.</p>
-                  {!archived && (
-                    <div className="mt-4 flex flex-wrap justify-center gap-2">
-                      {['Explain Java', 'Outline a travel plan'].map(prompt => (
-                        <button
-                          type="button"
-                          className={outline}
-                          key={prompt}
-                          disabled={!canWrite}
-                          onClick={() => {
-                            setDrafts(previous => ({ ...previous, [snapshot.id]: prompt }));
-                            composer.current?.focus();
-                          }}
-                        >
-                          {prompt}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-              {messages?.map(message => {
-                const firstPrompt = message.response_to
-                  ? prompts.get(message.response_to)
-                  : undefined;
-                return (
-                  <Message
-                    key={message.id}
-                    message={message}
-                    cancellation={pendingCancellation.has(message.id)}
-                    live={live?.responseId === message.id ? live : undefined}
-                    cancel={
-                      connected && id && !cancel.isPending
-                        ? () => cancel.mutate({ conversationId: id, responseId: message.id })
-                        : undefined
-                    }
-                    reuse={
-                      firstPrompt && id && canWrite && !composerDisabled
-                        ? () => {
-                            setDrafts(previous => ({ ...previous, [id]: firstPrompt }));
-                            composer.current?.focus();
-                          }
-                        : undefined
-                    }
-                  />
-                );
-              })}
-              {awaitingHistory && (
-                <p role="status" className={muted}>
-                  Message accepted. Waiting for its saved response status…
-                </p>
-              )}
-            </div>
-            {issue && (
-              <div className="mx-4">
-                <Notice error>
-                  {issue.message}
-                  {issue.uncertain &&
-                    ' The server may have accepted it. A safe retry uses the original submission key.'}
-                </Notice>
-                {issue.uncertain && (
-                  <div className="my-2 flex flex-wrap gap-2">
-                    <button
-                      className={outline}
-                      type="button"
-                      disabled={!connected || send.isPending}
-                      onClick={() => beginSend(issue.attempt, true)}
-                    >
-                      Retry send safely
-                    </button>
-                    <button
-                      className={outline}
-                      type="button"
-                      disabled={send.isPending}
-                      onClick={() => {
-                        setIssues(previous => ({ ...previous, [issue.attempt.id]: undefined }));
-                        setDrafts(previous => ({ ...previous, [issue.attempt.id]: '' }));
-                        void cache.invalidateQueries({ queryKey: detailKey(issue.attempt.id) });
-                        setNotice(
-                          'Draft discarded. Check saved history to see whether the message was accepted.'
-                        );
-                      }}
-                    >
-                      Discard draft and check history
-                    </button>
-                  </div>
-                )}
+                  if (paletteOpen && highlighted && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
+                    event.preventDefault();
+                    const offset = event.key === 'ArrowUp' ? -1 : 1;
+                    const next = (paletteIndex + offset + candidates.length) % candidates.length;
+                    setPaletteIndex(next);
+                    document
+                      .getElementById(`${paletteId}-${candidates[next].name}`)
+                      ?.scrollIntoView({ block: 'nearest' });
+                    return;
+                  }
+                  if (
+                    paletteOpen &&
+                    highlighted &&
+                    !event.shiftKey &&
+                    ['Enter', 'Tab'].includes(event.key)
+                  ) {
+                    event.preventDefault();
+                    completeCommand(highlighted.name);
+                    return;
+                  }
+                  if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+                placeholder="Message Thozha…"
+                aria-label="Message Jarvis"
+                aria-describedby={fieldId}
+                aria-autocomplete="list"
+                aria-controls={paletteOpen ? paletteId : undefined}
+                aria-activedescendant={
+                  paletteOpen && highlighted ? `${paletteId}-${highlighted.name}` : undefined
+                }
+                className="min-h-[48px] w-full resize-y rounded-lg bg-transparent px-3 py-2 text-xs leading-6 text-white placeholder:text-[#a4a5af]"
+              />
+              <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1">
+                <span id={fieldId} className="text-[10px] text-[#a4a5af]">
+                  {paletteOpen
+                    ? 'Arrow keys to navigate · Enter or Tab to select · Escape to close'
+                    : 'Enter to send · Shift+Enter for newline · / for commands'}
+                </span>
+                <button
+                  disabled={
+                    composerDisabled ||
+                    !draft.trim() ||
+                    (writingNew && createUncertain.current && !slash)
+                  }
+                  className={solid}
+                  type="submit"
+                >
+                  {sending || command.isPending
+                    ? 'Sending…'
+                    : slash?.command?.name === 'task'
+                      ? 'Review task'
+                      : slash
+                        ? 'Run command'
+                        : 'Send ↑'}
+                </button>
               </div>
-            )}
-            {!archived && (id || fresh) && (
-              <form
-                onSubmit={submit}
-                className="m-4 rounded-2xl border border-white/20 bg-[#222329] p-2"
-              >
-                {paletteOpen && (
-                  <div className="mb-2 rounded-xl border border-white/15 bg-[#1c1d22] px-2 py-1 text-xs">
-                    <p className="px-2 py-1 text-[#c4c5cb]">Composer commands</p>
-                    <ul
-                      id={paletteId}
-                      role="listbox"
-                      aria-label="Composer commands"
-                      className="max-h-[min(30dvh,12rem)] overflow-y-auto"
-                    >
-                      {candidates.map(entry => (
-                        <li
-                          key={entry.name}
-                          id={`${paletteId}-${entry.name}`}
-                          role="option"
-                          aria-selected={highlighted?.name === entry.name}
-                          className="cursor-pointer rounded-md px-2 py-2 aria-selected:bg-white/15 hover:bg-white/10"
-                          onMouseDown={event => event.preventDefault()}
-                          onClick={() => completeCommand(entry.name)}
-                        >
-                          <code>{entry.usage}</code>
-                          <span className="ml-2 text-[#c4c5cb]">{entry.description}</span>
+            </form>
+          )}
+          {welcome && (
+            <div className="th-v4-starters" aria-label="Conversation starters" role="group">
+              {starters.map(([label, prompt]) => (
+                <button
+                  key={label}
+                  type="button"
+                  disabled={composerDisabled || Boolean(draft.trim())}
+                  onClick={() => {
+                    updateDraft(prompt);
+                    composer.current?.focus({ preventScroll: true });
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {inspector &&
+          createPortal(
+            <div className="th-v4-chat-context">
+              <div className="mb-4 flex flex-wrap justify-between gap-2">
+                <h2 className="text-xs font-semibold">Context</h2>
+              </div>
+              <div className="rounded-xl border border-white/10 bg-white/[.04] p-4">
+                <b className="text-xs">Conversation only</b>
+                <p className={`mt-2 ${muted}`}>
+                  Jarvis can use this conversation’s history. Browser chat cannot run Mac tools.
+                </p>
+                <p className={`mt-2 ${muted}`}>
+                  {connected ? 'Browser session verified.' : 'Browser session not verified.'}{' '}
+                  {id && live?.conversationId === id && live.mode === 'buffered'
+                    ? 'The current reply is delivered in full when ready.'
+                    : 'Incremental replies require a streaming model.'}
+                </p>
+                <button
+                  type="button"
+                  className={`${outline} mt-3`}
+                  disabled={!connected}
+                  onClick={() => onReviewTask(slash ? '' : draft.trim())}
+                >
+                  Review as supervisor task
+                </button>
+                <p className={`mt-2 ${muted}`}>
+                  Open a separate task form, optionally with your current draft. Nothing is
+                  submitted automatically.
+                </p>
+              </div>
+              {snapshot && (
+                <details className="mt-4">
+                  <summary className="text-xs font-semibold">
+                    Response events ({snapshot.events.length})
+                  </summary>
+                  {snapshot.events.length ? (
+                    <ol className="mt-3 max-h-64 space-y-2 overflow-auto border-l border-white/20 pl-3">
+                      {snapshot.events.map(event => (
+                        <li key={event.sequence} className="text-[11px] text-[#c4c5cb]">
+                          <p>{eventLabels[event.event_type]}</p>
+                          <time className="text-[10px] text-[#a4a5af]" dateTime={event.created_at}>
+                            {formatDate(event.created_at)}
+                          </time>
                         </li>
                       ))}
-                    </ul>
-                    {!candidates.length && (
-                      <p role="status" className="px-2 py-1">
-                        No matching commands. Use /help for the command list.
-                      </p>
-                    )}
-                  </div>
-                )}
-                {slashError && <Notice error>{slashError}</Notice>}
-                {slash?.command && !('deferred' in slash.command) && (
-                  <div className="px-2 pt-1">
-                    <Chip>{slash.command.usage} · Command</Chip>
-                  </div>
-                )}
-                <textarea
-                  ref={composer}
-                  rows={2}
-                  maxLength={maxMessageLength}
-                  value={draft}
-                  readOnly={!canWrite || command.isPending || sending || Boolean(issue?.uncertain)}
-                  onChange={event => updateDraft(event.target.value)}
-                  onKeyDown={event => {
-                    if (event.nativeEvent.isComposing) return;
-                    if (paletteOpen && event.key === 'Escape') {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      setPaletteDismissed(true);
-                      return;
-                    }
-                    if (
-                      paletteOpen &&
-                      highlighted &&
-                      ['ArrowUp', 'ArrowDown'].includes(event.key)
-                    ) {
-                      event.preventDefault();
-                      const offset = event.key === 'ArrowUp' ? -1 : 1;
-                      const next = (paletteIndex + offset + candidates.length) % candidates.length;
-                      setPaletteIndex(next);
-                      document
-                        .getElementById(`${paletteId}-${candidates[next].name}`)
-                        ?.scrollIntoView({ block: 'nearest' });
-                      return;
-                    }
-                    if (
-                      paletteOpen &&
-                      highlighted &&
-                      !event.shiftKey &&
-                      ['Enter', 'Tab'].includes(event.key)
-                    ) {
-                      event.preventDefault();
-                      completeCommand(highlighted.name);
-                      return;
-                    }
-                    if (
-                      event.key === 'Enter' &&
-                      !event.shiftKey &&
-                      !event.nativeEvent.isComposing
-                    ) {
-                      event.preventDefault();
-                      event.currentTarget.form?.requestSubmit();
-                    }
-                  }}
-                  placeholder="Message Thozha…"
-                  aria-label="Message Jarvis"
-                  aria-describedby={fieldId}
-                  aria-autocomplete="list"
-                  aria-controls={paletteOpen ? paletteId : undefined}
-                  aria-activedescendant={
-                    paletteOpen && highlighted ? `${paletteId}-${highlighted.name}` : undefined
-                  }
-                  className="min-h-[48px] w-full resize-y rounded-lg bg-transparent px-3 py-2 text-xs leading-6 text-white placeholder:text-[#a4a5af]"
-                />
-                <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1">
-                  <span id={fieldId} className="text-[10px] text-[#a4a5af]">
-                    {paletteOpen
-                      ? 'Arrow keys to navigate · Enter or Tab to select · Escape to close'
-                      : 'Enter to send · Shift+Enter for newline · / for commands'}
-                  </span>
-                  <button
-                    disabled={
-                      composerDisabled ||
-                      !draft.trim() ||
-                      (fresh && createUncertain.current && !slash)
-                    }
-                    className={solid}
-                    type="submit"
-                  >
-                    {sending || command.isPending
-                      ? 'Sending…'
-                      : slash?.command?.name === 'task'
-                        ? 'Review task'
-                        : slash
-                          ? 'Run command'
-                          : 'Send ↑'}
-                  </button>
-                </div>
-              </form>
-            )}
-          </Panel>
-          {inspector &&
-            createPortal(
-              <div className="th-v4-chat-context">
-                <div className="mb-4 flex flex-wrap justify-between gap-2">
-                  <h2 className="text-xs font-semibold">Context</h2>
-                  <Chip>WEB v1</Chip>
-                </div>
-                <div className="rounded-xl border border-white/10 bg-white/[.04] p-4">
-                  <b className="text-xs">Conversation only</b>
-                  <p className={`mt-2 ${muted}`}>
-                    Jarvis can use this conversation’s history. Browser chat cannot run Mac tools.
-                    Incremental replies require a streaming model.
-                  </p>
-                  <button
-                    type="button"
-                    className={`${outline} mt-3`}
-                    disabled={!connected}
-                    onClick={() => onReviewTask(slash ? '' : draft.trim())}
-                  >
-                    Review as supervisor task
-                  </button>
-                  <p className={`mt-2 ${muted}`}>
-                    Open a separate task form, optionally with your current draft. Nothing is
-                    submitted automatically.
-                  </p>
-                </div>
-                {snapshot && (
-                  <details className="mt-4">
-                    <summary className="text-xs font-semibold">
-                      Response events ({snapshot.events.length})
-                    </summary>
-                    {snapshot.events.length ? (
-                      <ol className="mt-3 max-h-64 space-y-2 overflow-auto border-l border-white/20 pl-3">
-                        {snapshot.events.map(event => (
-                          <li key={event.sequence} className="text-[11px] text-[#c4c5cb]">
-                            <p>{eventLabels[event.event_type]}</p>
-                            <time
-                              className="text-[10px] text-[#a4a5af]"
-                              dateTime={event.created_at}
-                            >
-                              {formatDate(event.created_at)}
-                            </time>
-                          </li>
-                        ))}
-                      </ol>
-                    ) : (
-                      <p className={`mt-3 ${muted}`}>No response events yet.</p>
-                    )}
-                  </details>
-                )}
-                {selected && snapshot && (
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {!archived && (
-                      <button
-                        type="button"
-                        disabled={!connected || pending || awaitingHistory || sending}
-                        onClick={() =>
-                          onManageConversation({ type: 'archive', conversation: selected })
-                        }
-                        className={outline}
-                      >
-                        Archive
-                      </button>
-                    )}
+                    </ol>
+                  ) : (
+                    <p className={`mt-3 ${muted}`}>No response events yet.</p>
+                  )}
+                </details>
+              )}
+              {selected && snapshot && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {!archived && (
                     <button
                       type="button"
                       disabled={!connected || pending || awaitingHistory || sending}
                       onClick={() =>
-                        onManageConversation({ type: 'delete', conversation: selected })
+                        onManageConversation({ type: 'archive', conversation: selected })
                       }
                       className={outline}
                     >
-                      Delete
+                      Archive
                     </button>
-                  </div>
-                )}
-              </div>,
-              inspector
-            )}
-        </div>
+                  )}
+                  <button
+                    type="button"
+                    disabled={!connected || pending || awaitingHistory || sending}
+                    onClick={() => onManageConversation({ type: 'delete', conversation: selected })}
+                    className={outline}
+                  >
+                    Delete
+                  </button>
+                </div>
+              )}
+            </div>,
+            inspector
+          )}
       </div>
       {active && commandResult && (
         <CommandResult mode={commandResult} api={api} close={() => setCommandResult(undefined)} />

@@ -1,62 +1,9 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { signIn } from './session';
-
-declare global {
-  interface Window {
-    waterProbe: { contexts: number; draws: number; deletes: number; strength: number };
-    restoreWaterContext?: () => void;
-  }
-}
-
-async function observeWater(page: Page, blocked = false) {
-  await page.addInitScript(blocked => {
-    const probe = { contexts: 0, draws: 0, deletes: 0, strength: 0 };
-    window.waterProbe = probe;
-    const context = HTMLCanvasElement.prototype.getContext;
-    HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement, type, attributes) {
-      if (type === 'webgl2') {
-        probe.contexts++;
-        if (blocked) return null;
-      }
-      return Reflect.apply(context, this, [type, attributes]);
-    } as typeof context;
-    if (typeof WebGL2RenderingContext === 'undefined') return;
-    const gl = WebGL2RenderingContext.prototype;
-    const { drawArrays, deleteProgram, uniform4fv } = gl;
-    gl.drawArrays = function (...args) {
-      probe.draws++;
-      drawArrays.apply(this, args);
-    };
-    gl.deleteProgram = function (program) {
-      probe.deletes++;
-      deleteProgram.call(this, program);
-    };
-    gl.uniform4fv = function (...args) {
-      const values = args[1];
-      for (let i = 3; i < values.length; i += 4) {
-        probe.strength = Math.max(probe.strength, values[i]);
-      }
-      uniform4fv.apply(this, args);
-    };
-  }, blocked);
-}
-
-async function expectNoWaterDraws(page: Page) {
-  const draws = await page.evaluate(() => window.waterProbe.draws);
-  await page.waitForTimeout(180);
-  expect(await page.evaluate(() => window.waterProbe.draws)).toBe(draws);
-}
-
-function waterBackingSize(canvas: Locator) {
-  return canvas.evaluate(el => {
-    if (!(el instanceof HTMLCanvasElement)) throw new Error('Water canvas is missing');
-    return [el.width, el.height] as const;
-  });
-}
 
 async function createConversation(page: Page, title: string) {
   const session = await (await page.request.get('/v1/web/session')).json();
@@ -77,7 +24,8 @@ test('sidebar actions survive reload and protect other conversations', async ({
 }, testInfo) => {
   await signIn(page);
   const keep = 'Sidebar regression — keep';
-  const target = 'Sidebar regression — archive then delete';
+  const target =
+    'Sidebar regression — archive then delete a conversation with a deliberately long title';
   await createConversation(page, keep);
   await createConversation(page, target);
   const history = page.getByRole('region', { name: 'Conversation history' });
@@ -92,12 +40,35 @@ test('sidebar actions survive reload and protect other conversations', async ({
   }
   try {
     await trigger.focus();
+    const pill = trigger.locator('..');
+    const before = await pill.boundingBox();
+    const neighbor = history.getByRole('link', { name: keep, exact: true });
+    const neighborBefore = await neighbor.boundingBox();
     await trigger.press('Enter');
-    await page.keyboard.press('Tab');
+    const actions = history.getByRole('group', { name: 'Conversation actions' });
+    const close = history.getByRole('button', { name: `Close actions for ${target}` });
+    await expect(actions).toBeVisible();
+    await expect(history.getByRole('link', { name: target, exact: true })).toHaveCount(0);
+    expect(await close.locator('..').boundingBox()).toEqual(before);
+    expect(await neighbor.boundingBox()).toEqual(neighborBefore);
+    if (assetDir) {
+      await expect.poll(() => actions.evaluate(el => getComputedStyle(el).opacity)).toBe('1');
+      await page.screenshot({ path: join(assetDir, 'desktop-pill.png') });
+      await page.waitForTimeout(650);
+    }
     await expect(history.getByRole('button', { name: 'Archive', exact: true })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(actions.getByRole('button', { name: 'Delete', exact: true })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(trigger).toBeFocused();
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await trigger.click();
+    await close.click();
+    await expect(actions).toHaveCount(0);
+    expect(await pill.boundingBox()).toEqual(before);
+    await trigger.click();
+    await history.getByText('SAVED CONVERSATIONS', { exact: true }).click();
+    await expect(actions).toHaveCount(0);
     await trigger.press('Enter');
     await history.getByRole('button', { name: 'Delete', exact: true }).click();
     const confirmation = page.getByRole('dialog', { name: 'Delete conversation' });
@@ -108,6 +79,10 @@ test('sidebar actions survive reload and protect other conversations', async ({
 
     await trigger.click();
     await history.getByRole('button', { name: 'Archive', exact: true }).click();
+    if (assetDir)
+      await page
+        .getByRole('dialog', { name: 'Archive conversation' })
+        .screenshot({ path: join(assetDir, 'archive-confirmation.png') });
     await page.getByRole('button', { name: 'Archive conversation', exact: true }).click();
     await expect(page.getByRole('heading', { name: keep, exact: true })).toBeVisible();
     await expect(history.getByRole('link', { name: target })).toHaveCount(0);
@@ -131,8 +106,8 @@ test('sidebar actions survive reload and protect other conversations', async ({
       await route.abort('failed');
     });
     if (assetDir) {
-      await page.screenshot({ path: join(assetDir, 'delete-confirmation.png') });
-      await page.screencast.showChapter('Confirm permanent deletion');
+      await confirmation.screenshot({ path: join(assetDir, 'delete-confirmation.png') });
+      await page.waitForTimeout(650);
     }
     expect(
       (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
@@ -186,7 +161,36 @@ test('touch drawer opens saved conversation actions and reconciles an already-de
     await createConversation(page, title);
     await page.getByRole('button', { name: 'Open navigation' }).tap();
     const drawer = page.getByRole('dialog', { name: 'Workspace navigation' });
-    await drawer.getByRole('button', { name: `Actions for ${title}` }).tap();
+    const trigger = drawer.getByRole('button', { name: `Actions for ${title}` });
+    await trigger.scrollIntoViewIfNeeded();
+    await expect
+      .poll(() =>
+        drawer.evaluate(el =>
+          el.getAnimations().some(animation => animation.playState === 'running')
+        )
+      )
+      .toBe(false);
+    const bounds = await trigger.locator('..').boundingBox();
+    await trigger.tap();
+    const close = drawer.getByRole('button', { name: `Close actions for ${title}` });
+    expect(await close.locator('..').boundingBox()).toEqual(bounds);
+    const [archive, remove, dismiss] = await Promise.all(
+      [
+        drawer.getByRole('button', { name: 'Archive', exact: true }),
+        drawer.getByRole('button', { name: 'Delete', exact: true }),
+        close,
+      ].map(button => button.boundingBox())
+    );
+    if (!archive || !remove || !dismiss) throw new Error('Missing touch actions');
+    expect(archive.x + archive.width).toBeLessThanOrEqual(remove.x);
+    expect(remove.x + remove.width).toBeLessThanOrEqual(dismiss.x);
+    for (const target of [archive, remove, dismiss]) {
+      expect(Math.round(target.width * 100) / 100).toBeGreaterThanOrEqual(44);
+      expect(Math.round(target.height * 100) / 100).toBeGreaterThanOrEqual(44);
+    }
+    const assetDir = process.env.THOZHA_E2E_43_CAPTURE;
+    if (assetDir)
+      await page.screenshot({ path: join(assetDir, 'mobile-pill.png'), animations: 'disabled' });
     await drawer.getByRole('button', { name: 'Delete', exact: true }).tap();
     const confirmation = page.getByRole('dialog', { name: 'Delete conversation' });
     await expect(confirmation).toContainText(title);
@@ -211,8 +215,8 @@ test('touch drawer opens saved conversation actions and reconciles an already-de
 test('startup waits for real session verification, settles and never replays on navigation', async ({
   page,
 }) => {
-  await signIn(page);
-  await page.evaluate(() => sessionStorage.removeItem('thozha-web.startup-seen.v1'));
+  await signIn(page, '/#/ai-workspace?new=1');
+  await expect(page.locator('.th-startup')).toHaveCount(0);
   let release!: () => void;
   const held = new Promise<void>(resolve => {
     release = resolve;
@@ -231,28 +235,30 @@ test('startup waits for real session verification, settles and never replays on 
     });
   }
   try {
-    if (assetDir)
-      await page.screencast.showChapter('Session verification (response held by the test)');
     await page.reload({ waitUntil: 'domcontentloaded' });
     const startup = page.locator('.th-startup');
-    await expect(startup.getByRole('status')).toHaveText('Checking browser session…');
+    await expect(page.getByRole('status')).toHaveText('Checking browser session…');
     await expect(page.locator('.th-v4')).toHaveCount(0);
     await expect
       .poll(() =>
-        startup.evaluate(element =>
-          element
-            .getAnimations({ subtree: true })
-            .some(animation => animation.playState === 'running')
-        )
+        startup
+          .locator('.th-pulse-primary')
+          .evaluate(element =>
+            element
+              .getAnimations({ subtree: true })
+              .some(animation => animation.playState === 'running')
+          )
       )
       .toBe(true);
     await expect
       .poll(() =>
-        startup.evaluate(element =>
-          element
-            .getAnimations({ subtree: true })
-            .some(animation => animation.playState === 'running')
-        )
+        startup
+          .locator('.th-pulse-primary')
+          .evaluate(element =>
+            element
+              .getAnimations({ subtree: true })
+              .some(animation => animation.playState === 'running')
+          )
       )
       .toBe(false);
     if (assetDir) await page.screenshot({ path: join(assetDir, 'living-pulse-startup.png') });
@@ -261,10 +267,35 @@ test('startup waits for real session verification, settles and never replays on 
         .violations
     ).toEqual([]);
     release();
-    await expect(page.getByRole('heading', { name: 'AI Workspace', exact: true })).toBeVisible();
+    await expect(page.locator('[data-pulse-in-flight]')).toHaveCount(1);
+    expect(await startup.evaluate(el => getComputedStyle(el).pointerEvents)).toBe('none');
     await expect(startup).toHaveCount(0);
+    await expect(page.locator('[data-pulse-slot]:visible')).toHaveCount(1);
+    await expect(page.getByTestId('chat-title')).toHaveText('New chat');
     await page.getByRole('link', { name: 'Settings', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Settings', exact: true }).last()).toBeVisible();
+    const requests: string[] = [];
+    const record = (request: import('@playwright/test').Request) => requests.push(request.url());
+    // Let the Settings route settle before measuring the entirely local preview.
+    await page.waitForLoadState('networkidle');
+    page.on('request', record);
+    const replay = page.getByRole('button', { name: 'Replay introduction' });
+    await replay.click();
+    await expect(page.locator('[data-pulse-in-flight]')).toHaveCount(1);
+    await expect(startup).toHaveCount(0);
+    await expect(replay).toBeFocused();
+    await replay.click();
+    await expect(startup).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(startup).toHaveCount(0);
+    await expect(replay).toBeFocused();
+    await replay.click();
+    await expect(startup).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(startup).toHaveCount(0);
+    await expect(page.locator('[data-pulse-in-flight]')).toHaveCount(0);
+    page.off('request', record);
+    expect(requests).toEqual([]);
     await expect(startup).toHaveCount(0);
   } finally {
     release();
@@ -290,7 +321,7 @@ for (const motion of ['system', 'application'] as const) {
     await page.route(endpoint, outage);
     try {
       await page.goto('/', { waitUntil: 'domcontentloaded' });
-      const startup = page.locator('.th-startup');
+      const startup = page.locator('.th-startup-wait');
       await expect(startup).toBeVisible();
       expect(
         await startup.evaluate(element => element.getAnimations({ subtree: true }).length)
@@ -316,8 +347,8 @@ test('mobile slash commands stay local and refuse tasks without verified readine
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await signIn(page);
-  await page.locator('main').getByRole('button', { name: '＋ New conversation' }).click();
+  await signIn(page, '/#/ai-workspace?new=1');
+  await expect(page.locator('.th-startup')).toHaveCount(0);
   const writes: string[] = [];
   page.on('request', request => {
     if (request.method() === 'POST') writes.push(new URL(request.url()).pathname);
@@ -437,7 +468,9 @@ test('renders the reported SSE mode, persists context, copies code and supports 
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
   await page.getByRole('button', { name: 'Archive conversation', exact: true }).click();
   await expect(page.getByText('Conversation archived.')).toBeVisible();
-  await page.getByRole('checkbox', { name: 'Show archived' }).check();
+  const history = page.getByRole('complementary', { name: 'Workspace sidebar' });
+  await history.getByRole('button', { name: 'Show archived conversations' }).click();
+  await history.getByRole('link', { name: 'Browser history verification' }).click();
   await expect(page.getByRole('heading', { name: 'Browser history verification' })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
@@ -533,7 +566,7 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await signIn(page);
-  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
+  await expect(page.getByTestId('chat-title')).toBeVisible();
   await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('link', { name: 'Trading Lab' }).click();
   await expect(page.getByRole('heading', { name: 'Trading Lab' })).toBeVisible();
@@ -637,7 +670,7 @@ test('conversation-first navigation and contextual inspector remain reversible a
   page,
 }) => {
   await signIn(page);
-  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
+  await expect(page.getByTestId('chat-title')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'A quieter kind of control.' })).toHaveCount(0);
   await createConversation(page, 'Sidebar history item');
   await page.getByRole('link', { name: 'Tasks', exact: true }).click();
@@ -759,150 +792,108 @@ test('notifications unfold from the fixed bell and reverse without trapping focu
   await expect(bell).toHaveAttribute('aria-expanded', 'false');
 });
 
-test('the compact Water Lab material draws ripples, resizes and releases GPU work on navigation', async ({
-  page,
-}) => {
-  await observeWater(page);
-  await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await signIn(page);
-  await createConversation(page, 'Water material verification');
-  const water = page.locator('main .th-liquid-field');
-  const canvas = water.locator('canvas');
-  const canRender = await canvas.evaluate(el =>
-    Boolean(
-      el.ownerDocument
-        .createElement('canvas')
-        .getContext('webgl2', { failIfMajorPerformanceCaveat: true })
-    )
-  );
-  test.skip(
-    !canRender,
-    'Chromium has no accelerated WebGL 2 context; the separate fallback test still runs.'
-  );
-  await expect(water).toHaveAttribute('data-water', 'webgl');
-  await expect.poll(() => page.evaluate(() => window.waterProbe.draws)).toBeGreaterThan(2);
-  const size = await waterBackingSize(canvas);
-  expect(size[0] * size[1]).toBeLessThanOrEqual(260_000);
-  if ((await water.getAttribute('data-quality')) === 'balanced') {
-    const box = (await water.boundingBox())!;
-    await page.mouse.click(box.x + box.width * 0.8, box.y + box.height * 0.74);
-    await expect.poll(() => page.evaluate(() => window.waterProbe.strength)).toBeGreaterThan(0.012);
-  }
-  const session = await page.context().newCDPSession(page);
-  await session.send('Emulation.setDeviceMetricsOverride', {
-    width: 390,
-    height: 844,
-    deviceScaleFactor: 2,
-    mobile: false,
+for (const variant of ['desktop', 'mobile', 'reduced'] as const) {
+  test(`living workspace keeps one composer from welcome to transcript (${variant})`, async ({
+    page,
+  }) => {
+    const mobile = variant === 'mobile';
+    const size = mobile ? { width: 390, height: 844 } : { width: 1280, height: 880 };
+    await page.setViewportSize(size);
+    await page.emulateMedia({ reducedMotion: variant === 'reduced' ? 'reduce' : 'no-preference' });
+    await signIn(page, '/#/ai-workspace?new=1');
+    await expect(page.locator('.th-startup')).toHaveCount(0);
+    const assetDir = process.env.THOZHA_E2E_45_CAPTURE;
+    if (assetDir) {
+      expect(await page.evaluate(() => document.visibilityState)).toBe('visible');
+      await page.screencast.start({ path: join(assetDir, `${variant}.webm`), size });
+    }
+    try {
+      await page.addInitScript(() => {
+        const frames: number[] = [];
+        const start = performance.now();
+        let previous = start;
+        function sample(now: number) {
+          frames.push(now - previous);
+          previous = now;
+          if (now - start < 1400) requestAnimationFrame(sample);
+          else performance.mark('launch-frame-samples', { detail: frames.slice(1) });
+        }
+        requestAnimationFrame(sample);
+      });
+      await page.reload();
+      const startup = page.locator('.th-startup');
+      const composer = page.getByRole('textbox', { name: 'Message Jarvis' });
+      await expect(composer).toBeEditable();
+      if (variant === 'reduced') {
+        await expect(startup).toHaveCount(0);
+        expect(
+          await page.locator('.th-v4-welcome-mark svg').evaluate(el => el.getAnimations())
+        ).toEqual([]);
+      } else {
+        await expect(page.locator('[data-pulse-in-flight]')).toHaveCount(1);
+        expect(await startup.evaluate(el => getComputedStyle(el).pointerEvents)).toBe('none');
+        await expect(startup).toHaveCount(0);
+      }
+      const greeting = page.getByRole('heading', { name: "What's on your mind?" });
+      await expect(greeting).toBeVisible();
+      await expect(page.getByRole('heading', { level: 1 })).toHaveText('New chat');
+      await expect(
+        page.getByText(/CONVERSATIONS \/ WEB v1|Host conversation · delivery/)
+      ).toHaveCount(0);
+      await expect(page.locator('main canvas')).toHaveCount(0);
+      await expect(
+        page.locator('main').getByRole('button', { name: /New conversation/i })
+      ).toHaveCount(0);
+      expect(await page.evaluate(() => [scrollY, document.documentElement.scrollWidth])).toEqual([
+        0,
+        size.width,
+      ]);
+      if (assetDir) await page.screenshot({ path: join(assetDir, `${variant}-welcome.png`) });
+      const requests: string[] = [];
+      page.on('request', request => {
+        if (request.method() === 'POST') requests.push(new URL(request.url()).pathname);
+      });
+      await page.getByRole('button', { name: 'Start a task' }).click();
+      await expect(composer).toHaveValue('/task ');
+      await expect(composer).toBeFocused();
+      await expect(page.getByRole('button', { name: 'Review task' })).toBeVisible();
+      expect(requests).toEqual([]);
+      await composer.clear();
+      await page.getByRole('button', { name: 'Explore an idea' }).click();
+      await expect(composer).toHaveValue('Help me explore an idea: ');
+      await composer.fill('Help me explore better ways to plan the week.');
+      await composer.press('Shift+Enter');
+      await composer.pressSequentially('Include a simple example.', { delay: assetDir ? 22 : 0 });
+      const original = (await composer.elementHandle())!;
+      const before = (await composer.boundingBox())!.y;
+      await composer.press('Enter');
+      await expect(
+        page.getByText('Include a simple example.', { exact: false }).first()
+      ).toBeVisible();
+      await expect(greeting).toHaveCount(0);
+      await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
+      expect(await original.evaluate(el => el === document.activeElement && el.isConnected)).toBe(
+        true
+      );
+      await expect(composer).toHaveValue('');
+      await expect.poll(async () => (await composer.boundingBox())!.y).toBeGreaterThan(before + 40);
+      expect(await page.evaluate(() => scrollY)).toBe(0);
+      const frames = await page.evaluate(async () => {
+        while (!performance.getEntriesByName('launch-frame-samples').length)
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        return (performance.getEntriesByName('launch-frame-samples')[0] as PerformanceMark)
+          .detail as number[];
+      });
+      const sorted = frames.toSorted((a, b) => a - b);
+      console.log(
+        `Launch ${variant}: ${frames.length} rAF samples, p95 ${sorted[Math.floor(sorted.length * 0.95)].toFixed(1)} ms, max ${Math.max(...frames).toFixed(1)} ms, >50 ms ${frames.filter(ms => ms > 50).length}`
+      );
+      if (assetDir) await page.screenshot({ path: join(assetDir, `${variant}-conversation.png`) });
+    } finally {
+      if (assetDir) await page.screencast.stop();
+    }
   });
-  await expect(water).toHaveAttribute('data-quality', 'economy');
-  await expect
-    .poll(async () => {
-      const [width, height] = await waterBackingSize(canvas);
-      return width * height;
-    })
-    .toBeLessThanOrEqual(96_000);
-  expect((await waterBackingSize(canvas))[0]).toBeLessThanOrEqual(size[0]);
-  await page.goto('/#/tasks');
-  await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
-  await expect(water).toBeHidden();
-  expect(await page.evaluate(() => window.waterProbe.deletes)).toBeGreaterThan(0);
-  await expectNoWaterDraws(page);
-});
-
-test('Water Lab suspension stops actual draws, and a restored WebGL context resumes them', async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 900, height: 520 });
-  await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await observeWater(page);
-  await signIn(page);
-  await createConversation(page, 'Water lifecycle verification');
-  const water = page.locator('main .th-liquid-field');
-  const canvas = water.locator('canvas');
-  const canRender = await canvas.evaluate(el =>
-    Boolean(
-      el.ownerDocument
-        .createElement('canvas')
-        .getContext('webgl2', { failIfMajorPerformanceCaveat: true })
-    )
-  );
-  test.skip(!canRender, 'Chromium has no accelerated WebGL 2 context.');
-  await expect(water).toHaveAttribute('data-water', 'webgl');
-  const host = page.locator('.th-v4-empty-material');
-  await host.evaluate(el => {
-    (el as HTMLElement).style.transform = 'translate(-50%, 1200px)';
-  });
-  await expect(water).toHaveAttribute('data-motion', 'paused');
-  await expectNoWaterDraws(page);
-  await host.evaluate(el => {
-    (el as HTMLElement).style.transform = '';
-  });
-  await expect(water).toHaveAttribute('data-motion', 'running');
-  await page.evaluate(() => {
-    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-  await expect(water).toHaveAttribute('data-motion', 'paused');
-  await expectNoWaterDraws(page);
-  await page.evaluate(() => {
-    Reflect.deleteProperty(document, 'hidden');
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-  await expect(water).toHaveAttribute('data-motion', 'running');
-  const lost = await canvas.evaluate(el => {
-    if (!(el instanceof HTMLCanvasElement)) throw new Error('Water canvas is missing');
-    const extension = el.getContext('webgl2')?.getExtension('WEBGL_lose_context');
-    if (!extension) return false;
-    window.restoreWaterContext = () => extension.restoreContext();
-    extension.loseContext();
-    return true;
-  });
-  expect(lost).toBe(true);
-  await expect(water).toHaveAttribute('data-water', 'poster');
-  await expect(water).toHaveAttribute('data-motion', 'paused');
-  await expectNoWaterDraws(page);
-  const previous = await page.evaluate(() => window.waterProbe.draws);
-  await page.evaluate(() => window.restoreWaterContext?.());
-  await expect(water).toHaveAttribute('data-water', 'webgl');
-  await expect.poll(() => page.evaluate(() => window.waterProbe.draws)).toBeGreaterThan(previous);
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  await expect(water).toHaveAttribute('data-water', 'poster');
-  await expect(water).toHaveAttribute('data-motion', 'paused');
-  await expect.poll(() => page.evaluate(() => window.waterProbe.deletes)).toBeGreaterThan(0);
-  await expectNoWaterDraws(page);
-});
-
-test('the shader stays off for reduced motion and the renderer has a still fallback', async ({
-  page,
-}) => {
-  await observeWater(page, true);
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  await signIn(page);
-  await createConversation(page, 'Water fallback verification');
-  const water = page.locator('main .th-liquid-field');
-  await expect(water).toHaveAttribute('data-water', 'poster');
-  await expect(water).toHaveAttribute('data-motion', 'paused');
-  expect(await page.evaluate(() => window.waterProbe.contexts)).toBe(0);
-  const still = await water.evaluate(el => getComputedStyle(el).backgroundImage);
-  expect(still).toMatch(/water-still-.*\.webp/);
-  await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await expect.poll(() => page.evaluate(() => window.waterProbe.contexts)).toBe(1);
-  await expect(water).toHaveAttribute('data-water', 'poster');
-  await expect(water).toHaveAttribute('data-motion', 'paused');
-  await expect(water.locator('canvas')).toBeHidden();
-  await expectNoWaterDraws(page);
-
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.getByRole('link', { name: 'Settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Reduce motion: off' }).click();
-  await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await page.getByRole('link', { name: 'AI Workspace' }).click();
-  await page.reload();
-  await expect(water).toHaveAttribute('data-water', 'poster');
-  await expect(water).toHaveAttribute('data-motion', 'paused');
-  expect(await page.evaluate(() => window.waterProbe.contexts)).toBe(0);
-});
+}
 
 test('all routes retain a fixed shell and accessible scrolling at desktop, laptop, mobile and 200% zoom', async ({
   page,
@@ -940,7 +931,8 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
     }
     for (const [slug, heading] of routes) {
       await page.goto(`/#/${slug}`);
-      await expect(page.locator('#main-content h1:visible')).toHaveText(heading);
+      if (slug === 'ai-workspace') await expect(page.getByTestId('chat-title')).toBeVisible();
+      else await expect(page.locator('#main-content h1:visible')).toHaveText(heading);
       if (width >= 1024) {
         await expect
           .poll(() =>
@@ -1078,7 +1070,7 @@ test('captures the approved desktop and mobile design and checks accessibility',
   ).toEqual([]);
   await page.screenshot({ path: info.outputPath('sign-in.png') });
   await signIn(page);
-  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
+  await expect(page.getByTestId('chat-title')).toBeVisible();
   const initialNavigation = await page.evaluate(() => {
     const navigation = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming;
     return {
@@ -1110,7 +1102,13 @@ test('captures the approved desktop and mobile design and checks accessibility',
   ).toEqual([]);
   await page.screenshot({ path: info.outputPath('desktop-conversation.png') });
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByLabel('Current conversation')).toBeVisible();
+  await expect(page.getByTestId('chat-title')).toHaveText('Web Alpha verification');
+  await page.getByRole('button', { name: 'Open navigation' }).click();
+  await expect(
+    page.getByRole('dialog').getByRole('link', { name: 'Web Alpha verification' })
+  ).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
   await page.screenshot({ path: info.outputPath('mobile-conversation.png'), fullPage: true });
 });
@@ -1122,10 +1120,10 @@ test.describe('Thozha 4 product walkthrough', () => {
     test.setTimeout(120_000);
     await page.setViewportSize({ width: 1440, height: 900 });
     await signIn(page);
-    await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
+    await expect(page.getByTestId('chat-title')).toBeVisible();
     await page.screenshot({ path: info.outputPath('desktop-empty-workspace.png') });
     await createConversation(page, 'Product walkthrough');
-    await expect(page.getByRole('heading', { name: 'Where should we begin?' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: "What's on your mind?" })).toBeVisible();
     await page.screenshot({ path: info.outputPath('desktop-empty-conversation.png') });
     await send(page, 'Show a test response with a code block.');
     await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
@@ -1178,7 +1176,8 @@ test.describe('Thozha 4 product walkthrough', () => {
         });
         for (const [slug, heading] of destinations) {
           await page.goto(`/#/${slug}`);
-          await expect(page.locator('#main-content h1:visible')).toHaveText(heading);
+          if (slug === 'ai-workspace') await expect(page.getByTestId('chat-title')).toBeVisible();
+          else await expect(page.locator('#main-content h1:visible')).toHaveText(heading);
           if (slug === 'tasks') {
             await page.getByLabel('What should Thozha do?').fill('Check my Mac disk space');
             await page.getByRole('button', { name: 'Review & submit' }).click();

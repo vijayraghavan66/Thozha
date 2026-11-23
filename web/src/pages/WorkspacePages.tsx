@@ -399,6 +399,7 @@ export function Settings({
   toggleMotion,
   checkSession,
   logout,
+  replayIntroduction,
 }: {
   userId: string;
   expiresAt: number;
@@ -409,6 +410,7 @@ export function Settings({
   toggleMotion: () => void;
   checkSession: () => void;
   logout: () => void;
+  replayIntroduction: () => void;
 }) {
   return (
     <>
@@ -424,7 +426,7 @@ export function Settings({
             <Row main="Theme" sub="Graphite, silver and pearl" right="Monochrome" />
             <Row
               main="Reduced motion"
-              sub="Turn off water and page transitions. The system preference is always respected."
+              sub="Turn off startup, water and page transitions. The system preference is always respected."
               right={
                 <button
                   type="button"
@@ -433,6 +435,15 @@ export function Settings({
                   onClick={toggleMotion}
                 >
                   {reduced ? 'Reduce motion: on' : 'Reduce motion: off'}
+                </button>
+              }
+            />
+            <Row
+              main="Living Pulse"
+              sub="Play the introduction in this workspace without changing your session."
+              right={
+                <button type="button" className={outline} onClick={replayIntroduction}>
+                  Replay introduction
                 </button>
               }
             />
