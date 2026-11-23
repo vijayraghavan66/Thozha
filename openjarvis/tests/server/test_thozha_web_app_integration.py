@@ -59,6 +59,11 @@ def test_explicit_web_auth_mounts_owner_scoped_conversation_routes(
         assert login.status_code == 200
         csrf = login.json()["csrf_token"]
 
+        # Browser auth alone is not a supervisor/device identity. Without an
+        # explicit paired-device mapping, privileged task/device routes fail closed.
+        assert client.get("/v1/web/tasks").status_code == 403
+        assert client.get("/v1/web/devices").status_code == 403
+
         created = client.post(
             "/v1/web/conversations",
             headers={"Origin": origin, "X-Thozha-CSRF": csrf},

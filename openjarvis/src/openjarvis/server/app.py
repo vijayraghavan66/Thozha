@@ -565,6 +565,25 @@ def create_app(
         )
         app.include_router(web_memory_router)
         app.router.add_event_handler("shutdown", web_memory_store.close)
+
+        from openjarvis.server.thozha_web_supervisor import (
+            create_web_supervisor_router,
+            is_web_device_active,
+            is_web_device_mapped,
+            resolve_web_device_ids,
+        )
+
+        app.include_router(create_web_supervisor_router(require_web_session))
+        from openjarvis.server.thozha_web_devices import create_web_devices_router
+
+        app.include_router(
+            create_web_devices_router(
+                require_web_session,
+                resolve_web_device_ids,
+                is_web_device_active,
+                is_web_device_mapped,
+            )
+        )
     elif any(
         os.environ.get(name)
         for name in (
