@@ -157,6 +157,14 @@ body {
 :root {
   color-scheme: dark;
   background: #08090b;
+  --th-duration-press: 150ms;
+  --th-duration-icon: 240ms;
+  --th-duration-search: 300ms;
+  --th-duration-nav: 280ms;
+  --th-duration-drawer: 360ms;
+  --th-duration-page: 220ms;
+  --th-ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --th-ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .th-workspace {
@@ -214,19 +222,57 @@ button:disabled {
     opacity: 0;
     transform: translateY(6px);
   }
-  @keyframes th-dialog-in {
-    from {
-      opacity: 0;
-      transform: translateY(8px) scale(0.99);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-    }
-  }
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+@keyframes th-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes th-drawer-in {
+  from {
+    opacity: 0.72;
+    transform: translate3d(-18px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+@keyframes th-drawer-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    opacity: 0.72;
+    transform: translate3d(-18px, 0, 0);
+  }
+}
+@keyframes th-backdrop-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@keyframes th-search-results-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -5px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
   }
 }
 .th-liquid-field {
@@ -248,13 +294,114 @@ button:disabled {
   animation: th-liquid-glint 25s ease-in-out -5s infinite;
 }
 .th-enter {
-  animation: th-rise 0.22s ease-out both;
+  animation: th-rise var(--th-duration-page) var(--th-ease-out) both;
 }
 .th-workspace dialog[open] {
-  animation: th-dialog-in 0.2s ease-out both;
+  animation: th-dialog-in var(--th-duration-press) var(--th-ease-out) both;
 }
 .th-workspace dialog[open]::backdrop {
-  animation: th-dialog-in 0.2s ease-out both;
+  animation: th-dialog-in var(--th-duration-press) var(--th-ease-out) both;
+}
+.th-workspace dialog.th-nav-dialog[open] {
+  animation: th-drawer-in var(--th-duration-drawer) var(--th-ease-spring) both;
+}
+.th-workspace dialog.th-nav-dialog[open]::backdrop {
+  animation: th-dialog-in var(--th-duration-drawer) var(--th-ease-out) both;
+}
+.th-workspace dialog.th-nav-dialog.is-closing[open] {
+  animation: th-drawer-out 220ms var(--th-ease-out) both;
+}
+.th-workspace dialog.th-nav-dialog.is-closing[open]::backdrop {
+  animation: th-backdrop-out 220ms ease-out both;
+}
+.th-nav-highlight {
+  transition:
+    transform var(--th-duration-nav) var(--th-ease-spring),
+    height var(--th-duration-nav) var(--th-ease-out);
+  pointer-events: none;
+}
+.th-menu-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.7;
+  transform-box: view-box;
+  transition:
+    transform var(--th-duration-icon) var(--th-ease-out),
+    opacity var(--th-duration-icon) var(--th-ease-out);
+}
+.th-menu-top.is-open {
+  transform: translateY(4px) rotate(45deg);
+}
+.th-menu-middle.is-open {
+  transform: scaleX(0);
+  opacity: 0;
+}
+.th-menu-bottom.is-open {
+  transform: translateY(-4px) rotate(-45deg);
+}
+.th-search-input {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 20;
+  width: 40px;
+  height: 40px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: #1b1c20;
+  padding: 0 5rem 0 0.75rem;
+  color: #f4f4f6;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    width var(--th-duration-search) var(--th-ease-out),
+    opacity var(--th-duration-press) ease-out,
+    border-color var(--th-duration-press) ease-out;
+}
+.th-search-input.is-open {
+  width: min(320px, calc(100vw - 120px));
+  border-color: rgb(255 255 255 / 18%);
+  opacity: 1;
+  pointer-events: auto;
+}
+.th-search-input:focus-visible {
+  outline-offset: 2px;
+}
+.th-search-input::placeholder {
+  color: #a4a5af;
+}
+.th-search-glass,
+.th-search-handle,
+.th-search-cross {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition:
+    opacity var(--th-duration-icon) var(--th-ease-out),
+    transform var(--th-duration-icon) var(--th-ease-out);
+}
+.th-search-cross {
+  opacity: 0;
+  transform: scale(0.45) rotate(-35deg);
+}
+.th-search-glass.is-open {
+  opacity: 0;
+  transform: scale(0.55);
+}
+.th-search-handle.is-open {
+  opacity: 0;
+  transform: scale(0.3);
+}
+.th-search-cross-a.is-open {
+  opacity: 1;
+  transform: scale(1.05) rotate(0);
+}
+.th-search-cross-b.is-open {
+  opacity: 1;
+  transform: scale(1.05) rotate(0);
+}
+.th-search-results {
+  animation: th-search-results-in var(--th-duration-press) var(--th-ease-out) both;
 }
 .th-stop-motion,
 .th-stop-motion * {
@@ -264,6 +411,10 @@ button:disabled {
 }
 .th-stop-motion .th-liquid-field {
   transform: none !important;
+}
+.th-stop-motion .th-search-results,
+.th-stop-motion dialog.th-nav-dialog[open] {
+  animation: none !important;
 }
 .th-stop-motion dialog::backdrop {
   animation: none !important;

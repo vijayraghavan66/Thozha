@@ -285,12 +285,14 @@ export function Modal({
   close,
   cls = '',
   locked = false,
+  id,
 }: {
   title: string;
   children: ReactNode;
   close: () => void;
   cls?: string;
   locked?: boolean;
+  id?: string;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const headingId = useId();
@@ -317,8 +319,12 @@ export function Modal({
   return (
     <dialog
       ref={dialog}
+      id={id}
       aria-labelledby={headingId}
       className={`m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-[460px] overflow-auto rounded-2xl border border-white/20 bg-[#1c1d22] p-4 text-[#ececf0] shadow-2xl backdrop:bg-black/80 ${cls}`}
+      onClick={event => {
+        if (event.target === event.currentTarget && !locked) close();
+      }}
       onCancel={event => {
         event.preventDefault();
         if (!locked) close();

@@ -197,7 +197,7 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.getByRole('button', { name: 'Backtests' }).click();
   await expect(page.getByRole('button', { name: 'Run backtest' })).toBeDisabled();
   await page.keyboard.press('Control+k');
-  await page.getByRole('textbox', { name: 'Jump to page' }).fill('automations');
+  await page.getByRole('combobox', { name: 'Jump to page' }).fill('automations');
   await page.keyboard.press('Enter');
   await page.getByRole('button', { name: /New draft/ }).click();
   await page.getByLabel('Routine name').fill('On-page draft');
@@ -211,11 +211,103 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('link', { name: 'Developer Studio' }).click();
   await expect(page.getByRole('button', { name: 'Run project checks' })).toBeDisabled();
-  await page.getByRole('button', { name: 'Search pages' }).click();
-  await expect(page.getByRole('textbox', { name: 'Jump to page' })).toBeFocused();
+  await page.getByTestId('search-trigger').click();
+  await expect(page.getByRole('combobox', { name: 'Jump to page' })).toBeFocused();
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('button', { name: 'Search pages' })).toBeFocused();
+  await expect(page.getByTestId('search-trigger')).toBeFocused();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+});
+
+test('header search morphs in place, supports keyboard selection and closes predictably', async ({
+  page,
+}) => {
+  await signIn(page);
+  const trigger = page.getByTestId('search-trigger');
+  const initialBox = await trigger.boundingBox();
+  expect(initialBox).not.toBeNull();
+  await page.keyboard.press('Control+k');
+  const input = page.getByRole('combobox', { name: 'Jump to page' });
+  await expect(input).toBeFocused();
+  await expect(trigger).toHaveAttribute('aria-label', 'Close search');
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('listbox', { name: 'Workspace pages' })).toBeVisible();
+  expect(
+    (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
+      .violations
+  ).toEqual([]);
+  await expect
+    .poll(() => input.evaluate(element => element.getBoundingClientRect().width))
+    .toBeGreaterThan(200);
+  const [inputBox, expandedTriggerBox] = await Promise.all([
+    input.boundingBox(),
+    trigger.boundingBox(),
+  ]);
+  expect(inputBox).not.toBeNull();
+  expect(expandedTriggerBox).not.toBeNull();
+  expect(inputBox!.x).toBeLessThan(expandedTriggerBox!.x);
+  expect(
+    Math.abs(inputBox!.x + inputBox!.width - (expandedTriggerBox!.x + expandedTriggerBox!.width))
+  ).toBeLessThanOrEqual(1);
+  expect(expandedTriggerBox).toEqual(initialBox);
+
+  await input.fill('memory');
+  await expect(page.getByRole('option', { name: /Memory Center/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Clear search' }).click();
+  await expect(input).toHaveValue('');
+  await expect(input).toBeFocused();
+  await input.press('ArrowDown');
+  await expect(input).toHaveAttribute(
+    'aria-activedescendant',
+    'workspace-search-option-ai-workspace'
+  );
+  await input.press('Enter');
+  await expect(page.getByRole('heading', { name: 'AI Workspace' })).toBeVisible();
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+
+  await trigger.click();
+  await expect(input).toBeFocused();
+  await input.press('Escape');
+  await expect(trigger).toBeFocused();
+  await expect(trigger).toHaveAttribute('aria-label', 'Search pages');
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  expect(await trigger.boundingBox()).toEqual(initialBox);
+
+  await trigger.click();
+  await page.mouse.click(100, 360);
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('mobile menu morphs into a close state and its drawer closes outside or with Escape', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await signIn(page);
+  const trigger = page.getByRole('button', { name: 'Open navigation' });
+  const initialBox = await trigger.boundingBox();
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  await trigger.click();
+  const dialog = page.getByRole('dialog', { name: 'Workspace navigation' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveCSS('animation-name', 'th-drawer-in');
+  expect(
+    (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
+      .violations
+  ).toEqual([]);
+  await expect(page.getByTestId('navigation-trigger')).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.th-menu-top')).toHaveClass(/is-open/);
+  await expect(dialog.getByRole('link', { name: 'Overview' })).toBeFocused();
+  await page.mouse.click(370, 420);
+  await expect(dialog).toHaveClass(/is-closing/);
+  await expect(dialog).toHaveCSS('animation-name', 'th-drawer-out');
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId('navigation-trigger')).toBeFocused();
+  expect(await page.getByTestId('navigation-trigger').boundingBox()).toEqual(initialBox);
+  await page.getByRole('button', { name: 'Open navigation' }).click();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveClass(/is-closing/);
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId('navigation-trigger')).toBeFocused();
 });
 
 test('Overview water moves by default and respects both reduced-motion settings', async ({
@@ -259,6 +351,8 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
   for (const [width, height] of [
     [1440, 900],
     [1280, 800],
+    [1024, 768],
+    [768, 1024],
     [390, 844],
     [720, 450], // 1440×900 at 200% zoom exposes a 720×450 CSS-pixel viewport.
   ]) {
@@ -275,6 +369,23 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
     for (const [slug, heading] of routes) {
       await page.goto(`/#/${slug}`);
       await expect(page.locator('#main-content h1:visible')).toHaveText(heading);
+      if (width >= 1024) {
+        await expect
+          .poll(() =>
+            page.evaluate(() => {
+              const highlight = document
+                .querySelector<HTMLElement>('[data-testid="navigation-highlight"]')
+                ?.getBoundingClientRect();
+              const active = document
+                .querySelector<HTMLElement>('aside [aria-current="page"]')
+                ?.getBoundingClientRect();
+              return highlight && active
+                ? Math.abs(highlight.y - active.y)
+                : Number.POSITIVE_INFINITY;
+            })
+          )
+          .toBeLessThan(1);
+      }
       const metrics = await page.evaluate(() => {
         const main = document.querySelector<HTMLElement>('#main-content')!;
         const sidebar = document.querySelector<HTMLElement>('aside')!;
@@ -294,6 +405,14 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
           mainHeight: main.clientHeight,
           mainScrollHeight: main.scrollHeight,
           mainOverflow: getComputedStyle(main).overflowY,
+          navHighlight: document
+            .querySelector<HTMLElement>('[data-testid="navigation-highlight"]')
+            ?.getBoundingClientRect()
+            .toJSON(),
+          activeNav: document
+            .querySelector<HTMLElement>('aside [aria-current="page"]')
+            ?.getBoundingClientRect()
+            .toJSON(),
         };
       });
       expect(metrics.viewport).toEqual({ width, height });
@@ -305,6 +424,12 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
       );
       expect(metrics.shell).toBe(height);
       expect(metrics.sidebar).toBe(width >= 1024 ? 237 : 0);
+      if (width >= 1024) {
+        expect(metrics.navHighlight).toBeDefined();
+        expect(metrics.activeNav).toBeDefined();
+        expect(metrics.navHighlight!.y).toBeCloseTo(metrics.activeNav!.y, 0);
+        expect(metrics.navHighlight!.height).toBeCloseTo(metrics.activeNav!.height, 0);
+      }
       expect(metrics.mainOverflow).toBe('auto');
       expect(metrics.mainScrollWidth, `${width}px ${slug} main width`).toBeLessThanOrEqual(
         metrics.mainWidth + 1
