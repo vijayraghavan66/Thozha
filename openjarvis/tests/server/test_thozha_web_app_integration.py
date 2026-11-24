@@ -76,6 +76,20 @@ def test_explicit_web_auth_mounts_owner_scoped_conversation_routes(
         conversation = created.json()
         assert conversation["title"] == "Test conversation"
 
+        missing_csrf = client.patch(
+            f"/v1/web/conversations/{conversation['id']}",
+            headers={"Origin": origin},
+            json={"title": "Renamed"},
+        )
+        assert missing_csrf.status_code == 403
+        renamed = client.patch(
+            f"/v1/web/conversations/{conversation['id']}",
+            headers={"Origin": origin, "X-Thozha-CSRF": csrf},
+            json={"title": "  Test conversation · renamed  "},
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["title"] == "Test conversation · renamed"
+
         listed = client.get("/v1/web/conversations")
         assert listed.status_code == 200
         assert [item["id"] for item in listed.json()["items"]] == [conversation["id"]]
@@ -103,6 +117,84 @@ def test_explicit_web_auth_mounts_owner_scoped_conversation_routes(
         )
         assert logout.status_code == 204
         assert client.get("/v1/web/conversations").status_code == 401
+
+
+def test_app_wires_opted_in_owner_memory_into_web_chat_context(monkeypatch, tmp_path):
+    from openjarvis.server.thozha_web_auth import hash_password
+
+    origin = "https://thozha.test"
+    monkeypatch.setenv("THOZHA_WEB_OWNER_ID", "test-owner")
+    monkeypatch.setenv(
+        "THOZHA_WEB_PASSWORD_HASH",
+        hash_password("a-test-only-password-long-enough"),
+    )
+    monkeypatch.setenv("THOZHA_WEB_ORIGIN", origin)
+    monkeypatch.setenv("THOZHA_WEB_SESSION_DB", str(tmp_path / "web" / "sessions.db"))
+    monkeypatch.setenv("THOZHA_WEB_MEMORY_DB", str(tmp_path / "web" / "memory.db"))
+
+    captured = {}
+
+    def generate(messages, **kwargs):
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        return {"content": "Use concise Kotlin examples."}
+
+    engine = SimpleNamespace(engine_id="fake", health=lambda: True, generate=generate)
+    agent = SimpleNamespace(_engine=engine, _model="test-model")
+    app = create_app(engine, "test-model", agent=agent, engine_name="fake", agent_name="simple")
+    with TestClient(app, base_url=origin) as client:
+        login = client.post(
+            "/v1/web/session/login",
+            headers={"Origin": origin},
+            json={"username": "test-owner", "password": "a-test-only-password-long-enough"},
+        )
+        assert login.status_code == 200
+        csrf = login.json()["csrf_token"]
+        memory = client.post(
+            "/v1/web/memory",
+            headers={
+                "Origin": origin,
+                "X-Thozha-CSRF": csrf,
+                "Idempotency-Key": "memory-context-app-test-0001",
+            },
+            json={
+                "title": "Code style",
+                "content": "I prefer concise Kotlin examples.",
+                "tags": ["chat_context"],
+            },
+        )
+        assert memory.status_code == 201
+        conversation = client.post(
+            "/v1/web/conversations",
+            headers={"Origin": origin, "X-Thozha-CSRF": csrf},
+            json={"title": "Memory context test"},
+        )
+        assert conversation.status_code == 201
+        conversation_id = conversation.json()["id"]
+        submitted = client.post(
+            f"/v1/web/conversations/{conversation_id}/messages",
+            headers={"Origin": origin, "Idempotency-Key": "memory-chat-request-test-0001", "X-Thozha-CSRF": csrf},
+            json={"content": "Explain Kotlin interfaces"},
+        )
+        assert submitted.status_code == 202
+        response_id = submitted.json()["response_id"]
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=3)
+        result = None
+        while datetime.now(timezone.utc) < deadline:
+            detail = client.get(f"/v1/web/conversations/{conversation_id}").json()
+            result = next(item for item in detail["messages"] if item["id"] == response_id)
+            if result["status"] in {"completed", "failed"}:
+                break
+            import time
+
+            time.sleep(0.01)
+        assert result["status"] == "completed"
+        system = [message.content for message in captured["messages"] if message.role.value == "system"]
+        assert any("I prefer concise Kotlin examples." in item for item in system)
+        events = detail["events"]
+        completed = next(item for item in events if item["event_type"] == "completed")
+        assert completed["details"]["memory_context_count"] == 1
+        assert completed["details"]["memory_ids"] == [memory.json()["memory"]["id"]]
 
 
 def test_automation_routes_are_opt_in_and_fail_closed_without_link_runner_or_mapping(

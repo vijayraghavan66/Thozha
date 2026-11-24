@@ -586,16 +586,6 @@ def create_app(
     if web_auth_context.store is not None:
         app.router.add_event_handler("shutdown", web_auth_context.store.close)
     if web_auth_context.config is not None:
-        from openjarvis.server.thozha_web_conversations import (
-            create_web_conversations_router,
-        )
-
-        web_conversations_router = create_web_conversations_router(require_web_session)
-        app.include_router(web_conversations_router)
-        app.router.add_event_handler(
-            "shutdown", web_conversations_router.conversation_store.close
-        )
-
         from openjarvis.server.thozha_web_memory import (
             WebMemoryStore,
             create_web_memory_router,
@@ -604,6 +594,17 @@ def create_app(
         memory_path = os.environ.get("THOZHA_WEB_MEMORY_DB")
         web_memory_store = (
             WebMemoryStore(memory_path) if memory_path else WebMemoryStore()
+        )
+        from openjarvis.server.thozha_web_conversations import (
+            create_web_conversations_router,
+        )
+
+        web_conversations_router = create_web_conversations_router(
+            require_web_session, memory_store=web_memory_store
+        )
+        app.include_router(web_conversations_router)
+        app.router.add_event_handler(
+            "shutdown", web_conversations_router.conversation_store.close
         )
         web_memory_router = create_web_memory_router(
             require_web_session, store=web_memory_store

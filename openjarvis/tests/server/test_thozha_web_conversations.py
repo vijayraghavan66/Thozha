@@ -20,6 +20,7 @@ from openjarvis.server.thozha_web_conversations import (
     _principal_owner,
     create_web_conversations_router,
 )
+from openjarvis.server.thozha_web_memory import WebMemoryStore
 
 try:
     from openjarvis.server.thozha_web_auth import WebPrincipal
@@ -68,7 +69,9 @@ class FakeEngine:
             yield chunk
 
 
-def make_client(tmp_path, *, owner="alice", engine=None, expired=False, store=None):
+def make_client(
+    tmp_path, *, owner="alice", engine=None, expired=False, store=None, memory_store=None
+):
     app = FastAPI()
     engine = engine or FakeEngine()
     store = store or ConversationStore(tmp_path / "conversations.db")
@@ -88,7 +91,9 @@ def make_client(tmp_path, *, owner="alice", engine=None, expired=False, store=No
         }
 
     app.include_router(
-        create_web_conversations_router(require_web_session, store=store)
+        create_web_conversations_router(
+            require_web_session, store=store, memory_store=memory_store
+        )
     )
     return TestClient(app), engine, store
 
@@ -150,6 +155,72 @@ def test_persists_conversation_messages_events_and_real_engine_result(tmp_path):
     assert "idempotency_key" not in persisted["messages"][0]
     assert "request_hash" not in persisted["messages"][0]
     store.close()
+
+
+def test_conversation_rename_is_validated_owner_scoped_and_persistent(tmp_path):
+    client, _, store = make_client(tmp_path)
+    conversation_id = create_conversation(client, "Original")
+    renamed = client.patch(
+        f"/v1/web/conversations/{conversation_id}",
+        json={"title": "  Chennai · notes  "},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "Chennai · notes"
+    assert client.get(f"/v1/web/conversations/{conversation_id}").json()["title"] == "Chennai · notes"
+    assert client.patch(
+        f"/v1/web/conversations/{conversation_id}",
+        headers={"x-test-user": "bob"},
+        json={"title": "Other owner"},
+    ).status_code == 404
+    assert client.patch(
+        f"/v1/web/conversations/{conversation_id}", json={"title": "   "}
+    ).status_code == 422
+    assert client.get(f"/v1/web/conversations/{conversation_id}").json()["title"] == "Chennai · notes"
+    store.close()
+
+
+def test_streaming_chat_uses_only_relevant_opted_in_owner_memory(tmp_path):
+    memory_store = WebMemoryStore(tmp_path / "private" / "memory.db")
+    chosen, _ = memory_store.create(
+        "alice", content="I prefer concise Kotlin examples.", title="Code style",
+        tags=["chat_context"], idempotency_key="memory-chat-context-1",
+    )
+    memory_store.create(
+        "alice", content="I live in Chennai", title="City", tags=["travel"],
+        idempotency_key="memory-chat-context-2",
+    )
+    memory_store.create(
+        "alice", content="Kotlin private medical record", title="Private",
+        tags=["chat_context", "sensitive"], idempotency_key="memory-chat-context-3",
+    )
+    memory_store.create(
+        "bob", content="Kotlin examples are preferred", title="Other owner",
+        tags=["chat_context"], idempotency_key="memory-chat-context-4",
+    )
+    engine = FakeEngine(stream_chunks=["Use a concise example."])
+    client, _, store = make_client(tmp_path, engine=engine, memory_store=memory_store)
+    conversation_id = create_conversation(client)
+    response = client.post(
+        f"/v1/web/conversations/{conversation_id}/messages/stream",
+        headers={"Idempotency-Key": "memory-stream-request-0001"},
+        json={"content": "Explain Kotlin interfaces"},
+    )
+    assert response.status_code == 200
+    messages = engine.stream_inputs[0][0][0]
+    memory_messages = [item.content for item in messages if "Owner memory JSON:" in item.content]
+    assert len(memory_messages) == 1
+    assert "concise Kotlin examples" in memory_messages[0]
+    assert "medical record" not in memory_messages[0]
+    assert "Other owner" not in memory_messages[0]
+    conversation = client.get(f"/v1/web/conversations/{conversation_id}").json()
+    used = [e for e in conversation["events"] if e["event_type"] == "completed"]
+    assert len(used) == 1
+    assert used[0]["details"] == {
+        "memory_context_count": 1,
+        "memory_ids": [chosen["id"]],
+    }
+    store.close()
+    memory_store.close()
 
 
 def test_stream_endpoint_delivers_native_chunks_and_persists_final_answer(tmp_path):

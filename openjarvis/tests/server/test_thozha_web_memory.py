@@ -46,6 +46,39 @@ def test_owner_scoping_and_search_are_isolated(tmp_path):
     store.close()
 
 
+def test_chat_context_requires_explicit_opt_in_relevance_and_owner_scope(tmp_path):
+    store = WebMemoryStore(tmp_path / "private" / "memory.db")
+    chosen, _ = store.create(
+        "owner-a", content="I prefer concise Kotlin examples.", title="Code style",
+        tags=["chat_context"], idempotency_key="a" * 32,
+    )
+    _create(store, "owner-a", "I live in Chennai", "b" * 32)
+    _create(store, "owner-a", "Kotlin is my bank password", "c" * 32)
+    sensitive, _ = store.create(
+        "owner-a", content="Kotlin medical note", title="Private",
+        tags=["chat_context", "sensitive"], idempotency_key="d" * 32,
+    )
+    store.create(
+        "owner-b", content="Kotlin examples are preferred", title="Other owner",
+        tags=["chat_context"], idempotency_key="e" * 32,
+    )
+
+    result = store.retrieve_chat_context("owner-a", "Explain Kotlin interfaces")
+    assert [item["id"] for item in result] == [chosen["id"]]
+    assert sensitive["id"] not in {item["id"] for item in result}
+    assert store.retrieve_chat_context("owner-a", "weather in Chennai") == []
+    assert store.retrieve_chat_context("owner-b", "Kotlin examples")
+    assert len(result[0]["content"]) < 4_000
+    store.create(
+        "owner-a", content=("Kotlin context " * 500), title="Long context",
+        tags=["chat_context"], idempotency_key="f" * 32,
+    )
+    bounded = store.retrieve_chat_context("owner-a", "Kotlin")
+    assert bounded and len(bounded[0]["content"]) <= 4_000
+    assert sum(len(item["content"]) for item in bounded) <= 4_000
+    store.close()
+
+
 def test_persistence_idempotency_and_conflict(tmp_path):
     path = tmp_path / "private" / "memory.db"
     store = WebMemoryStore(path)

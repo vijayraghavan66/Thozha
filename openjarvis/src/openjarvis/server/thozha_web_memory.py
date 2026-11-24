@@ -33,6 +33,18 @@ _MAX_TAGS = 16
 _MAX_TAG_BYTES = 64
 _MAX_OWNER_ITEMS = 5_000
 _MAX_OWNER_BYTES = 20 * 1024 * 1024
+_CHAT_CONTEXT_TAG = "chat_context"
+_CHAT_CONTEXT_EXCLUDED_TAGS = frozenset({"sensitive", "private", "no_chat", "never_inject"})
+_CHAT_CONTEXT_TOKEN_RE = re.compile(r"[\w]{3,}", re.UNICODE)
+_CHAT_CONTEXT_STOP_WORDS = frozenset({
+    "about", "after", "again", "also", "because", "before", "being", "could",
+    "does", "from", "have", "here", "into", "just", "more", "most", "other",
+    "please", "should", "some", "than", "that", "their", "there", "these",
+    "they", "this", "those", "through", "what", "when", "where", "which",
+    "while", "with", "would", "your",
+})
+_MAX_CHAT_CONTEXT_ITEMS = 3
+_MAX_CHAT_CONTEXT_CHARS = 4_000
 
 
 class MemoryCreate(BaseModel):
@@ -263,6 +275,63 @@ class WebMemoryStore:
                 (owner_id, term, term, term, limit),
             ).fetchall()
             return [self._public(row) for row in rows]
+
+    @staticmethod
+    def _chat_tokens(value: str) -> set[str]:
+        return {
+            token.casefold()
+            for token in _CHAT_CONTEXT_TOKEN_RE.findall(value)
+            if token.casefold() not in _CHAT_CONTEXT_STOP_WORDS
+        }
+
+    def retrieve_chat_context(
+        self, owner_id: str, query: str, *, limit: int = _MAX_CHAT_CONTEXT_ITEMS
+    ) -> list[dict[str, Any]]:
+        """Retrieve relevant owner memories only after an explicit chat_context opt-in."""
+        if not isinstance(owner_id, str) or not owner_id.strip():
+            return []
+        query_tokens = self._chat_tokens(query[:_MAX_CONTENT_BYTES])
+        bounded_limit = min(max(int(limit), 0), _MAX_CHAT_CONTEXT_ITEMS)
+        if not query_tokens or bounded_limit == 0:
+            return []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM web_memories WHERE owner_id=? "
+                "ORDER BY updated_at DESC,id DESC LIMIT 200",
+                (owner_id,),
+            ).fetchall()
+        ranked: list[tuple[int, str, dict[str, Any]]] = []
+        for row in rows:
+            tags = [str(tag).casefold() for tag in json.loads(row["tags_json"])]
+            tag_set = set(tags)
+            if _CHAT_CONTEXT_TAG not in tag_set or tag_set & _CHAT_CONTEXT_EXCLUDED_TAGS:
+                continue
+            title = str(row["title"])
+            content = str(row["content"])
+            memory_tokens = self._chat_tokens(f"{title} {content} {' '.join(tags)}")
+            overlap = query_tokens & memory_tokens
+            if not overlap:
+                continue
+            score = len(overlap) * 2 + len(query_tokens & self._chat_tokens(title))
+            ranked.append((score, str(row["updated_at"]), self._public(row)))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected: list[dict[str, Any]] = []
+        total_chars = 0
+        for _, _, memory in ranked:
+            remaining = _MAX_CHAT_CONTEXT_CHARS - total_chars
+            if remaining <= 0 or len(selected) >= bounded_limit:
+                break
+            content = str(memory["content"])[:remaining]
+            if not content.strip():
+                continue
+            selected.append({
+                "id": memory["id"],
+                "title": str(memory["title"])[:160],
+                "content": content,
+                "tags": memory["tags"],
+            })
+            total_chars += len(content)
+        return selected
 
     def delete(self, owner_id: str, memory_id: str) -> bool:
         if not _MEMORY_ID_RE.fullmatch(memory_id):
