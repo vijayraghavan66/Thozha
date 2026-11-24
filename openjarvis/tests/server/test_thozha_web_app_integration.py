@@ -119,6 +119,52 @@ def test_explicit_web_auth_mounts_owner_scoped_conversation_routes(
         assert client.get("/v1/web/conversations").status_code == 401
 
 
+def test_app_uses_existing_owner_profile_conversation_database(monkeypatch, tmp_path):
+    from openjarvis.server.thozha_web_auth import hash_password
+    import openjarvis.tasks.supervisor as supervisor
+
+    origin = "https://thozha.test"
+    state = tmp_path / "web-state"
+    state.mkdir(mode=0o700)
+    monkeypatch.setenv("THOZHA_WEB_OWNER_ID", "test-owner")
+    monkeypatch.setenv(
+        "THOZHA_WEB_PASSWORD_HASH",
+        hash_password("isolated conversation profile password", iterations=100_000),
+    )
+    monkeypatch.setenv("THOZHA_WEB_ORIGIN", origin)
+    monkeypatch.setenv("THOZHA_WEB_SESSION_DB", str(state / "sessions.db"))
+    monkeypatch.setenv("THOZHA_WEB_MEMORY_DB", str(state / "memory.db"))
+    conversation_path = state / "existing-profile-conversations.db"
+    monkeypatch.setenv("THOZHA_WEB_CONVERSATION_DB", str(conversation_path))
+    supervisor_store = supervisor.SupervisorStore(
+        str(state / "supervisor.db"), run_recovery=False
+    )
+    monkeypatch.setattr(supervisor, "get_supervisor_store", lambda: supervisor_store)
+    app = _app()
+    try:
+        with TestClient(app, base_url=origin) as client:
+            login = client.post(
+                "/v1/web/session/login",
+                headers={"Origin": origin},
+                json={
+                    "username": "test-owner",
+                    "password": "isolated conversation profile password",
+                },
+            )
+            assert login.status_code == 200
+            created = client.post(
+                "/v1/web/conversations",
+                headers={"Origin": origin, "X-Thozha-CSRF": login.json()["csrf_token"]},
+                json={"title": "Persist in configured profile"},
+            )
+            assert created.status_code == 201
+            assert conversation_path.is_file()
+            assert conversation_path.stat().st_mode & 0o777 == 0o600
+            assert client.get(f"/v1/web/conversations/{created.json()['id']}").status_code == 200
+    finally:
+        supervisor_store.close()
+
+
 def test_app_wires_opted_in_owner_memory_into_web_chat_context(monkeypatch, tmp_path):
     from openjarvis.server.thozha_web_auth import hash_password
 

@@ -596,11 +596,20 @@ def create_app(
             WebMemoryStore(memory_path) if memory_path else WebMemoryStore()
         )
         from openjarvis.server.thozha_web_conversations import (
+            ConversationStore,
             create_web_conversations_router,
         )
 
+        conversation_path = os.environ.get("THOZHA_WEB_CONVERSATION_DB")
+        conversation_store = (
+            ConversationStore(pathlib.Path(conversation_path).expanduser())
+            if conversation_path
+            else None
+        )
         web_conversations_router = create_web_conversations_router(
-            require_web_session, memory_store=web_memory_store
+            require_web_session,
+            store=conversation_store,
+            memory_store=web_memory_store,
         )
         app.include_router(web_conversations_router)
         app.router.add_event_handler(
