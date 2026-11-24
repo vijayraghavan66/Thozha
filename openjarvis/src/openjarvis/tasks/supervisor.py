@@ -1055,6 +1055,48 @@ class SupervisorStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def cancel_device_pairing(self, pairing_id: str) -> str:
+        """Cancel an unclaimed invitation or pairing request without touching paired devices."""
+        now = datetime.now(timezone.utc)
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT status,expires_at,claim_expires_at,claim_used_at FROM device_pairings WHERE id=?",
+                (pairing_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(pairing_id)
+            status = row["status"]
+            if status == "CANCELLED":
+                return status
+            if status in {"INVITED", "PENDING_CONFIRMATION"} and row["expires_at"] <= now.isoformat():
+                db.execute(
+                    "UPDATE device_pairings SET status='EXPIRED' WHERE id=? AND status=?",
+                    (pairing_id, status),
+                )
+                return "EXPIRED"
+            if status == "APPROVED" and (
+                row["claim_used_at"] is not None
+                or not row["claim_expires_at"]
+                or row["claim_expires_at"] <= now.isoformat()
+            ):
+                db.execute(
+                    "UPDATE device_pairings SET status='EXPIRED' WHERE id=? AND status='APPROVED' AND claim_used_at IS NULL",
+                    (pairing_id,),
+                )
+                return "EXPIRED"
+            if status == "TOKEN_ISSUED" or row["claim_used_at"] is not None:
+                raise RuntimeError("pairing was already claimed; revoke the device instead")
+            if status not in {"INVITED", "PENDING_CONFIRMATION", "APPROVED"}:
+                return status
+            cur = db.execute(
+                "UPDATE device_pairings SET status='CANCELLED',claim_challenge=NULL,claim_expires_at=NULL "
+                "WHERE id=? AND status=? AND claim_used_at IS NULL",
+                (pairing_id, status),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("pairing changed before cancellation was recorded")
+        return "CANCELLED"
+
     def decide_device_pairing(self, pairing_id: str, decision: str) -> str:
         """Record the local Mac user's decision; approval only creates a claim challenge."""
         if decision not in {"approve", "reject"}:

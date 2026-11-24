@@ -575,6 +575,24 @@ async def decide_pair_device(invitation_id: str, request: Request) -> dict[str, 
     return {"invitation_id": invitation_id, "status": status}
 
 
+@router.post("/pair/{invitation_id}/cancel")
+async def cancel_pair_device(invitation_id: str, request: Request) -> dict[str, Any]:
+    """Cancel a local pairing invitation before its one-time token is claimed."""
+    _authorize_local_pair_ui(request, state_changing=True)
+    if not _DEVICE_ID_RE.fullmatch(invitation_id):
+        raise HTTPException(status_code=404, detail="Pairing invitation not found")
+    try:
+        status = get_supervisor_store().cancel_device_pairing(invitation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Pairing invitation not found") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(
+        content={"invitation_id": invitation_id, "status": status},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.get("/pair/status/{invitation_id}")
 async def pair_device_status(invitation_id: str) -> dict[str, Any]:
     try:

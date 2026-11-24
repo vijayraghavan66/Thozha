@@ -363,6 +363,63 @@ def test_wifi_qr_creation_stays_loopback_origin_guarded_and_v1_default(tmp_path,
     monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
 
 
+def test_pairing_invitation_cancellation_is_owner_guarded_and_blocks_valid_phone_proof(tmp_path, monkeypatch):
+    client, store = _pairing_test_client(tmp_path, monkeypatch)
+    headers = {"Origin": "http://127.0.0.1:8000"}
+    invitation_id, challenge, _expires = store.begin_device_pairing()
+
+    remote = TestClient(app=client.app, base_url="http://192.168.1.4:8000", client=("192.168.1.4", 12345))
+    denied = remote.post(f"/v1/jarvis/pair/{invitation_id}/cancel", headers=headers)
+    assert denied.status_code == 403
+    assert store.device_pairing_status(invitation_id)["status"] == "INVITED"
+
+    cancelled = client.post(f"/v1/jarvis/pair/{invitation_id}/cancel", headers=headers)
+    assert cancelled.status_code == 200
+    assert cancelled.headers["cache-control"] == "no-store"
+    assert cancelled.json() == {"invitation_id": invitation_id, "status": "CANCELLED"}
+    assert client.post(f"/v1/jarvis/pair/{invitation_id}/cancel", headers=headers).json()["status"] == "CANCELLED"
+    assert store.device_pairing_status(invitation_id)["status"] == "CANCELLED"
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key_b64 = base64.b64encode(private_key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo,
+    )).decode("ascii")
+    signature_b64 = base64.b64encode(private_key.sign(challenge.encode("utf-8"), ec.ECDSA(hashes.SHA256()))).decode("ascii")
+    with pytest.raises(ValueError, match="missing, expired, or already used"):
+        store.complete_device_pairing(invitation_id, public_key_b64, signature_b64)
+    store.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
+def test_approved_unclaimed_pairing_can_be_cancelled_but_issued_device_cannot(tmp_path, monkeypatch):
+    _client, store = _pairing_test_client(tmp_path, monkeypatch)
+
+    def approve_pairing():
+        invitation_id, challenge, _expires = store.begin_device_pairing()
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        public_key_b64 = base64.b64encode(private_key.public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo,
+        )).decode("ascii")
+        proof = base64.b64encode(private_key.sign(challenge.encode("utf-8"), ec.ECDSA(hashes.SHA256()))).decode("ascii")
+        store.complete_device_pairing(invitation_id, public_key_b64, proof)
+        assert store.decide_device_pairing(invitation_id, "approve") == "APPROVED"
+        return invitation_id, challenge, private_key
+
+    cancelled_id, _challenge, _key = approve_pairing()
+    assert store.cancel_device_pairing(cancelled_id) == "CANCELLED"
+    assert store.device_pairing_status(cancelled_id) == {"invitation_id": cancelled_id, "status": "CANCELLED"}
+
+    issued_id, _challenge, issued_key = approve_pairing()
+    claim_challenge = store.device_pairing_status(issued_id)["claim_challenge"]
+    claim_signature = base64.b64encode(issued_key.sign(claim_challenge.encode("utf-8"), ec.ECDSA(hashes.SHA256()))).decode("ascii")
+    issued = store.claim_device_token(issued_id, claim_signature)
+    with pytest.raises(RuntimeError, match="already claimed"):
+        store.cancel_device_pairing(issued_id)
+    assert store.authenticate_device_token(issued["access_token"]) == issued["device_id"]
+    store.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
 @pytest.mark.parametrize(
     "bind,ssid,enabled,expected_status",
     [
