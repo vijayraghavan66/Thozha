@@ -7,6 +7,7 @@ import hashlib
 import sys
 import threading
 import time
+import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -781,8 +782,12 @@ def test_owner_attachment_quota_is_enforced_across_conversations(tmp_path, monke
 
 
 def _minimal_pdf(text: str) -> bytes:
-    escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-    stream = f"BT /F1 18 Tf 72 720 Td ({escaped}) Tj ET".encode("ascii")
+    lines = textwrap.wrap(text, width=58) or [""]
+    draw = "BT /F1 12 Tf 14 TL 72 740 Td " + " ".join(
+        "(" + line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)") + ") Tj T*"
+        for line in lines
+    ) + " ET"
+    stream = draw.encode("ascii")
     bodies = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
