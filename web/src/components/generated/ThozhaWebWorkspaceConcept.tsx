@@ -9,7 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import type { WorkspaceApi } from '../../api/client';
+import type { Conversation, WorkspaceApi } from '../../api/client';
 import { errorText } from '../../api/client';
 import { Settings } from '../../pages/WorkspacePages';
 import { useApprovals, useDevices, useTasks, taskHref, httpStatus } from '../../pages/controlState';
@@ -21,7 +21,9 @@ import { muted } from '../styles';
 import {
   ConversationConfirmation,
   ConversationHistory,
+  ConversationRenameDialog,
   type ConversationAction,
+  type ConversationMenuAction,
 } from '../../chat/ConversationActions';
 import { conversationListKey } from '../../chat/updates';
 
@@ -351,14 +353,13 @@ export function ThozhaWebWorkspaceConcept({
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileHistory, setMobileHistory] = useState(false);
-  const [inspectorOpen, setInspectorOpen] = useState(
-    () => !window.matchMedia('(max-width: 1199px)').matches
-  );
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 1199px)').matches);
   const [inspectorSlot, setInspectorSlot] = useState<HTMLDivElement | null>(null);
   const [chatTitleSlot, setChatTitleSlot] = useState<HTMLDivElement | null>(null);
   const [dialog, setDialog] = useState<'navigation' | null>(null);
   const [conversationAction, setConversationAction] = useState<ConversationAction | null>(null);
+  const [conversationRename, setConversationRename] = useState<Conversation | null>(null);
   const [conversationNotice, setConversationNotice] = useState('');
   const [changedConversationId, setChangedConversationId] = useState<string>();
   const conversationFallback = useRef<HTMLElement | null>(null);
@@ -400,20 +401,39 @@ export function ThozhaWebWorkspaceConcept({
         ? errorText(conversations.error, 'load conversations')
         : undefined,
     connected: !problem,
-    onAction: openConversationAction,
+    onAction: openHistoryAction,
+    onNew: startNewConversation,
     onSelect: () => setMobileHistory(false),
   };
 
   function openConversationAction(action: ConversationAction, fallback: HTMLElement | null = null) {
     conversationFallback.current = fallback;
     setConversationNotice('');
+    setConversationRename(null);
     setConversationAction(action);
   }
 
-  function finishConversationAction(message: string) {
-    const changedId = conversationAction?.conversation.id;
+  function openHistoryAction(
+    action: ConversationMenuAction,
+    conversation: Conversation,
+    fallback: HTMLElement | null = null
+  ) {
+    conversationFallback.current = fallback;
+    setConversationNotice('');
+    if (action === 'rename') {
+      setConversationAction(null);
+      setConversationRename(conversation);
+    } else {
+      setConversationRename(null);
+      openConversationAction({ type: action, conversation }, fallback);
+    }
+  }
+
+  function finishConversationAction(message: string, preserveSelection = false) {
+    const changedId = conversationAction?.conversation.id ?? conversationRename?.id;
     const currentHash = window.location.hash;
     if (
+      !preserveSelection &&
       currentPage(currentHash) === 'AI Workspace' &&
       new URLSearchParams(currentHash.split('?')[1]).get('conversation') === changedId
     ) {
@@ -423,6 +443,7 @@ export function ThozhaWebWorkspaceConcept({
     setChangedConversationId(changedId);
     setConversationNotice(message);
     setConversationAction(null);
+    setConversationRename(null);
     requestAnimationFrame(() => {
       if (document.activeElement !== document.body) return;
       const fallback = conversationFallback.current;
@@ -458,7 +479,7 @@ export function ThozhaWebWorkspaceConcept({
     const query = window.matchMedia('(max-width: 1199px)');
     function resize() {
       setCompact(query.matches);
-      setInspectorOpen(!query.matches);
+      if (query.matches) setInspectorOpen(false);
     }
     query.addEventListener('change', resize);
     return () => query.removeEventListener('change', resize);
@@ -672,29 +693,17 @@ export function ThozhaWebWorkspaceConcept({
           <div className="th-v4-history-inner">
             <div className="th-v4-history-heading">
               <h2>Conversations</h2>
-              <div className="flex items-center gap-1">
+              {!compact && (
                 <button
                   type="button"
-                  className="th-v4-history-new"
-                  onClick={startNewConversation}
-                  aria-label="New conversation"
-                  title="New conversation"
+                  className="th-v4-history-toggle"
+                  onClick={() => setSidebarCollapsed(true)}
+                  aria-label="Collapse sidebar"
+                  aria-expanded="true"
                 >
-                  <span aria-hidden="true">＋</span>
-                  <span>New</span>
+                  ‹
                 </button>
-                {!compact && (
-                  <button
-                    type="button"
-                    className="th-v4-history-toggle"
-                    onClick={() => setSidebarCollapsed(true)}
-                    aria-label="Collapse sidebar"
-                    aria-expanded="true"
-                  >
-                    ‹
-                  </button>
-                )}
-              </div>
+              )}
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
               <ConversationHistory {...historyProps} />
@@ -1142,6 +1151,15 @@ export function ThozhaWebWorkspaceConcept({
           action={conversationAction}
           close={() => setConversationAction(null)}
           completed={finishConversationAction}
+        />
+      )}
+      {conversationRename && (
+        <ConversationRenameDialog
+          api={api}
+          connected={!problem}
+          conversation={conversationRename}
+          close={() => setConversationRename(null)}
+          completed={message => finishConversationAction(message, true)}
         />
       )}
     </div>

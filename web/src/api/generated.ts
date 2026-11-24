@@ -1,4 +1,4 @@
-// Generated from openapi/thozha-v1.yaml at 0e4cd9341ecf40ddf4b0232322421d5e77c3380c.
+// Generated from openapi/thozha-v1.yaml at c77ab1cfe59f5d633f1e6be3f7a7242f8a70c539.
 // Do not edit. Run npm run contract:generate.
 
 export interface paths {
@@ -85,7 +85,8 @@ export interface paths {
         delete: operations["deleteWebConversation"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** @description Requires exact same-origin Origin, application/json, and X-Thozha-CSRF. */
+        patch: operations["renameWebConversation"];
         trace?: never;
     };
     "/v1/web/conversations/{conversation_id}/archive": {
@@ -667,6 +668,7 @@ export interface components {
             /** Format: date-time */
             updated_at?: string;
         };
+        /** @description A completed event may include memory_context_count and memory_ids for explicit, relevant chat-context memories. Memory content is never included in event details. */
         WebConversationEvent: {
             sequence?: number;
             /** Format: uuid */
@@ -676,8 +678,16 @@ export interface components {
             /** Format: date-time */
             created_at?: string;
             details?: {
+                memory_context_count?: number;
+                memory_ids?: string[];
+                error_code?: string;
+            } & {
                 [key: string]: unknown;
             };
+        };
+        WebConversationRename: {
+            /** @description Trimmed title must be non-blank and at most 160 UTF-8 bytes. */
+            title: string;
         };
         WebMessageCreate: {
             content: string;
@@ -701,6 +711,7 @@ export interface components {
             /** @enum {string} */
             status: "queued" | "running" | "completed" | "failed" | "cancelled" | "cancellation_requested";
         };
+        /** @description Memories are stored owner-scoped and are not automatically injected into chat unless explicitly tagged `chat_context`. `sensitive`, `private`, `no_chat`, and `never_inject` tags override that opt-in. */
         WebMemoryCreate: {
             content: string;
             title?: string | null;
@@ -1154,6 +1165,41 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    renameWebConversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: components["parameters"]["WebConversationId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebConversationRename"];
+            };
+        };
+        responses: {
+            /** @description Renamed owner-scoped conversation; title is persisted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebConversation"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /** @description Title is blank after trimming or exceeds the supported UTF-8 length. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     archiveWebConversation: {

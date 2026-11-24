@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   WebApiError,
   errorText,
   mayHaveBeenAccepted,
   type Conversation,
+  type ConversationDetail,
   type WorkspaceApi,
 } from '../api/client';
 import { Modal, Notice } from '../components/ui';
@@ -12,6 +13,7 @@ import { muted, outline, solid } from '../components/styles';
 import { conversationListKey, detailKey } from './updates';
 
 export type ConversationAction = { type: 'archive' | 'delete'; conversation: Conversation };
+export type ConversationMenuAction = 'rename' | 'archive' | 'delete';
 
 export function ConversationConfirmation({
   action,
@@ -123,6 +125,116 @@ export function ConversationConfirmation({
   );
 }
 
+export function ConversationRenameDialog({
+  api,
+  connected,
+  conversation,
+  close,
+  completed,
+}: {
+  api: WorkspaceApi;
+  connected: boolean;
+  conversation: Conversation;
+  close: () => void;
+  completed: (message: string) => void;
+}) {
+  const cache = useQueryClient();
+  const inputId = useId();
+  const lock = useRef(false);
+  const [title, setTitle] = useState(conversation.title);
+  const trimmedTitle = title.trim();
+  const titleBytes = new TextEncoder().encode(trimmedTitle).byteLength;
+  const invalid = !trimmedTitle || titleBytes > 160;
+  const mutation = useMutation({
+    mutationFn: () => api.rename(conversation.id, trimmedTitle),
+    onSuccess: async updated => {
+      await Promise.all([
+        cache.cancelQueries({ queryKey: conversationListKey, exact: true }),
+        cache.cancelQueries({ queryKey: detailKey(conversation.id), exact: true }),
+      ]);
+      cache.setQueryData<{ items: Conversation[] }>(
+        conversationListKey,
+        previous =>
+          previous && {
+            items: previous.items
+              .map(item => (item.id === updated.id ? updated : item))
+              .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at)),
+          }
+      );
+      cache.setQueryData<ConversationDetail>(detailKey(conversation.id), previous =>
+        previous ? { ...previous, ...updated } : previous
+      );
+      completed('Conversation renamed.');
+      void cache.invalidateQueries({ queryKey: conversationListKey, exact: true });
+      void cache.invalidateQueries({ queryKey: detailKey(conversation.id), exact: true });
+    },
+    onSettled: () => {
+      lock.current = false;
+    },
+  });
+
+  return (
+    <Modal title="Rename conversation" locked={mutation.isPending} close={close}>
+      <form
+        className="space-y-4"
+        onSubmit={event => {
+          event.preventDefault();
+          if (!connected || invalid || lock.current) return;
+          lock.current = true;
+          mutation.mutate();
+        }}
+      >
+        <div className="space-y-2">
+          <label htmlFor={inputId} className="text-xs font-medium text-[#d7d8dd]">
+            Conversation title
+          </label>
+          <input
+            id={inputId}
+            autoFocus
+            value={title}
+            onChange={event => {
+              setTitle(event.target.value);
+              if (mutation.isError) mutation.reset();
+            }}
+            aria-describedby={`${inputId}-help`}
+            aria-invalid={invalid}
+            className="w-full rounded-lg border border-white/15 bg-[#17181c] px-3 py-2.5 text-sm text-[#ececf0] outline-none focus-visible:border-white/35 focus-visible:ring-2 focus-visible:ring-white/30"
+          />
+          <p id={`${inputId}-help`} className={muted}>
+            Titles are trimmed and limited to 160 UTF-8 bytes.
+          </p>
+        </div>
+        {titleBytes > 160 && (
+          <p role="alert" className="text-xs text-[#e6a7aa]">
+            Shorten the title to 160 UTF-8 bytes or fewer.
+          </p>
+        )}
+        {mutation.isError && (
+          <Notice error>{errorText(mutation.error, 'rename the conversation')}</Notice>
+        )}
+        <div className="flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            className={outline}
+            data-dialog-focus
+            disabled={mutation.isPending}
+            onClick={close}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className={solid}
+            disabled={!connected || invalid || mutation.isPending}
+          >
+            {mutation.isPending ? 'Saving…' : 'Save title'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 export function ConversationHistory({
   items,
   selectedId,
@@ -130,6 +242,7 @@ export function ConversationHistory({
   error,
   onSelect,
   onAction,
+  onNew,
   connected,
 }: {
   items: Conversation[];
@@ -137,7 +250,12 @@ export function ConversationHistory({
   loading: boolean;
   error?: string;
   onSelect?: () => void;
-  onAction: (action: ConversationAction, fallback: HTMLElement | null) => void;
+  onAction: (
+    action: ConversationMenuAction,
+    conversation: Conversation,
+    fallback: HTMLElement | null
+  ) => void;
+  onNew: () => void;
   connected: boolean;
 }) {
   const [archived, setArchived] = useState(false);
@@ -145,6 +263,7 @@ export function ConversationHistory({
   const [query, setQuery] = useState('');
   const historyToggle = useRef<HTMLButtonElement>(null);
   const actionsId = useId();
+  const restoreNoteId = `${actionsId}-restore-note`;
   const rows = items.filter(item => Boolean(item.archived_at) === archived);
   const matchingRows = rows.filter(item =>
     item.title.toLowerCase().includes(query.trim().toLowerCase())
@@ -163,6 +282,10 @@ export function ConversationHistory({
         value={query}
         onChange={event => setQuery(event.target.value)}
       />
+      <button type="button" className="th-v4-history-new" onClick={onNew}>
+        <span aria-hidden="true">＋</span>
+        <span>New conversation</span>
+      </button>
       <button
         ref={historyToggle}
         type="button"
@@ -174,6 +297,11 @@ export function ConversationHistory({
       >
         {archived ? 'Show active conversations' : 'Show archived conversations'}
       </button>
+      {archived && (
+        <p id={restoreNoteId} className="th-history-restore-note">
+          Restore is unavailable because Web v1 has no restore operation.
+        </p>
+      )}
       {loading && <p className={muted}>Loading history…</p>}
       {error && (
         <p role="alert" className={muted}>
@@ -194,13 +322,14 @@ export function ConversationHistory({
           <ConversationPill
             key={item.id}
             panelId={`${actionsId}-${item.id}`}
+            restoreNoteId={restoreNoteId}
             item={item}
             selected={selectedId === item.id}
             expanded={open === item.id}
             connected={connected}
             setOpen={setOpen}
             onSelect={onSelect}
-            onAction={type => onAction({ type, conversation: item }, historyToggle.current)}
+            onAction={type => onAction(type, item, historyToggle.current)}
           />
         ))}
       </ul>
@@ -210,6 +339,7 @@ export function ConversationHistory({
 
 function ConversationPill({
   panelId,
+  restoreNoteId,
   item,
   selected,
   expanded,
@@ -219,35 +349,18 @@ function ConversationPill({
   onAction,
 }: {
   panelId: string;
+  restoreNoteId: string;
   item: Conversation;
   selected: boolean;
   expanded: boolean;
   connected: boolean;
   setOpen: React.Dispatch<React.SetStateAction<string | undefined>>;
   onSelect?: () => void;
-  onAction: (type: ConversationAction['type']) => void;
+  onAction: (type: ConversationMenuAction) => void;
 }) {
   const row = useRef<HTMLLIElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const actions = useRef<HTMLDivElement>(null);
-  const positionActions = useCallback(() => {
-    const bounds = trigger.current?.getBoundingClientRect();
-    const panel = actions.current;
-    if (!bounds || !panel) return;
-    const margin = 8;
-    const width = Math.min(184, window.innerWidth - margin * 2);
-    const height = panel.scrollHeight;
-    const left = Math.max(
-      margin,
-      Math.min(bounds.right - width, window.innerWidth - width - margin)
-    );
-    let top = bounds.bottom + 5;
-    if (top + height > window.innerHeight - margin) top = bounds.top - height - 5;
-    top = Math.max(margin, Math.min(top, window.innerHeight - height - margin));
-    panel.style.width = `${width}px`;
-    panel.style.left = `${left}px`;
-    panel.style.top = `${top}px`;
-  }, []);
   useEffect(() => {
     if (!expanded) return;
     const frame = requestAnimationFrame(() => {
@@ -255,10 +368,9 @@ function ConversationPill({
         '[role="menuitem"]:not(:disabled)'
       );
       first?.focus({ preventScroll: true });
-      positionActions();
     });
     return () => cancelAnimationFrame(frame);
-  }, [expanded, positionActions]);
+  }, [expanded]);
   useEffect(() => {
     if (!expanded) return;
     const outside = (event: PointerEvent) => {
@@ -268,15 +380,11 @@ function ConversationPill({
         setOpen(current => (current === item.id ? undefined : current));
       }
     };
-    document.addEventListener('scroll', positionActions, true);
-    window.addEventListener('resize', positionActions);
     document.addEventListener('pointerdown', outside, true);
     return () => {
-      document.removeEventListener('scroll', positionActions, true);
-      window.removeEventListener('resize', positionActions);
       document.removeEventListener('pointerdown', outside, true);
     };
-  }, [expanded, item.id, positionActions, setOpen]);
+  }, [expanded, item.id, setOpen]);
 
   function close() {
     trigger.current?.focus({ preventScroll: true });
@@ -305,7 +413,8 @@ function ConversationPill({
           setOpen(current => (current === item.id ? undefined : current));
           return;
         }
-        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        if (!['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key))
+          return;
         const items = Array.from(
           actions.current?.querySelectorAll<HTMLButtonElement>(
             '[role="menuitem"]:not(:disabled)'
@@ -318,7 +427,10 @@ function ConversationPill({
             ? 0
             : event.key === 'End'
               ? items.length - 1
-              : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+              : (current +
+                  (event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1) +
+                  items.length) %
+                items.length;
         event.preventDefault();
         items[next].focus();
       }}
@@ -344,6 +456,21 @@ function ConversationPill({
         aria-hidden={!expanded}
         inert={!expanded}
       >
+        <button
+          type="button"
+          role="menuitem"
+          tabIndex={-1}
+          disabled={!connected}
+          onClick={() => {
+            close();
+            onAction('rename');
+          }}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="m3 11.5-.75 2.25 2.4-.7L12.8 4.9a1.8 1.8 0 0 0-2.55-2.55L3 9.6z M8.9 3.7l3.4 3.4" />
+          </svg>
+          <span>Rename</span>
+        </button>
         {!item.archived_at && (
           <button
             type="button"
@@ -360,6 +487,23 @@ function ConversationPill({
               <path d="M2 3h12v3H2z M3 6v7h10V6 M6.5 9h3" />
             </svg>
             <span>Archive</span>
+          </button>
+        )}
+        {item.archived_at && (
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            aria-disabled="true"
+            aria-describedby={restoreNoteId}
+            title="Restore is unavailable because Web v1 has no restore operation."
+            className="th-history-restore-action"
+            onClick={event => event.preventDefault()}
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 5.5V2.75m0 2.75h2.75M3 5.5a5 5 0 1 1-1 4.5" />
+            </svg>
+            <span>Restore</span>
           </button>
         )}
         <button

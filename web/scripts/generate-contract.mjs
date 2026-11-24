@@ -5,6 +5,7 @@ import { parse } from 'yaml';
 
 const revision = '0e4cd9341ecf40ddf4b0232322421d5e77c3380c';
 const path = 'openapi/thozha-v1.yaml';
+const sourceRevision = process.argv[3] || (process.argv[2] ? 'supplied OpenAPI file' : revision);
 const document = parse(
   process.argv[2]
     ? readFileSync(process.argv[2], 'utf8')
@@ -43,5 +44,5 @@ const result = await openapiTS({
 });
 writeFileSync(
   new URL('../src/api/generated.ts', import.meta.url),
-  `// Generated from ${path} at ${process.argv[2] ? 'the supplied revision' : revision}.\n// Do not edit. Run npm run contract:generate.\n\n${astToString(result)}`
+  `// Generated from ${path} at ${sourceRevision}.\n// Do not edit. Run npm run contract:generate.\n\n${astToString(result)}`
 );

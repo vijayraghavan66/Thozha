@@ -310,6 +310,14 @@ export function createWebApi(fetcher: typeof fetch = globalThis.fetch.bind(globa
           auth(request(conversationsPath, 201, conversationContract, { ...mutation, body })),
         get: (id: string, signal?: AbortSignal) =>
           auth(request(detailPath(id), 200, detailContract, { signal })),
+        rename: (id: string, title: string) =>
+          auth(
+            request(detailPath(id), 200, conversationContract, {
+              ...mutation,
+              method: 'PATCH',
+              body: { title } satisfies Schemas['WebConversationRename'],
+            })
+          ),
         archive: (id: string) =>
           auth(request(`${detailPath(id)}/archive`, 200, z.void(), mutation)),
         delete: (id: string) =>

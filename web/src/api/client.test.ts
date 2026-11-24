@@ -6,6 +6,34 @@ const message = '9fa99b61-7884-40a9-b3ad-481b53d37728';
 const result = '046e83cf-6827-4e29-97b2-6674cfd15bb0';
 
 describe('browser Web API', () => {
+  it('persists conversation titles through the owner-scoped PATCH contract', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      expect(input).toBe(`/v1/web/conversations/${conversation}`);
+      expect(init).toMatchObject({
+        credentials: 'same-origin',
+        mode: 'same-origin',
+        redirect: 'error',
+        cache: 'no-store',
+        method: 'PATCH',
+      });
+      expect(JSON.parse(String(init?.body))).toEqual({ title: 'Renamed conversation' });
+      expect(new Headers(init?.headers).get('X-Thozha-CSRF')).toBe('test-csrf');
+      return Response.json({
+        id: conversation,
+        title: 'Renamed conversation',
+        created_at: '2026-11-23T00:00:00Z',
+        updated_at: '2026-11-23T00:01:00Z',
+        archived_at: null,
+      });
+    });
+    const api = createWebApi(fetcher).authorized('test-csrf', vi.fn());
+    await expect(api.rename(conversation, 'Renamed conversation')).resolves.toMatchObject({
+      id: conversation,
+      title: 'Renamed conversation',
+    });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
   it('uses only same-origin cookie authentication, CSRF, and the caller’s replay key', async () => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
       expect(input).toBe(`/v1/web/conversations/${conversation}/messages`);

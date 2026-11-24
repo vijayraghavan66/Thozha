@@ -44,6 +44,7 @@ test('sidebar actions survive reload and protect other conversations', async ({
     'Sidebar regression — archive then delete a conversation with a deliberately long title';
   await createConversation(page, keep);
   await createConversation(page, target);
+  await expect(page.locator('.th-v4-inspector')).not.toHaveClass(/is-open/);
   const history = page.getByRole('region', { name: 'Conversation history' });
   const search = history.getByRole('searchbox', { name: 'Search conversations' });
   await search.fill('deliberately long title');
@@ -77,7 +78,9 @@ test('sidebar actions survive reload and protect other conversations', async ({
       await page.screenshot({ path: join(assetDir, 'desktop-pill.png') });
       await page.waitForTimeout(650);
     }
-    await expect(history.getByRole('menuitem', { name: 'Archive', exact: true })).toBeFocused();
+    await expect(history.getByRole('menuitem', { name: 'Rename', exact: true })).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await expect(actions.getByRole('menuitem', { name: 'Archive', exact: true })).toBeFocused();
     await page.keyboard.press('ArrowDown');
     await expect(actions.getByRole('menuitem', { name: 'Delete', exact: true })).toBeFocused();
     await page.keyboard.press('Escape');
@@ -114,6 +117,11 @@ test('sidebar actions survive reload and protect other conversations', async ({
     await expect(page.getByText('Archived · read-only')).toBeVisible();
     await history.getByRole('button', { name: 'Show archived conversations' }).click();
     await trigger.click();
+    await expect(history.getByRole('menuitem', { name: 'Restore', exact: true })).toHaveAttribute(
+      'aria-disabled',
+      'true'
+    );
+    await expect(history.getByText(/Web v1 has no restore operation/)).toBeVisible();
     await history.getByRole('menuitem', { name: 'Delete', exact: true }).click();
     let writes = 0;
     const detail = '**/v1/web/conversations/*';
@@ -165,6 +173,38 @@ test('sidebar actions survive reload and protect other conversations', async ({
   await expect(history.getByRole('link', { name: keep })).toHaveCount(0);
 });
 
+test('conversation rename is validated, persisted by the API and survives reload', async ({
+  page,
+}) => {
+  await signIn(page);
+  const original = 'Persistent rename fixture';
+  const renamed = 'Persisted conversation title';
+  const id = await createConversationRecord(page, original);
+  await page.goto(`/#/ai-workspace?conversation=${id}`);
+  await page.reload();
+  const history = page.getByRole('region', { name: 'Conversation history' });
+  const trigger = history.getByRole('button', { name: `Actions for ${original}` });
+  await trigger.click();
+  await history.getByRole('menuitem', { name: 'Rename', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Rename conversation' });
+  const field = dialog.getByRole('textbox', { name: 'Conversation title' });
+  await field.fill('😀'.repeat(41));
+  await expect(dialog.getByRole('alert')).toContainText('160 UTF-8 bytes');
+  await expect(dialog.getByRole('button', { name: 'Save title' })).toBeDisabled();
+  await field.fill(`  ${renamed}  `);
+  const response = page.waitForResponse(
+    result =>
+      result.request().method() === 'PATCH' &&
+      result.url() === new URL(`/v1/web/conversations/${id}`, page.url()).href
+  );
+  await dialog.getByRole('button', { name: 'Save title' }).click();
+  expect((await response).status()).toBe(200);
+  await expect(history.getByRole('link', { name: renamed, exact: true })).toBeVisible();
+  await page.reload();
+  await expect(history.getByRole('link', { name: renamed, exact: true })).toBeVisible();
+  await expect(history.getByRole('link', { name: original, exact: true })).toHaveCount(0);
+});
+
 test('touch drawer opens saved conversation actions and reconciles an already-deleted record', async ({
   browser,
   baseURL,
@@ -185,6 +225,9 @@ test('touch drawer opens saved conversation actions and reconciles an already-de
       .getByRole('button', { name: 'Chats' })
       .tap();
     const drawer = page.getByRole('complementary', { name: 'Conversation sidebar' });
+    await expect(drawer.getByRole('button', { name: 'New conversation', exact: true })).toHaveCount(
+      1
+    );
     const trigger = drawer.getByRole('button', { name: `Actions for ${title}` });
     await trigger.scrollIntoViewIfNeeded();
     await expect
@@ -200,20 +243,22 @@ test('touch drawer opens saved conversation actions and reconciles an already-de
     expect(await close.locator('..').boundingBox()).toEqual(rowBounds);
     const menu = drawer.getByRole('menu', { name: `Actions for ${title}` });
     const menuBounds = await menu.boundingBox();
-    const [archive, remove, dismiss] = await Promise.all(
+    const [rename, archive, remove, dismiss] = await Promise.all(
       [
+        drawer.getByRole('menuitem', { name: 'Rename', exact: true }),
         drawer.getByRole('menuitem', { name: 'Archive', exact: true }),
         drawer.getByRole('menuitem', { name: 'Delete', exact: true }),
         close,
       ].map(button => button.boundingBox())
     );
-    if (!archive || !remove || !dismiss || !menuBounds) throw new Error('Missing touch actions');
+    if (!rename || !archive || !remove || !dismiss || !menuBounds)
+      throw new Error('Missing touch actions');
     expect(menuBounds.x).toBeGreaterThanOrEqual(0);
     expect(menuBounds.y).toBeGreaterThanOrEqual(0);
     expect(menuBounds.x + menuBounds.width).toBeLessThanOrEqual(390);
     expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(844);
-    expect(archive.y + archive.height).toBeLessThanOrEqual(remove.y);
-    for (const target of [archive, remove, dismiss]) {
+    expect(archive.x + archive.width).toBeLessThanOrEqual(remove.x);
+    for (const target of [rename, archive, remove, dismiss]) {
       expect(Math.round(target.width * 100) / 100).toBeGreaterThanOrEqual(44);
       expect(Math.round(target.height * 100) / 100).toBeGreaterThanOrEqual(44);
     }
@@ -430,6 +475,10 @@ test('private screens require the real cookie session and sign-out revokes it', 
   page,
   context,
 }) => {
+  const unsupported = await page.request.get('/v1/web/unsupported-route');
+  expect(unsupported.status()).toBe(404);
+  expect(unsupported.headers()['content-type']).toContain('application/json');
+  expect(await unsupported.json()).toEqual({ detail: 'Unknown Web v1 route.' });
   const privateReads: string[] = [];
   page.on('request', request => {
     if (request.url().includes('/v1/web/conversations')) privateReads.push(request.url());
@@ -515,12 +564,14 @@ test('renders the reported SSE mode, persists context, copies code and supports 
   ).toBeVisible();
   await send(page, 'check prior context');
   await expect(page.getByText('Context found.', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Open context panel' }).click();
   await page.getByText(/Response events \(/).click();
   await expect(page.getByText('Response completed', { exact: true }).last()).toBeVisible();
-  await page.getByRole('button', { name: 'Archive', exact: true }).click();
+  const history = page.getByRole('complementary', { name: 'Conversation sidebar' });
+  await history.getByRole('button', { name: 'Actions for Browser history verification' }).click();
+  await history.getByRole('menuitem', { name: 'Archive', exact: true }).click();
   await page.getByRole('button', { name: 'Archive conversation', exact: true }).click();
   await expect(page.getByText('Conversation archived.')).toBeVisible();
-  const history = page.getByRole('complementary', { name: 'Conversation sidebar' });
   await history.getByRole('button', { name: 'Show archived conversations' }).click();
   await history.getByRole('link', { name: 'Browser history verification' }).click();
   await expect(page.getByRole('heading', { name: 'Browser history verification' })).toBeVisible();
@@ -597,6 +648,7 @@ test('persists actual cancellation and exposes engine failure and prompt recover
   await page.getByRole('button', { name: 'Stop generating' }).click();
   await expect(page.getByText('Response cancelled.', { exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Fixture response' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Open context panel' }).click();
   await page.getByText(/Response events \(/).click();
   await expect(page.getByText('Cancellation requested', { exact: true })).toBeVisible();
   await send(page, 'Check generation failure');
@@ -783,12 +835,18 @@ test('conversation-first navigation and contextual inspector remain reversible a
   await expect(page.getByRole('heading', { name: 'Sidebar history item' })).toBeVisible();
 
   const history = page.getByRole('complementary', { name: 'Conversation sidebar' });
-  await expect(history).toHaveCSS('width', '264px');
+  await expect(history).toHaveCSS('width', '306px');
   await page.getByRole('button', { name: 'Collapse sidebar' }).click();
   await expect(page.locator('.th-v4-history-pane')).toHaveCSS('width', '0px');
   await page.getByRole('button', { name: 'Expand sidebar' }).click();
-  await expect(page.locator('.th-v4-history-pane')).toHaveCSS('width', '264px');
+  await expect(page.locator('.th-v4-history-pane')).toHaveCSS('width', '306px');
 
+  await expect(page.getByRole('button', { name: 'Open context panel' })).toHaveAttribute(
+    'aria-expanded',
+    'false'
+  );
+  await page.getByRole('button', { name: 'Open context panel' }).click();
+  await expect(page.getByRole('button', { name: 'Review as supervisor task' })).toBeVisible();
   await page.getByRole('button', { name: 'Close context panel' }).first().click();
   await expect(page.getByRole('complementary', { name: 'Context inspector' })).toHaveAttribute(
     'inert',
@@ -1092,7 +1150,7 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
         height + 1
       );
       expect(metrics.shell).toBe(height);
-      expect(metrics.sidebar).toBe(width >= 1200 ? 68 : 0);
+      expect(metrics.sidebar).toBe(width >= 1200 ? 76 : 0);
       if (width >= 1200) {
         expect(metrics.navHighlight).toBeDefined();
         expect(metrics.activeNav).toBeDefined();

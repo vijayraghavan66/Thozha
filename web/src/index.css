@@ -15,6 +15,12 @@ body {
   overflow: auto;
   overscroll-behavior-x: none;
 }
+.th-history-restore-note {
+  margin: 0 12px 6px;
+  color: #999aa3;
+  font-size: 10px;
+  line-height: 1.45;
+}
 
 @theme inline {
   --color-background: var(--background);
@@ -684,13 +690,13 @@ button:disabled {
   color: #fff;
 }
 .th-history-rows {
-  margin-top: 7px;
+  margin: 7px 8px 0;
 }
 .th-history-row {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-rows: 36px;
+  grid-template-rows: 44px;
   align-items: center;
   border-radius: 9px;
 }
@@ -712,6 +718,8 @@ button:disabled {
 }
 .th-history-more {
   grid-area: 1 / 2;
+  position: relative;
+  z-index: 5;
   display: grid;
   place-items: center;
   justify-self: end;
@@ -720,48 +728,57 @@ button:disabled {
   margin-inline-end: 4px;
 }
 .th-history-actions {
-  position: fixed;
-  z-index: 60;
+  position: absolute;
+  z-index: 4;
+  top: 50%;
+  right: 36px;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 5px;
+  width: 184px;
+  height: 34px;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
   border: 1px solid rgb(255 255 255 / 13%);
-  border-radius: 11px;
+  border-radius: 10px;
   background: #222328;
   box-shadow:
-    0 12px 30px rgb(0 0 0 / 38%),
+    0 8px 20px rgb(0 0 0 / 34%),
     inset 0 1px rgb(255 255 255 / 5%);
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transform: translateY(-3px) scale(0.985);
-  transform-origin: top right;
+  transform: translateY(-50%) scaleX(0.96);
+  transform-origin: right center;
   transition:
     opacity 140ms ease,
-    transform 170ms cubic-bezier(0.22, 0.8, 0.27, 1);
+    transform 170ms cubic-bezier(0.22, 0.8, 0.27, 1),
+    visibility 0s linear 170ms;
 }
 .th-history-row[data-actions='true'] .th-history-actions {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
-  transform: none;
+  transform: translateY(-50%) scaleX(1);
+  transition-delay: 0s;
 }
 .th-history-actions button {
   display: flex;
-  width: 100%;
-  min-height: 36px;
+  min-width: 0;
+  height: 28px;
+  min-height: 28px;
+  flex: 1;
   align-items: center;
-  gap: 10px;
-  padding: 0 9px;
-  border-radius: 7px;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 3px;
+  border-radius: 6px;
   color: #d7d8dd;
-  text-align: left;
-  font-size: 11px;
+  font-size: 9px;
+  white-space: nowrap;
 }
 .th-history-actions svg {
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
   flex: none;
   fill: none;
   stroke: currentColor;
@@ -770,7 +787,6 @@ button:disabled {
   stroke-linejoin: round;
 }
 .th-history-more {
-  position: relative;
   border-radius: 6px;
   color: #c3c4c9;
 }
@@ -787,11 +803,11 @@ button:disabled {
 }
 .th-history-filter:hover,
 .th-history-more:hover,
-.th-history-actions button:hover:not(:disabled) {
+.th-history-actions button:hover:not(:disabled):not([aria-disabled='true']) {
   background: #303137;
 }
 .th-history-more:active,
-.th-history-actions button:active:not(:disabled) {
+.th-history-actions button:active:not(:disabled):not([aria-disabled='true']) {
   background: #3a3b42;
 }
 .th-history-more:focus-visible {
@@ -805,6 +821,10 @@ button:disabled {
 .th-history-actions button:disabled {
   opacity: 0.5;
 }
+.th-history-actions .th-history-restore-action[aria-disabled='true'] {
+  color: #777881;
+  cursor: not-allowed;
+}
 .th-history-actions .th-history-delete {
   color: #e6a7aa;
 }
@@ -815,18 +835,30 @@ button:disabled {
 }
 @media (pointer: coarse), (any-pointer: coarse) {
   .th-history-row {
-    grid-template-rows: 46px;
+    grid-template-rows: 50px;
   }
   .th-history-filter,
-  .th-history-more {
+  .th-history-more,
+  .th-v4-history-new {
     min-height: 44px;
   }
+  .th-history-actions {
+    right: 52px;
+    width: 202px;
+    height: 48px;
+    gap: 2px;
+    padding: 2px;
+  }
   .th-history-actions button {
-    min-height: 48px;
+    height: 44px;
+    min-height: 44px;
+    gap: 3px;
+    padding-inline: 4px;
+    font-size: 9px;
   }
   .th-history-more {
-    width: 48px;
-    height: 48px;
+    width: 44px;
+    height: 44px;
   }
 }
 .th-stop-motion .th-history-row > *,
@@ -1430,14 +1462,14 @@ button:disabled {
 .th-history-search {
   display: block;
   width: calc(100% - 24px);
-  min-height: 36px;
-  margin: 12px 12px 8px;
-  padding: 0 11px;
+  min-height: 42px;
+  margin: 13px 12px 7px;
+  padding: 0 12px;
   border: 1px solid rgb(255 255 255 / 9%);
   border-radius: 9px;
   background: #1a1b1f;
   color: #e7e7ea;
-  font-size: 11px;
+  font-size: 12px;
 }
 .th-history-search::placeholder {
   color: #90919a;
@@ -1449,7 +1481,7 @@ button:disabled {
 }
 .th-v4-history-heading {
   display: flex;
-  min-height: 62px;
+  min-height: 72px;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -1460,9 +1492,9 @@ button:disabled {
   min-width: 0;
   overflow: hidden;
   color: #e8e8eb;
-  font-size: 13px;
+  font-size: 21px;
   font-weight: 600;
-  letter-spacing: -0.015em;
+  letter-spacing: -0.035em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1485,9 +1517,14 @@ button:disabled {
     transform 150ms ease;
 }
 .th-v4-history-new {
-  padding: 0 10px;
-  background: #28292e;
-  font-size: 11px;
+  display: flex;
+  width: calc(100% - 24px);
+  min-height: 42px;
+  justify-content: flex-start;
+  margin: 0 12px 7px;
+  padding: 0 12px;
+  background: #27282d;
+  font-size: 12px;
   font-weight: 600;
 }
 .th-v4-history-new > span:first-child,
@@ -1632,13 +1669,13 @@ button:disabled {
 @media (min-width: 1200px) {
   .th-v4-nav-rail {
     display: flex;
-    width: 68px;
-    flex-basis: 68px;
+    width: 76px;
+    flex-basis: 76px;
   }
   .th-v4-history-pane {
     display: flex;
-    width: 264px;
-    flex-basis: 264px;
+    width: 306px;
+    flex-basis: 306px;
     overflow: hidden;
     border-right: 1px solid rgb(255 255 255 / 8%);
     transition:
@@ -1683,6 +1720,9 @@ button:disabled {
   }
   .th-v4-history-pane .th-v4-history {
     margin-top: 13px;
+  }
+  .th-v4-history-pane .th-v4-history-new {
+    display: none;
   }
   .th-v4-mobile-new {
     display: block;
