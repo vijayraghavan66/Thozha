@@ -26,6 +26,7 @@ import com.jarvis.companion.localai.RequestRoute
 import com.jarvis.companion.localai.RequestRoutingPolicy
 import com.jarvis.companion.model.ApiException
 import com.jarvis.companion.model.TaskArtifact
+import com.jarvis.companion.model.JarvisTask
 import com.jarvis.companion.model.Approval
 import com.jarvis.companion.data.JarvisApi
 import com.jarvis.companion.data.SecureStore
@@ -50,8 +51,8 @@ enum class Overlay { SETTINGS, HISTORY }
 val ActiveStates = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "WAITING_CONNECTION", "PAUSED", "SENT", "QUEUED", "UNCONFIRMED")
 
 /**
- * Holds everything the Compose screens show. All values come from LinkRuntime, the Telegram session, and the
- * sync that LinkBackgroundSync performs. Nothing here fabricates a task state or an approval.
+ * Holds everything the Compose screens show. Mac task snapshots come from the authenticated supervisor API;
+ * local events and approvals come from LinkRuntime. Nothing here fabricates a task state or an approval.
  *
  * Local state, outbound submissions, and sync use separate lanes; UI state changes stay on the main thread.
  */
@@ -73,6 +74,8 @@ class JarvisStore(private val app: Context) {
     var taskUpdates by mutableStateOf<List<Map<String, Any>>>(emptyList())
     var taskRegistry by mutableStateOf<List<Map<String, Any>>>(emptyList())
     var taskEventHistory by mutableStateOf<List<Map<String, Any>>>(emptyList())
+    /** Read-only task state fetched from the paired Mac supervisor for Activity history. */
+    var macSupervisorTasks by mutableStateOf<List<JarvisTask>>(emptyList())
     var approvals by mutableStateOf<List<ApprovalReview>>(emptyList())
     var taskArtifacts by mutableStateOf<Map<String, List<TaskArtifact>>>(emptyMap())
     var artifactLoadingTasks by mutableStateOf<Set<String>>(emptySet())
@@ -270,6 +273,7 @@ class JarvisStore(private val app: Context) {
         var reachableAt = macApiLastSyncMs
         var apiError = macApiSyncError
         var apiApprovalPairs = cachedSupervisorApprovalPairs
+        var macTasksSnapshot = macSupervisorTasks
         if (pairedToMac) {
             // Reconcile only requests previously submitted by this phone using their original idempotency keys.
             // A lost HTTP response therefore observes the same task rather than creating a duplicate.
@@ -320,8 +324,9 @@ class JarvisStore(private val app: Context) {
             if (probeTime - lastMacApiProbeAttemptMs >= MAC_API_PROBE_INTERVAL_MS) {
                 lastMacApiProbeAttemptMs = probeTime
                 ui { macApiSyncing = true }
-                runCatching { jarvisApi.getTasks("active") }
-                    .onSuccess {
+                runCatching { jarvisApi.getTasks("all") }
+                    .onSuccess { tasks ->
+                        macTasksSnapshot = tasks
                         reachableAt = System.currentTimeMillis()
                         apiError = ""
                     }
@@ -361,6 +366,7 @@ class JarvisStore(private val app: Context) {
             taskUpdates = updatesSnapshot
             taskRegistry = taskRegistrySnapshot
             taskEventHistory = taskEventSnapshot
+            macSupervisorTasks = macTasksSnapshot
             localAiSnapshot = localAi.status()
             approvals = combinedApprovals.values.toList()
             supervisorApprovals = directApprovalMap

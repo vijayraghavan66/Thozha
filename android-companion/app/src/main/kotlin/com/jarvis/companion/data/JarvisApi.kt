@@ -29,6 +29,8 @@ import com.jarvis.companion.model.TaskDetail
 import com.jarvis.companion.model.TaskEvent
 import com.jarvis.companion.model.TaskArtifact
 import com.jarvis.companion.ui.PerformanceTrace
+import com.jarvis.companion.link.LinkMode
+import com.jarvis.companion.link.LinkSettings
 import com.jarvis.link.ApprovalReview
 import com.jarvis.link.DevelopmentPlanReview
 
@@ -401,7 +403,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         val base = requireBaseUrl()
         val query = "?state=" + URLEncoder.encode(state, "UTF-8")
         val json = request(base, "/v1/jarvis/tasks$query", "GET", null, secureStore.token(), allowLocalWifi = true)
-        return json.requiredArrayOf("tasks").map { task ->
+        val tasks = json.requiredArrayOf("tasks").map { task ->
             val id = task.requiredString("id", "task_id")
             JarvisTask(
                 id = id,
@@ -415,6 +417,11 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
                 lastEvent = task.optString("last_event", ""),
             )
         }
+        if (BuildConfig.DEBUG) {
+            val idPrefixes = tasks.take(5).joinToString(",") { it.id.take(8) }
+            Log.i("JarvisTasks", "event=mac_task_list_received state=$state count=${tasks.size} id_prefixes=$idPrefixes")
+        }
+        return tasks
     }
 
     fun getApprovals(): List<Approval> {
@@ -673,16 +680,35 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         val uri = try { URI(value.trim().trimEnd('/')) } catch (_: Exception) {
             throw ApiException("The saved Jarvis server URL is invalid.")
         }
-        if (isLoopbackHost(uri.host.orEmpty())) return validateBaseUrl(value)
-        if (isPinnedLocalGatewayBase(uri, secureStore.localGatewayPin())) return uri.toString().trimEnd('/')
-        if (secureStore.pinnedServerIdentity() == null) {
-            throw ApiException("This server URL has no pinned Mac identity. Reconnect over USB and verify it first.")
+        val gatewayPin = secureStore.localGatewayPin()
+        val savedIsPinnedLocalGateway = isPinnedLocalGatewayBase(uri, gatewayPin)
+        val validatedSavedBase = when {
+            isLoopbackHost(uri.host.orEmpty()) -> validateBaseUrl(value)
+            savedIsPinnedLocalGateway -> uri.toString().trimEnd('/')
+            secureStore.pinnedServerIdentity() == null -> throw ApiException(
+                "This server URL has no pinned Mac identity. Reconnect over USB and verify it first."
+            )
+            else -> try {
+                ServerMigrationIdentity.validateTailscaleTarget(value).baseUrl
+            } catch (failure: IllegalArgumentException) {
+                throw ApiException(failure.message ?: "The saved Jarvis server URL is outside the pinned Tailscale range.")
+            }
         }
-        return try {
-            ServerMigrationIdentity.validateTailscaleTarget(value).baseUrl
-        } catch (failure: IllegalArgumentException) {
-            throw ApiException(failure.message ?: "The saved server URL is outside the pinned Tailscale range.")
+
+        val pairedCredentialPresent = !secureStore.token().isNullOrBlank() &&
+            secureStore.deviceId().matches(Regex("[0-9a-f]{32}")) &&
+            secureStore.pinnedServerIdentity() != null
+        val selectedBase = selectCompanionApiBaseUrl(
+            savedBaseUrl = validatedSavedBase,
+            localUsbSelected = BuildConfig.DEBUG && LinkSettings(context).mode == LinkMode.LOCAL_USB,
+            savedBaseIsPinnedLocalGateway = savedIsPinnedLocalGateway,
+            pairedCredentialPresent = pairedCredentialPresent,
+            usbReverseReachable = loopbackEndpointReachable(USB_REVERSE_API_BASE_URL),
+        )
+        if (selectedBase == USB_REVERSE_API_BASE_URL && BuildConfig.DEBUG) {
+            Log.i("JarvisWifi", "event=api_transport_selected route=usb mode=local_usb")
         }
+        return selectedBase
     }
 
     private fun requireLoopbackBaseUrl(): String {
@@ -747,7 +773,11 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         traceId: String? = null,
     ): JSONObject {
         val requestStartedNs = System.nanoTime()
-        val wifiPin = localGatewayPin ?: if (allowLocalWifi && !token.isNullOrBlank()) {
+        val usbLoopbackSelected = BuildConfig.DEBUG && localGatewayPin == null &&
+            LinkSettings(context).mode == LinkMode.LOCAL_USB &&
+            isLoopbackHost(runCatching { URI(base).host.orEmpty() }.getOrDefault("")) &&
+            loopbackEndpointReachable(base)
+        val wifiPin = localGatewayPin ?: if (allowLocalWifi && !token.isNullOrBlank() && !usbLoopbackSelected) {
             runCatching { secureStore.localGatewayPin() }.getOrNull()
         } else null
         if (wifiPin != null && !LocalGatewayDiscovery.localNetworkPermissionGranted(context)) {
@@ -755,7 +785,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         }
         val discoveryStartedNs = System.nanoTime()
         val loopbackReady = wifiPin != null && loopbackEndpointReachable(base)
-        val wifiCandidate = wifiPin?.let { pin ->
+        val wifiCandidate = if (usbLoopbackSelected) null else wifiPin?.let { pin ->
             if (localGatewayPin != null) endpointFromSignedAddress(pin)
             else if (loopbackReady) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
             else LocalGatewayDiscovery.discoverOrWait(context, pin)

@@ -753,7 +753,7 @@ class AdvancedActivity : ComponentActivity() {
             addView(text("Connection mode", 17, color(R.color.paper), bold = true))
             addView(text(
                 when (mode) {
-                    LinkMode.LOCAL_USB -> "Current mode: Local USB. Link is off; no relay is contacted."
+                    LinkMode.LOCAL_USB -> "Current mode: Local USB. Debug builds use ADB reverse for the paired Mac API when reachable; the Link relay is off."
                     LinkMode.TEST_RELAY -> "Current mode: Jarvis Link test relay. Messages go only to the relay URL below, through an encrypted end-to-end channel."
                 },
                 13, color(R.color.muted),
@@ -773,7 +773,7 @@ class AdvancedActivity : ComponentActivity() {
                 render()
             })
             addView(text(
-                "The mode changes only when you tap it. Test relay mode is for development relays reached through adb reverse; it is not a production or remote endpoint.",
+                "In debug builds, Local USB keeps your saved pairing and TLS pins and uses localhost only when ADB reverse is reachable. Test relay mode is for development relays reached through adb reverse, not a production or remote endpoint.",
                 12, color(R.color.muted),
             ).apply { setPadding(0, dp(8), 0, 0) })
         }
@@ -1289,6 +1289,10 @@ class AdvancedActivity : ComponentActivity() {
         runRequest("Loading recent task activity…", {
             api.getTasks("active") to api.getTasks("completed")
         }) { (active, completed) ->
+            if (BuildConfig.DEBUG) {
+                val topCompleted = completed.firstOrNull()?.id?.take(8) ?: "none"
+                android.util.Log.i("JarvisTasks", "event=activity_list_applied active=${active.size} completed=${completed.size} top_completed=$topCompleted")
+            }
             activeTasks = active
             completedTasks = completed
         }

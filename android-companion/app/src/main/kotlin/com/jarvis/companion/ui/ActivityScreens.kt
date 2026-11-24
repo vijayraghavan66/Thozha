@@ -36,10 +36,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.size
 import com.jarvis.companion.presentation.TaskTone
+import com.jarvis.companion.presentation.supervisorTaskSnapshotRecords
 import com.jarvis.companion.presentation.TaskProgressEvent
 import com.jarvis.companion.presentation.TaskProgressPresentation
 import com.jarvis.companion.presentation.TimelinePresentation
 import com.jarvis.companion.presentation.TimelineRow
+import com.jarvis.companion.presentation.orderActivityRecordsNewestFirst
 import com.jarvis.companion.presentation.ApprovalDecisionPresentation
 import com.jarvis.companion.presentation.ApprovalDecisionStatus
 import com.jarvis.link.ApprovalReview
@@ -64,9 +66,15 @@ fun ActivityScreen(store: JarvisStore, showHeader: Boolean = true) {
         pendingArtifact = null
         if (uri != null && artifact != null) store.saveTaskArtifact(artifact, uri)
     }
-    val sections = remember(store.entries, store.taskRegistry, store.now) {
+    val sections = remember(store.entries, store.taskRegistry, store.macSupervisorTasks, store.now) {
         val entriesById = store.entries.associateBy { it["message_id"] as? String ?: "" }
-        val merged = store.entries.toMutableList()
+        val merged = mutableListOf<Map<String, Any?>>().apply { addAll(store.entries) }
+        val representedSupervisorIds = buildSet {
+            store.entries.mapNotNullTo(this) { it["task_id"] as? String }
+            store.taskRegistry.mapNotNullTo(this) {
+                (it["supervisor_task_id"] as? String) ?: (it["task_id"] as? String)
+            }
+        }
         store.taskRegistry.forEach { task ->
             val requestId = task["request_id"] as? String ?: return@forEach
             val existing = entriesById[requestId]
@@ -83,10 +91,10 @@ fun ActivityScreen(store: JarvisStore, showHeader: Boolean = true) {
                 if (!supervisorId.isNullOrBlank()) put("task_id", supervisorId)
             }
             merged.removeAll { (it["message_id"] as? String) == requestId }
-            @Suppress("UNCHECKED_CAST")
-            merged.add(row as Map<String, Any>)
+            merged.add(row)
         }
-        TimelinePresentation.sections(merged) { clockTime(it) }
+        merged.addAll(supervisorTaskSnapshotRecords(store.macSupervisorTasks, representedSupervisorIds))
+        TimelinePresentation.sections(orderActivityRecordsNewestFirst(merged)) { clockTime(it) }
     }
     Column(Modifier.fillMaxSize()) {
         if (showHeader) ScreenHeader("Activity", "Tasks as the Mac has reported them. Unconfirmed requests stay marked as such.")

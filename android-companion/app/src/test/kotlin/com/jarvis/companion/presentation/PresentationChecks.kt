@@ -1,5 +1,6 @@
 package com.jarvis.companion.presentation
 
+import com.jarvis.companion.model.JarvisTask
 
 private var assertions = 0
 
@@ -85,6 +86,22 @@ fun main() {
     check(rows.getValue("b").requestId == "b", "rows carry the request id the cancel path uses")
     check(rows.getValue("a").capabilityScope == "development" && rows.getValue("b").capabilityScope.isBlank(), "artifact action scope comes only from the locally recorded task scope")
     check(rows.getValue("b").transport == "api" && rows.getValue("c").transport.isBlank(), "Mac cancellation action is limited to API-owned requests")
+    val syncedMacTask = supervisorTaskSnapshotRecords(
+        listOf(JarvisTask("b314beabbd454aa181140280f1b0ff9f", "Task b314beab", "COMPLETED", updatedAt = "2026-11-24T16:17:51.341439+00:00")),
+        representedTaskIds = emptySet(),
+    )
+    val syncedMacRow = TimelinePresentation.sections(syncedMacTask, fmt).flatMap { it.rows }.single()
+    check(syncedMacRow.taskId == "b314beabbd454aa181140280f1b0ff9f" && syncedMacRow.tone == TaskTone.COMPLETED, "completed authenticated Mac snapshots appear as completed Activity rows")
+    check(syncedMacRow.transport == "mac_snapshot" && !syncedMacRow.canCancel, "read-only Mac snapshots do not expose phone cancellation or replay controls")
+    val recentCompleted = TimelinePresentation.sections(orderActivityRecordsNewestFirst(listOf(
+        mapOf("message_id" to "older", "task_id" to "older-task", "text" to "Older", "state" to "COMPLETED", "updated_at_unix_ms" to 1L),
+        syncedMacTask.single(),
+    )), fmt).single { it.title == "Completed" }
+    check(recentCompleted.rows.first().taskId == "b314beabbd454aa181140280f1b0ff9f", "fresh supervisor results appear before older Activity history")
+    check(supervisorTaskSnapshotRecords(
+        listOf(JarvisTask("b314beabbd454aa181140280f1b0ff9f", "Task b314beab", "COMPLETED")),
+        representedTaskIds = setOf("b314beabbd454aa181140280f1b0ff9f"),
+    ).isEmpty(), "a task already represented by a phone request is not duplicated")
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "RUNNING")), "active API tasks continue status reconciliation")
     check(!shouldReconcileApiTask(mapOf("transport" to "api", "lookup_link_status" to false, "state" to "RUNNING")), "typed fast commands do not query the Link task-status endpoint")
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "The exact approved plan is active. Use capability_id=secret")), "plan issuance text is reconciled against the authoritative final result")

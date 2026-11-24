@@ -27,6 +27,20 @@ data class LocalGatewayEndpoint(
     }
 }
 
+/** Mac API endpoint exposed only through the explicitly selected USB reverse development transport. */
+internal const val USB_REVERSE_API_BASE_URL = "http://127.0.0.1:8000"
+
+/** Selects USB only for the saved pinned gateway identity and a reachable reverse port. */
+internal fun selectCompanionApiBaseUrl(
+    savedBaseUrl: String,
+    localUsbSelected: Boolean,
+    savedBaseIsPinnedLocalGateway: Boolean,
+    pairedCredentialPresent: Boolean,
+    usbReverseReachable: Boolean,
+): String = if (
+    localUsbSelected && savedBaseIsPinnedLocalGateway && pairedCredentialPresent && usbReverseReachable
+) USB_REVERSE_API_BASE_URL else savedBaseUrl
+
 internal fun isAllowedPrivateGatewayAddress(address: InetAddress): Boolean {
     if (address.isAnyLocalAddress || address.isLoopbackAddress || address.isLinkLocalAddress || address.isMulticastAddress) return false
     return when (address) {

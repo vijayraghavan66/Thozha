@@ -13,6 +13,27 @@ object LocalGatewayRoutingChecks {
         check(endpoint.httpsBaseUrl() == "https://192.168.1.8:8443", "Wi-Fi must connect to the DNS-SD resolved private IP")
         check(selectLocalGatewayEndpoint(loopbackReachable = true, cachedOrDiscovered = endpoint) == null, "Reachable USB loopback must keep priority over cached Wi-Fi")
         check(selectLocalGatewayEndpoint(loopbackReachable = false, cachedOrDiscovered = endpoint) == endpoint, "Pinned Wi-Fi endpoint should be used when USB is unavailable")
+        val savedWifiBase = "https://thozha-mac.local:8443"
+        check(
+            selectCompanionApiBaseUrl(savedWifiBase, true, true, true, true) == USB_REVERSE_API_BASE_URL,
+            "Selected Local USB mode should use the paired Mac loopback API when reverse is reachable",
+        )
+        check(
+            selectCompanionApiBaseUrl(savedWifiBase, true, true, true, false) == savedWifiBase,
+            "Local USB mode should retain the pinned TLS endpoint when reverse is unavailable",
+        )
+        check(
+            selectCompanionApiBaseUrl(savedWifiBase, false, true, true, true) == savedWifiBase,
+            "A different transport mode must not be overridden by a reachable USB port",
+        )
+        check(
+            selectCompanionApiBaseUrl(savedWifiBase, true, true, false, true) == savedWifiBase,
+            "USB override must not be selected without the existing paired credential",
+        )
+        check(
+            selectCompanionApiBaseUrl(savedWifiBase, true, false, true, true) == savedWifiBase,
+            "USB override must not replace a non-local or unpinned saved endpoint",
+        )
         val signedFallback = endpointFromSignedAddress(
             LocalGatewayPin("thozha-mac.local", 8443, "sha256:" + "a".repeat(64), "192.168.1.8"),
         )
