@@ -238,6 +238,86 @@ paths:
         '200': { description: Conversation archived. }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/conversations/{conversation_id}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+    post:
+      operationId: uploadWebConversationAttachment
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid on macOS
+      tags: [conversation]
+      description: >
+        Uploads a raw PNG, JPEG, or PDF body (8 MiB/file; ten files and 30 MiB
+        per conversation; 100 MiB per owner). The file is stored in the owner-scoped conversation
+        database. macOS Vision/PDFKit extracts text locally; only extracted,
+        bounded text is added to model context when the message references the
+        returned attachment ID. This is OCR/text extraction, not image-native
+        visual reasoning. Attachment content is treated as untrusted data and
+        is never used to enable tools.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$' }
+        - name: X-File-Name
+          in: header
+          required: false
+          schema: { type: string, maxLength: 256 }
+      requestBody:
+        required: true
+        content:
+          image/png:
+            schema: { type: string, format: binary }
+          image/jpeg:
+            schema: { type: string, format: binary }
+          application/pdf:
+            schema: { type: string, format: binary }
+      responses:
+        '201':
+          description: Attachment stored and text extraction completed; OCR text is not returned.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAttachmentUploadResult' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { description: File or per-conversation storage limit exceeded. }
+        '415': { description: Unsupported media type or file signature. }
+        '422': { description: Malformed document or no extractable text. }
+        '429': { description: Document extractor concurrency limit reached; retry after a short delay. }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/conversations/{conversation_id}/attachments/{attachment_id}:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+      - name: attachment_id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+    get:
+      operationId: downloadWebConversationAttachment
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      responses:
+        '200':
+          description: Original owner-uploaded attachment.
+          headers:
+            X-Content-SHA256: { schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+            Content-Disposition: { schema: { type: string } }
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /v1/web/conversations/{conversation_id}/messages:
     parameters:
       - $ref: '#/components/parameters/WebConversationId'
@@ -1654,6 +1734,11 @@ components:
       required: [content]
       properties:
         content: { type: string, minLength: 1, maxLength: 16000 }
+        attachment_ids:
+          type: array
+          maxItems: 5
+          uniqueItems: true
+          items: { type: string, pattern: '^[0-9a-f]{32}$' }
     WebMessage:
       type: object
       properties:
@@ -1666,6 +1751,25 @@ components:
         error_code: { type: [string, 'null'] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        attachment_ids: { type: array, maxItems: 5, items: { type: string, pattern: '^[0-9a-f]{32}$' } }
+        attachments: { type: array, items: { $ref: '#/components/schemas/WebAttachmentMetadata' } }
+    WebAttachmentMetadata:
+      type: object
+      required: [id, file_name, media_type, size_bytes, sha256, page_count, created_at]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        file_name: { type: string, maxLength: 120 }
+        media_type: { type: string, enum: [image/png, image/jpeg, application/pdf] }
+        size_bytes: { type: integer, minimum: 1, maximum: 8388608 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        page_count: { type: integer, minimum: 1, maximum: 10 }
+        created_at: { type: string, format: date-time }
+    WebAttachmentUploadResult:
+      type: object
+      required: [attachment, replayed]
+      properties:
+        attachment: { $ref: '#/components/schemas/WebAttachmentMetadata' }
+        replayed: { type: boolean }
     WebConversationEvent:
       type: object
       description: >
@@ -1682,6 +1786,8 @@ components:
           properties:
             memory_context_count: { type: integer, minimum: 0, maximum: 3 }
             memory_ids: { type: array, maxItems: 3, items: { type: string, pattern: '^[0-9a-f]{32}$' } }
+            attachment_context_count: { type: integer, minimum: 0, maximum: 10 }
+            attachment_context_chars: { type: integer, minimum: 0, maximum: 50000 }
             error_code: { type: string }
     WebMessageAccepted:
       type: object
@@ -2144,6 +2250,7 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
   x-thozha-not-implemented:
     - semantic or embedding-backed Web memory retrieval
+    - image-native multimodal reasoning, handwriting recognition, and diagram/layout understanding
     - Web automation scopes beyond read_only
     - notification history/read state API
     - FCM delivery through verified project credentials
