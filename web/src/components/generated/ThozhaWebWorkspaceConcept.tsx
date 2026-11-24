@@ -1,4 +1,13 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import {
+  lazy,
+  Suspense,
+  useId,
+  useLayoutEffect,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { WorkspaceApi } from '../../api/client';
 import { errorText } from '../../api/client';
@@ -70,16 +79,6 @@ function SearchGlyph({ open }: { open: boolean }) {
   );
 }
 
-function MenuGlyph({ open }: { open: boolean }) {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-[18px] w-[18px]">
-      <path className={`th-menu-line th-menu-top${open ? ' is-open' : ''}`} d="M5 8h14" />
-      <path className={`th-menu-line th-menu-middle${open ? ' is-open' : ''}`} d="M5 12h14" />
-      <path className={`th-menu-line th-menu-bottom${open ? ' is-open' : ''}`} d="M5 16h14" />
-    </svg>
-  );
-}
-
 function WorkspaceNavigation({
   page,
   drawer = false,
@@ -109,7 +108,7 @@ function WorkspaceNavigation({
             aria-label={collapsed ? name : undefined}
             onClick={onNavigate}
             aria-current={page === name ? 'page' : undefined}
-            className={`flex w-full items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 text-left text-[12px] transition-colors duration-200 ease-out ${collapsed ? 'justify-center' : ''} ${
+            className={`flex w-full items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 text-left text-[12px] transition-colors duration-200 ease-out ${collapsed ? 'justify-center px-1 py-2.5' : ''} ${
               page === name
                 ? 'font-semibold text-white'
                 : 'text-[#a0a2a9] hover:bg-white/[.06] hover:text-white'
@@ -122,6 +121,192 @@ function WorkspaceNavigation({
           </a>
         </div>
       ))}
+    </nav>
+  );
+}
+
+function ProfileMenu({
+  placement,
+  userId,
+  expiresAt,
+  onSettings,
+  logout,
+}: {
+  placement: 'rail' | 'header';
+  userId: string;
+  expiresAt: number;
+  onSettings: () => void;
+  logout: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const anchor = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const initial = Array.from(userId)[0]?.toUpperCase() ?? 'T';
+
+  useLayoutEffect(() => {
+    if (open) menu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    function dismiss(event: PointerEvent) {
+      if (event.target instanceof Node && !anchor.current?.contains(event.target)) {
+        if (anchor.current?.contains(document.activeElement))
+          trigger.current?.focus({ preventScroll: true });
+        setOpen(false);
+      }
+    }
+    function escape(event: KeyboardEvent) {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      trigger.current?.focus({ preventScroll: true });
+      setOpen(false);
+    }
+    document.addEventListener('pointerdown', dismiss, true);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('pointerdown', dismiss, true);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [open]);
+
+  function onMenuKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const items = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+    );
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    let next = -1;
+    if (event.key === 'ArrowDown') next = (current + 1) % items.length;
+    if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = items.length - 1;
+    if (next < 0 || !items.length) return;
+    event.preventDefault();
+    items[next].focus();
+  }
+
+  return (
+    <div
+      ref={anchor}
+      className={`th-v4-profile-anchor th-v4-profile-${placement}`}
+      onBlur={event => {
+        if (
+          event.relatedTarget instanceof Node &&
+          !event.currentTarget.contains(event.relatedTarget)
+        )
+          setOpen(false);
+      }}
+    >
+      <button
+        ref={trigger}
+        type="button"
+        className="th-v4-profile-trigger"
+        aria-label={open ? 'Close profile menu' : 'Open profile menu'}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={() => setOpen(value => !value)}
+      >
+        <span aria-hidden="true">{initial}</span>
+      </button>
+      <AnchoredSurface id={id} open={open} className="th-profile-surface">
+        <div
+          ref={menu}
+          role="menu"
+          aria-label="Profile and workspace"
+          className="p-3"
+          onKeyDown={onMenuKeyDown}
+        >
+          <div className="flex items-center gap-3 border-b border-white/10 px-2 pb-3 pt-2">
+            <span
+              aria-hidden="true"
+              className="grid size-10 shrink-0 place-items-center rounded-full bg-[#3a3b42] text-sm font-semibold"
+            >
+              {initial}
+            </span>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{userId}</p>
+              <p className="mt-1 text-[10px] text-[#a4a5af]">Verified Web session</p>
+            </div>
+          </div>
+          <p className="px-2 py-3 text-[10px] leading-5 text-[#a4a5af]">
+            Session expires {new Date(expiresAt * 1000).toLocaleString()}
+          </p>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            className="flex min-h-10 w-full items-center gap-3 rounded-lg px-2 text-left text-xs text-[#d3d4d8] hover:bg-white/[.08] focus-visible:bg-white/[.08]"
+            onClick={() => {
+              setOpen(false);
+              onSettings();
+            }}
+          >
+            <span aria-hidden="true">⚙</span>
+            Preferences
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            className="flex min-h-10 w-full items-center gap-3 rounded-lg px-2 text-left text-xs text-[#d3d4d8] hover:bg-white/[.08] focus-visible:bg-white/[.08]"
+            onClick={() => {
+              setOpen(false);
+              logout();
+            }}
+          >
+            <span aria-hidden="true">↪</span>
+            Sign out
+          </button>
+        </div>
+      </AnchoredSurface>
+    </div>
+  );
+}
+
+function MobileNavigation({
+  page,
+  onChats,
+  onNavigate,
+  onExplore,
+}: {
+  page: Section;
+  onChats: () => void;
+  onNavigate: (route: Section) => void;
+  onExplore: () => void;
+}) {
+  const nav = useRef<HTMLElement>(null);
+  const explore = !['AI Workspace', 'Tasks', 'Approvals'].includes(page);
+  return (
+    <nav ref={nav} aria-label="Mobile navigation" className="th-v4-mobile-nav">
+      <TravelingSurface container={nav} selection={page} />
+      {(
+        [
+          ['Chats', 'AI Workspace', '✳'],
+          ['Tasks', 'Tasks', '◷'],
+          ['Approvals', 'Approvals', '✓'],
+          ['Explore', 'Explore', '◇'],
+        ] as const
+      ).map(([label, destination, icon]) => {
+        const active = destination === 'Explore' ? explore : page === destination;
+        return (
+          <button
+            key={destination}
+            type="button"
+            aria-current={active ? 'page' : undefined}
+            className="th-v4-mobile-tab"
+            onClick={() => {
+              if (destination === 'Explore') onExplore();
+              else if (destination === 'AI Workspace') onChats();
+              else onNavigate(destination);
+            }}
+          >
+            <span aria-hidden="true">{icon}</span>
+            {label}
+          </button>
+        );
+      })}
     </nav>
   );
 }
@@ -165,10 +350,11 @@ export function ThozhaWebWorkspaceConcept({
     () => currentPage(window.location.hash) === 'AI Workspace'
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileHistory, setMobileHistory] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(
-    () => !window.matchMedia('(max-width: 1023px)').matches
+    () => !window.matchMedia('(max-width: 1199px)').matches
   );
-  const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 1023px)').matches);
+  const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 1199px)').matches);
   const [inspectorSlot, setInspectorSlot] = useState<HTMLDivElement | null>(null);
   const [chatTitleSlot, setChatTitleSlot] = useState<HTMLDivElement | null>(null);
   const [dialog, setDialog] = useState<'navigation' | null>(null);
@@ -194,6 +380,7 @@ export function ThozhaWebWorkspaceConcept({
   const matching = sections.filter(([name]) =>
     name.toLowerCase().includes(query.trim().toLowerCase())
   );
+  const historyVisible = page === 'AI Workspace' && (compact ? mobileHistory : !sidebarCollapsed);
   const conversations = useQuery({
     queryKey: conversationListKey,
     queryFn: ({ signal }) => api.list(signal),
@@ -214,6 +401,7 @@ export function ThozhaWebWorkspaceConcept({
         : undefined,
     connected: !problem,
     onAction: openConversationAction,
+    onSelect: () => setMobileHistory(false),
   };
 
   function openConversationAction(action: ConversationAction, fallback: HTMLElement | null = null) {
@@ -248,6 +436,7 @@ export function ThozhaWebWorkspaceConcept({
       focusAfterNavigation.current = true;
       setHash(window.location.hash);
       if (next === 'AI Workspace') setVisitedChat(true);
+      else setMobileHistory(false);
       if (!drawerClosingRef.current) setDialog(null);
       setSearchOpen(false);
       setNotificationsOpen(false);
@@ -266,7 +455,7 @@ export function ThozhaWebWorkspaceConcept({
     main.current?.scrollTo({ top: 0, behavior: 'instant' });
   }, [page]);
   useEffect(() => {
-    const query = window.matchMedia('(max-width: 1023px)');
+    const query = window.matchMedia('(max-width: 1199px)');
     function resize() {
       setCompact(query.matches);
       setInspectorOpen(!query.matches);
@@ -345,6 +534,7 @@ export function ThozhaWebWorkspaceConcept({
     if (!section) return;
     setDialog(null);
     setSearchOpen(false);
+    setMobileHistory(false);
     const hash = `#/${section[1]}`;
     if (searchOpen && window.location.hash === hash)
       searchTrigger.current?.focus({ preventScroll: true });
@@ -383,6 +573,16 @@ export function ThozhaWebWorkspaceConcept({
     setSearchOpen(false);
     setNotificationsOpen(false);
     setDialog('navigation');
+  }
+
+  function startNewConversation() {
+    setMobileHistory(false);
+    window.location.hash = `#/ai-workspace?new=${crypto.randomUUID()}`;
+  }
+
+  function openMobileChats() {
+    setMobileHistory(true);
+    if (page !== 'AI Workspace') window.location.hash = '#/ai-workspace';
   }
 
   function toggleSearch() {
@@ -424,91 +624,132 @@ export function ThozhaWebWorkspaceConcept({
       >
         Skip to content
       </a>
-      <div className="relative flex h-full min-h-0 min-w-0 overflow-hidden bg-[#101114]">
+      <div
+        className={`th-v4-layout relative flex h-full min-h-0 min-w-0 overflow-hidden bg-[#101114] ${page !== 'AI Workspace' ? 'th-nonchat' : ''} ${mobileHistory ? 'th-mobile-history' : ''}`}
+      >
         <aside
-          aria-label="Workspace sidebar"
-          className="th-v4-rail z-30 hidden shrink-0 flex-col overflow-hidden border-r border-white/[.08] bg-[#131417] p-3 lg:flex"
+          aria-label="Primary navigation"
+          className="th-v4-nav-rail z-30 hidden shrink-0 flex-col border-r border-white/[.08] bg-[#0d0e11] px-2 py-3 lg:flex"
         >
-          <div className="mb-5 flex shrink-0 items-center gap-3 px-2 pt-3">
+          <a
+            href="#/ai-workspace"
+            className="th-v4-brand mb-4 grid h-12 shrink-0 place-items-center rounded-xl"
+            aria-label="Thozha conversations"
+            title="Thozha"
+          >
             <span data-pulse-slot className="th-pulse-slot">
               <LivingPulseMark />
             </span>
-            {!sidebarCollapsed && (
-              <div>
-                <div className="text-[21px] font-semibold tracking-[-.06em]">
-                  thozha<span className="text-[#858690]">.</span>
-                </div>
-                <p className="text-[9px] font-semibold tracking-[.17em] text-[#a4a5af]">
-                  PERSONAL WORKSPACE
-                </p>
-              </div>
-            )}
-          </div>
-          <button
-            type="button"
-            className="th-v4-new"
-            onClick={() => {
-              window.location.hash = `#/ai-workspace?new=${crypto.randomUUID()}`;
-            }}
-            title={sidebarCollapsed ? 'New conversation' : undefined}
-            aria-label="New conversation"
-          >
-            <span aria-hidden="true">＋</span>
-            {!sidebarCollapsed && <span>New conversation</span>}
-          </button>
+          </a>
+          {(!historyVisible || sidebarCollapsed) && (
+            <button
+              type="button"
+              className="th-v4-rail-new mb-3"
+              onClick={startNewConversation}
+              aria-label="New conversation"
+              title="New conversation"
+            >
+              <span aria-hidden="true">＋</span>
+            </button>
+          )}
           <div className="min-h-0 flex-1 overflow-y-auto">
-            <WorkspaceNavigation
-              page={page}
-              onNavigate={() => setDialog(null)}
-              collapsed={sidebarCollapsed}
-            />
-            {!sidebarCollapsed && <ConversationHistory {...historyProps} />}
+            <WorkspaceNavigation page={page} onNavigate={() => setDialog(null)} collapsed />
           </div>
-          <button
-            type="button"
-            className="th-v4-collapse"
-            onClick={() => setSidebarCollapsed(value => !value)}
-            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            aria-expanded={!sidebarCollapsed}
-          >
-            {sidebarCollapsed ? '›' : '‹  Collapse sidebar'}
-          </button>
-          <div className="mt-2 shrink-0 rounded-xl border border-white/[.08] bg-[#1c1d21] p-2">
-            <div className="flex items-center gap-3">
-              <span
-                aria-hidden="true"
-                className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#3a3b42] text-xs font-semibold"
-              >
-                {userId.slice(0, 1).toUpperCase()}
-              </span>
-              {!sidebarCollapsed && (
-                <div className="min-w-0">
-                  <p className="truncate text-xs font-medium">Personal workspace</p>
-                  <p className="mt-1 text-[10px] text-[#a4a5af]">
-                    {problem ? 'Connection uncertain' : 'Signed in · Web v1'}
-                  </p>
-                </div>
-              )}
+          <ProfileMenu
+            placement="rail"
+            userId={userId}
+            expiresAt={expiresAt}
+            onSettings={() => go('Settings')}
+            logout={logout}
+          />
+        </aside>
+        <aside
+          aria-label="Conversation sidebar"
+          aria-hidden={!historyVisible}
+          inert={!historyVisible}
+          className={`th-v4-history-pane shrink-0 border-r border-white/[.08] bg-[#121316] ${historyVisible ? '' : 'is-hidden'} ${compact && mobileHistory ? 'is-mobile-active' : ''}`}
+        >
+          <div className="th-v4-history-inner">
+            <div className="th-v4-history-heading">
+              <h2>Conversations</h2>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  className="th-v4-history-new"
+                  onClick={startNewConversation}
+                  aria-label="New conversation"
+                  title="New conversation"
+                >
+                  <span aria-hidden="true">＋</span>
+                  <span>New</span>
+                </button>
+                {!compact && (
+                  <button
+                    type="button"
+                    className="th-v4-history-toggle"
+                    onClick={() => setSidebarCollapsed(true)}
+                    aria-label="Collapse sidebar"
+                    aria-expanded="true"
+                  >
+                    ‹
+                  </button>
+                )}
+              </div>
             </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <ConversationHistory {...historyProps} />
+            </div>
+            <button
+              type="button"
+              className="th-v4-mobile-new"
+              onClick={startNewConversation}
+              aria-label="New conversation"
+            >
+              ＋ New conversation
+            </button>
           </div>
         </aside>
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div
+          className="th-v4-main-shell flex min-h-0 min-w-0 flex-1 flex-col"
+          aria-hidden={compact && mobileHistory}
+          inert={compact && mobileHistory}
+        >
           <header className="relative z-10 flex min-h-[62px] shrink-0 items-center justify-between gap-1 border-b border-white/[.08] px-6 max-md:px-3">
             <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-              <button
-                type="button"
-                data-testid="navigation-trigger"
-                className="grid min-h-10 min-w-10 place-items-center rounded-lg hover:bg-white/10 lg:hidden"
-                aria-label={dialog === 'navigation' ? 'Close navigation' : 'Open navigation'}
-                aria-expanded={dialog === 'navigation'}
-                aria-controls="workspace-navigation"
-                onClick={openNavigation}
-              >
-                <MenuGlyph open={dialog === 'navigation'} />
-              </button>
-              <span data-pulse-slot className="th-pulse-slot th-pulse-slot-mobile lg:hidden">
-                <LivingPulseMark />
-              </span>
+              {compact && (
+                <span data-pulse-slot className="th-pulse-slot th-pulse-slot-mobile">
+                  <LivingPulseMark />
+                </span>
+              )}
+              {((compact && page === 'AI Workspace' && !mobileHistory) ||
+                (!compact && (sidebarCollapsed || page !== 'AI Workspace'))) && (
+                <button
+                  type="button"
+                  className="th-v4-history-restore"
+                  aria-label={
+                    compact && page === 'AI Workspace'
+                      ? 'Back to conversations'
+                      : page === 'AI Workspace'
+                        ? 'Expand sidebar'
+                        : 'Open conversations'
+                  }
+                  onClick={() => {
+                    if (compact) {
+                      openMobileChats();
+                    } else if (page !== 'AI Workspace') {
+                      setSidebarCollapsed(false);
+                      window.location.hash = '#/ai-workspace';
+                    } else {
+                      setSidebarCollapsed(false);
+                    }
+                  }}
+                >
+                  ‹
+                  <span className="hidden sm:inline">
+                    {compact && page === 'AI Workspace' ? 'Conversations' : 'History'}
+                  </span>
+                </button>
+              )}
               {page === 'AI Workspace' ? (
                 <div ref={setChatTitleSlot} className="min-w-0" />
               ) : (
@@ -660,6 +901,13 @@ export function ThozhaWebWorkspaceConcept({
                   The browser API does not expose notification history or unread counts.
                 </p>
               </NotificationPanel>
+              <ProfileMenu
+                placement="header"
+                userId={userId}
+                expiresAt={expiresAt}
+                onSettings={() => go('Settings')}
+                logout={logout}
+              />
             </div>
           </header>
           <div className="th-v4-content-row flex min-h-0 min-w-0 flex-1">
@@ -850,6 +1098,12 @@ export function ThozhaWebWorkspaceConcept({
             )}
           </div>
         </div>
+        <MobileNavigation
+          page={page}
+          onChats={openMobileChats}
+          onNavigate={go}
+          onExplore={openNavigation}
+        />
       </div>
       {dialog === 'navigation' && (
         <Modal
@@ -860,18 +1114,14 @@ export function ThozhaWebWorkspaceConcept({
           }`}
           id="workspace-navigation"
         >
-          <button
-            type="button"
-            className="th-v4-new mb-3 w-full"
-            onClick={() => {
+          <WorkspaceNavigation
+            page={page}
+            drawer
+            onNavigate={() => {
+              setMobileHistory(false);
               closeNavigation();
-              window.location.hash = `#/ai-workspace?new=${crypto.randomUUID()}`;
             }}
-          >
-            ＋ New conversation
-          </button>
-          <WorkspaceNavigation page={page} drawer onNavigate={closeNavigation} />
-          <ConversationHistory {...historyProps} onSelect={closeNavigation} />
+          />
           <p
             role="status"
             className={conversationNotice ? 'mt-3 text-xs text-[#c3c4c9]' : 'sr-only'}

@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   WebApiError,
@@ -142,12 +142,27 @@ export function ConversationHistory({
 }) {
   const [archived, setArchived] = useState(false);
   const [open, setOpen] = useState<string>();
+  const [query, setQuery] = useState('');
   const historyToggle = useRef<HTMLButtonElement>(null);
   const actionsId = useId();
   const rows = items.filter(item => Boolean(item.archived_at) === archived);
+  const matchingRows = rows.filter(item =>
+    item.title.toLowerCase().includes(query.trim().toLowerCase())
+  );
   return (
     <section className="th-v4-history" aria-label="Conversation history">
       <p className="th-v4-eyebrow">{archived ? 'ARCHIVED CONVERSATIONS' : 'SAVED CONVERSATIONS'}</p>
+      <label className="sr-only" htmlFor={`${actionsId}-search`}>
+        Search conversations
+      </label>
+      <input
+        id={`${actionsId}-search`}
+        type="search"
+        className="th-history-search"
+        placeholder="Search conversations"
+        value={query}
+        onChange={event => setQuery(event.target.value)}
+      />
       <button
         ref={historyToggle}
         type="button"
@@ -165,11 +180,17 @@ export function ConversationHistory({
           {error}
         </p>
       )}
-      {connected && !loading && !error && !rows.length && (
-        <p className={muted}>{archived ? 'No archived conversations.' : 'No conversations yet.'}</p>
+      {connected && !loading && !error && !matchingRows.length && (
+        <p className={muted}>
+          {query.trim()
+            ? 'No matching conversations.'
+            : archived
+              ? 'No archived conversations.'
+              : 'No conversations yet.'}
+        </p>
       )}
       <ul className="th-history-rows">
-        {rows.map(item => (
+        {matchingRows.map(item => (
           <ConversationPill
             key={item.id}
             panelId={`${actionsId}-${item.id}`}
@@ -209,12 +230,35 @@ function ConversationPill({
   const row = useRef<HTMLLIElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const actions = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    if (expanded)
-      actions.current
-        ?.querySelector<HTMLButtonElement>('button:not(:disabled)')
-        ?.focus({ preventScroll: true });
-  }, [expanded]);
+  const positionActions = useCallback(() => {
+    const bounds = trigger.current?.getBoundingClientRect();
+    const panel = actions.current;
+    if (!bounds || !panel) return;
+    const margin = 8;
+    const width = Math.min(184, window.innerWidth - margin * 2);
+    const height = panel.scrollHeight;
+    const left = Math.max(
+      margin,
+      Math.min(bounds.right - width, window.innerWidth - width - margin)
+    );
+    let top = bounds.bottom + 5;
+    if (top + height > window.innerHeight - margin) top = bounds.top - height - 5;
+    top = Math.max(margin, Math.min(top, window.innerHeight - height - margin));
+    panel.style.width = `${width}px`;
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+  }, []);
+  useEffect(() => {
+    if (!expanded) return;
+    const frame = requestAnimationFrame(() => {
+      const first = actions.current?.querySelector<HTMLButtonElement>(
+        '[role="menuitem"]:not(:disabled)'
+      );
+      first?.focus({ preventScroll: true });
+      positionActions();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [expanded, positionActions]);
   useEffect(() => {
     if (!expanded) return;
     const outside = (event: PointerEvent) => {
@@ -224,9 +268,15 @@ function ConversationPill({
         setOpen(current => (current === item.id ? undefined : current));
       }
     };
+    document.addEventListener('scroll', positionActions, true);
+    window.addEventListener('resize', positionActions);
     document.addEventListener('pointerdown', outside, true);
-    return () => document.removeEventListener('pointerdown', outside, true);
-  }, [expanded, item.id, setOpen]);
+    return () => {
+      document.removeEventListener('scroll', positionActions, true);
+      window.removeEventListener('resize', positionActions);
+      document.removeEventListener('pointerdown', outside, true);
+    };
+  }, [expanded, item.id, positionActions, setOpen]);
 
   function close() {
     trigger.current?.focus({ preventScroll: true });
@@ -244,10 +294,33 @@ function ConversationPill({
           setOpen(current => (current === item.id ? undefined : current));
       }}
       onKeyDown={event => {
-        if (!expanded || event.key !== 'Escape') return;
+        if (!expanded) return;
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          close();
+          return;
+        }
+        if (event.key === 'Tab') {
+          setOpen(current => (current === item.id ? undefined : current));
+          return;
+        }
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        const items = Array.from(
+          actions.current?.querySelectorAll<HTMLButtonElement>(
+            '[role="menuitem"]:not(:disabled)'
+          ) ?? []
+        );
+        if (!items.length) return;
+        const current = items.indexOf(document.activeElement as HTMLButtonElement);
+        const next =
+          event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? items.length - 1
+              : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
         event.preventDefault();
-        event.stopPropagation();
-        close();
+        items[next].focus();
       }}
     >
       <a
@@ -255,8 +328,6 @@ function ConversationPill({
         className="th-v4-history-link"
         title={item.title}
         aria-current={selected ? 'page' : undefined}
-        aria-hidden={expanded}
-        inert={expanded}
         onClick={() => {
           setOpen(undefined);
           onSelect?.();
@@ -268,41 +339,34 @@ function ConversationPill({
         ref={actions}
         id={panelId}
         className="th-history-actions"
-        role="group"
-        aria-label="Conversation actions"
+        role="menu"
+        aria-label={`Actions for ${item.title}`}
         aria-hidden={!expanded}
         inert={!expanded}
       >
         {!item.archived_at && (
           <button
             type="button"
-            title="Archive"
             aria-label="Archive"
+            role="menuitem"
+            tabIndex={-1}
             disabled={!connected}
             onClick={() => {
               close();
               onAction('archive');
             }}
           >
-            <svg
-              viewBox="0 0 16 16"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
               <path d="M2 3h12v3H2z M3 6v7h10V6 M6.5 9h3" />
             </svg>
+            <span>Archive</span>
           </button>
         )}
         <button
           type="button"
-          title="Delete"
           aria-label="Delete"
+          role="menuitem"
+          tabIndex={-1}
           className="th-history-delete"
           disabled={!connected}
           onClick={() => {
@@ -310,19 +374,10 @@ function ConversationPill({
             onAction('delete');
           }}
         >
-          <svg
-            viewBox="0 0 16 16"
-            width="16"
-            height="16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
             <path d="M2.5 4.5h11 M6 4.5V2.75h4V4.5 M4 4.5l.75 8.75h6.5L12 4.5 M7 7v3.5 M9 7v3.5" />
           </svg>
+          <span>Delete</span>
         </button>
       </div>
       <button
@@ -331,8 +386,15 @@ function ConversationPill({
         className="th-history-more"
         title={expanded ? 'Close actions' : 'Conversation actions'}
         aria-label={`${expanded ? 'Close actions for' : 'Actions for'} ${item.title}`}
+        aria-haspopup="menu"
         aria-expanded={expanded}
         aria-controls={panelId}
+        onKeyDown={event => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          if (expanded) close();
+          else setOpen(item.id);
+        }}
         onClick={() => (expanded ? close() : setOpen(item.id))}
       >
         <svg

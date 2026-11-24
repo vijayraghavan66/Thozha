@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { signIn } from './session';
 
-async function createConversation(page: Page, title: string) {
+async function createConversationRecord(page: Page, title: string) {
   const session = await (await page.request.get('/v1/web/session')).json();
   const response = await page.request.post('/v1/web/conversations', {
     headers: { Origin: new URL(page.url()).origin, 'X-Thozha-CSRF': session.csrf_token },
@@ -13,10 +13,26 @@ async function createConversation(page: Page, title: string) {
   });
   expect(response.ok()).toBeTruthy();
   const { id } = await response.json();
+  return id as string;
+}
+
+async function createConversation(page: Page, title: string) {
+  const id = await createConversationRecord(page, title);
   await page.goto(`/#/ai-workspace?conversation=${id}`);
   await page.reload();
   await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toBeEditable();
+}
+
+async function openMobileRoute(page: Page, name: string) {
+  await page
+    .getByRole('navigation', { name: 'Mobile navigation' })
+    .getByRole('button', { name: 'Explore' })
+    .click();
+  await page
+    .getByRole('dialog', { name: 'Workspace navigation' })
+    .getByRole('link', { name })
+    .click();
 }
 
 test('sidebar actions survive reload and protect other conversations', async ({
@@ -29,6 +45,11 @@ test('sidebar actions survive reload and protect other conversations', async ({
   await createConversation(page, keep);
   await createConversation(page, target);
   const history = page.getByRole('region', { name: 'Conversation history' });
+  const search = history.getByRole('searchbox', { name: 'Search conversations' });
+  await search.fill('deliberately long title');
+  await expect(history.getByRole('link', { name: target })).toBeVisible();
+  await expect(history.getByRole('link', { name: keep })).toHaveCount(0);
+  await search.clear();
   const trigger = history.getByRole('button', { name: `Actions for ${target}` });
   const assetDir = process.env.THOZHA_E2E_43_CAPTURE;
   if (assetDir) {
@@ -45,10 +66,10 @@ test('sidebar actions survive reload and protect other conversations', async ({
     const neighbor = history.getByRole('link', { name: keep, exact: true });
     const neighborBefore = await neighbor.boundingBox();
     await trigger.press('Enter');
-    const actions = history.getByRole('group', { name: 'Conversation actions' });
+    const actions = history.getByRole('menu', { name: `Actions for ${target}` });
     const close = history.getByRole('button', { name: `Close actions for ${target}` });
     await expect(actions).toBeVisible();
-    await expect(history.getByRole('link', { name: target, exact: true })).toHaveCount(0);
+    await expect(history.getByRole('link', { name: target, exact: true })).toBeVisible();
     expect(await close.locator('..').boundingBox()).toEqual(before);
     expect(await neighbor.boundingBox()).toEqual(neighborBefore);
     if (assetDir) {
@@ -56,9 +77,9 @@ test('sidebar actions survive reload and protect other conversations', async ({
       await page.screenshot({ path: join(assetDir, 'desktop-pill.png') });
       await page.waitForTimeout(650);
     }
-    await expect(history.getByRole('button', { name: 'Archive', exact: true })).toBeFocused();
-    await page.keyboard.press('Tab');
-    await expect(actions.getByRole('button', { name: 'Delete', exact: true })).toBeFocused();
+    await expect(history.getByRole('menuitem', { name: 'Archive', exact: true })).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await expect(actions.getByRole('menuitem', { name: 'Delete', exact: true })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(trigger).toBeFocused();
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');
@@ -70,7 +91,7 @@ test('sidebar actions survive reload and protect other conversations', async ({
     await history.getByText('SAVED CONVERSATIONS', { exact: true }).click();
     await expect(actions).toHaveCount(0);
     await trigger.press('Enter');
-    await history.getByRole('button', { name: 'Delete', exact: true }).click();
+    await history.getByRole('menuitem', { name: 'Delete', exact: true }).click();
     const confirmation = page.getByRole('dialog', { name: 'Delete conversation' });
     await expect(confirmation).toContainText(target);
     await expect(confirmation.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
@@ -78,7 +99,7 @@ test('sidebar actions survive reload and protect other conversations', async ({
     await expect(trigger).toBeFocused();
 
     await trigger.click();
-    await history.getByRole('button', { name: 'Archive', exact: true }).click();
+    await history.getByRole('menuitem', { name: 'Archive', exact: true }).click();
     if (assetDir)
       await page
         .getByRole('dialog', { name: 'Archive conversation' })
@@ -93,7 +114,7 @@ test('sidebar actions survive reload and protect other conversations', async ({
     await expect(page.getByText('Archived · read-only')).toBeVisible();
     await history.getByRole('button', { name: 'Show archived conversations' }).click();
     await trigger.click();
-    await history.getByRole('button', { name: 'Delete', exact: true }).click();
+    await history.getByRole('menuitem', { name: 'Delete', exact: true }).click();
     let writes = 0;
     const detail = '**/v1/web/conversations/*';
     await page.route(detail, async route => {
@@ -138,7 +159,7 @@ test('sidebar actions survive reload and protect other conversations', async ({
   }
   await history.getByRole('button', { name: 'Show active conversations' }).click();
   await history.getByRole('button', { name: `Actions for ${keep}` }).click();
-  await history.getByRole('button', { name: 'Delete', exact: true }).click();
+  await history.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await page.unroute('**/v1/web/conversations/*');
   await page.getByRole('button', { name: 'Delete permanently' }).click();
   await expect(history.getByRole('link', { name: keep })).toHaveCount(0);
@@ -159,8 +180,11 @@ test('touch drawer opens saved conversation actions and reconciles an already-de
     await signIn(page, '/#/settings');
     const title = 'Touch drawer regression';
     await createConversation(page, title);
-    await page.getByRole('button', { name: 'Open navigation' }).tap();
-    const drawer = page.getByRole('dialog', { name: 'Workspace navigation' });
+    await page
+      .getByRole('navigation', { name: 'Mobile navigation' })
+      .getByRole('button', { name: 'Chats' })
+      .tap();
+    const drawer = page.getByRole('complementary', { name: 'Conversation sidebar' });
     const trigger = drawer.getByRole('button', { name: `Actions for ${title}` });
     await trigger.scrollIntoViewIfNeeded();
     await expect
@@ -170,20 +194,25 @@ test('touch drawer opens saved conversation actions and reconciles an already-de
         )
       )
       .toBe(false);
-    const bounds = await trigger.locator('..').boundingBox();
+    const rowBounds = await trigger.locator('..').boundingBox();
     await trigger.tap();
     const close = drawer.getByRole('button', { name: `Close actions for ${title}` });
-    expect(await close.locator('..').boundingBox()).toEqual(bounds);
+    expect(await close.locator('..').boundingBox()).toEqual(rowBounds);
+    const menu = drawer.getByRole('menu', { name: `Actions for ${title}` });
+    const menuBounds = await menu.boundingBox();
     const [archive, remove, dismiss] = await Promise.all(
       [
-        drawer.getByRole('button', { name: 'Archive', exact: true }),
-        drawer.getByRole('button', { name: 'Delete', exact: true }),
+        drawer.getByRole('menuitem', { name: 'Archive', exact: true }),
+        drawer.getByRole('menuitem', { name: 'Delete', exact: true }),
         close,
       ].map(button => button.boundingBox())
     );
-    if (!archive || !remove || !dismiss) throw new Error('Missing touch actions');
-    expect(archive.x + archive.width).toBeLessThanOrEqual(remove.x);
-    expect(remove.x + remove.width).toBeLessThanOrEqual(dismiss.x);
+    if (!archive || !remove || !dismiss || !menuBounds) throw new Error('Missing touch actions');
+    expect(menuBounds.x).toBeGreaterThanOrEqual(0);
+    expect(menuBounds.y).toBeGreaterThanOrEqual(0);
+    expect(menuBounds.x + menuBounds.width).toBeLessThanOrEqual(390);
+    expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(844);
+    expect(archive.y + archive.height).toBeLessThanOrEqual(remove.y);
     for (const target of [archive, remove, dismiss]) {
       expect(Math.round(target.width * 100) / 100).toBeGreaterThanOrEqual(44);
       expect(Math.round(target.height * 100) / 100).toBeGreaterThanOrEqual(44);
@@ -191,7 +220,7 @@ test('touch drawer opens saved conversation actions and reconciles an already-de
     const assetDir = process.env.THOZHA_E2E_43_CAPTURE;
     if (assetDir)
       await page.screenshot({ path: join(assetDir, 'mobile-pill.png'), animations: 'disabled' });
-    await drawer.getByRole('button', { name: 'Delete', exact: true }).tap();
+    await drawer.getByRole('menuitem', { name: 'Delete', exact: true }).tap();
     const confirmation = page.getByRole('dialog', { name: 'Delete conversation' });
     await expect(confirmation).toContainText(title);
     const session = await (await page.request.get('/v1/web/session')).json();
@@ -205,7 +234,9 @@ test('touch drawer opens saved conversation actions and reconciles an already-de
     });
     expect(concurrent.status()).toBe(204);
     await confirmation.getByRole('button', { name: 'Delete permanently' }).tap();
-    await expect(drawer.getByRole('status')).toHaveText('Conversation is no longer on the server.');
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Conversation is no longer on the server.' })
+    ).toBeVisible();
     await expect(drawer.getByRole('link', { name: title })).toHaveCount(0);
   } finally {
     await context.close();
@@ -489,12 +520,13 @@ test('renders the reported SSE mode, persists context, copies code and supports 
   await page.getByRole('button', { name: 'Archive', exact: true }).click();
   await page.getByRole('button', { name: 'Archive conversation', exact: true }).click();
   await expect(page.getByText('Conversation archived.')).toBeVisible();
-  const history = page.getByRole('complementary', { name: 'Workspace sidebar' });
+  const history = page.getByRole('complementary', { name: 'Conversation sidebar' });
   await history.getByRole('button', { name: 'Show archived conversations' }).click();
   await history.getByRole('link', { name: 'Browser history verification' }).click();
   await expect(page.getByRole('heading', { name: 'Browser history verification' })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await history.getByRole('button', { name: 'Actions for Browser history verification' }).click();
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await page.getByRole('button', { name: 'Delete permanently' }).click();
   await expect(page.getByText('Conversation and history deleted.')).toBeVisible();
   await expect(
@@ -640,8 +672,7 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await signIn(page);
   await expect(page.getByTestId('chat-title')).toBeVisible();
-  await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('link', { name: 'Trading Lab' }).click();
+  await openMobileRoute(page, 'Trading Lab');
   await expect(page.getByRole('heading', { name: 'Trading Lab' })).toBeVisible();
   await expect(page.getByText('SYNTHETIC DEMO', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Load synthetic demo' }).click();
@@ -659,13 +690,11 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.getByLabel('Routine name').fill('On-page draft');
   await page.getByRole('button', { name: 'Keep draft on this page' }).click();
   await expect(page.getByText('LOCAL DRAFT')).toBeVisible();
-  await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('link', { name: 'Device Hub' }).click();
+  await openMobileRoute(page, 'Device Hub');
   await page.getByRole('button', { name: 'Explore sample devices' }).click();
   await page.getByRole('button', { name: /Smart speaker/ }).click();
   await expect(page.getByRole('button', { name: 'Pair device' })).toBeDisabled();
-  await page.getByRole('button', { name: 'Open navigation' }).click();
-  await page.getByRole('link', { name: 'Developer Studio' }).click();
+  await openMobileRoute(page, 'Developer Studio');
   await page.getByRole('button', { name: 'Review & submit' }).click();
   await expect(page.getByText(/No active device mapping was verified/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Submit reviewed task' })).toBeDisabled();
@@ -742,21 +771,23 @@ test('header search morphs in place, supports keyboard selection and closes pred
 test('conversation-first navigation and contextual inspector remain reversible and keyboard accessible', async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
   await expect(page.getByTestId('chat-title')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'A quieter kind of control.' })).toHaveCount(0);
   await createConversation(page, 'Sidebar history item');
   await page.getByRole('link', { name: 'Tasks', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Open conversations' }).click();
   await page.getByRole('link', { name: 'Sidebar history item' }).click();
   await expect(page.getByRole('heading', { name: 'Sidebar history item' })).toBeVisible();
 
-  const rail = page.getByRole('complementary', { name: 'Workspace sidebar' });
-  await expect(rail).toHaveCSS('width', '252px');
+  const history = page.getByRole('complementary', { name: 'Conversation sidebar' });
+  await expect(history).toHaveCSS('width', '264px');
   await page.getByRole('button', { name: 'Collapse sidebar' }).click();
-  await expect(rail).toHaveCSS('width', '68px');
+  await expect(page.locator('.th-v4-history-pane')).toHaveCSS('width', '0px');
   await page.getByRole('button', { name: 'Expand sidebar' }).click();
-  await expect(rail).toHaveCSS('width', '252px');
+  await expect(page.locator('.th-v4-history-pane')).toHaveCSS('width', '264px');
 
   await page.getByRole('button', { name: 'Close context panel' }).first().click();
   await expect(page.getByRole('complementary', { name: 'Context inspector' })).toHaveAttribute(
@@ -780,7 +811,7 @@ test('new conversation from another section waits for the real chat module and k
 }) => {
   await signIn(page, '/#/settings');
   await page
-    .getByRole('complementary', { name: 'Workspace sidebar' })
+    .getByRole('complementary', { name: 'Primary navigation' })
     .getByRole('button', { name: 'New conversation' })
     .click();
   await expect(page.getByRole('heading', { name: 'New chat', exact: true })).toBeVisible();
@@ -800,19 +831,24 @@ test('new conversation from another section waits for the real chat module and k
   expect(writes).toEqual(['/v1/web/conversations', expect.stringMatching(/\/messages\/stream$/)]);
   await page.reload();
   await expect(page.getByRole('link', { name: firstMessage })).toBeVisible();
-  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.getByRole('button', { name: `Actions for ${firstMessage}` }).click();
+  await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await page.getByRole('button', { name: 'Delete permanently' }).click();
 });
 
-test('mobile menu morphs into a close state and its drawer closes outside or with Escape', async ({
+test('mobile bottom navigation exposes chat history and dismissible Explore navigation', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page);
-  const trigger = page.getByRole('button', { name: 'Open navigation' });
-  const initialBox = await trigger.boundingBox();
-  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
-  await trigger.click();
+  const navigation = page.getByRole('navigation', { name: 'Mobile navigation' });
+  await expect(navigation).toBeVisible();
+  const chats = navigation.getByRole('button', { name: 'Chats' });
+  const explore = navigation.getByRole('button', { name: 'Explore' });
+  await chats.click();
+  await expect(page.getByRole('complementary', { name: 'Conversation sidebar' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'New conversation' }).first()).toBeVisible();
+  await explore.click();
   const dialog = page.getByRole('dialog', { name: 'Workspace navigation' });
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveCSS('animation-name', 'th-drawer-in');
@@ -820,21 +856,11 @@ test('mobile menu morphs into a close state and its drawer closes outside or wit
     (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
       .violations
   ).toEqual([]);
-  await expect(page.getByTestId('navigation-trigger')).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.locator('.th-menu-top')).toHaveClass(/is-open/);
   await expect(dialog.getByRole('link', { name: 'AI Workspace' })).toBeFocused();
-  await page.mouse.click(370, 420);
-  await expect(dialog).toHaveClass(/is-closing/);
-  await expect(dialog).toHaveCSS('animation-name', 'th-drawer-out');
-  await expect(dialog).toHaveCount(0);
-  await expect(page.getByTestId('navigation-trigger')).toBeFocused();
-  expect(await page.getByTestId('navigation-trigger').boundingBox()).toEqual(initialBox);
-  await page.getByRole('button', { name: 'Open navigation' }).click();
-  await expect(dialog).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(dialog).toHaveClass(/is-closing/);
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByTestId('navigation-trigger')).toBeFocused();
+  await expect(explore).toBeFocused();
+  await expect(chats).toHaveAttribute('aria-current', 'page');
 });
 
 test('notifications unfold from the fixed bell and reverse without trapping focus', async ({
@@ -868,7 +894,7 @@ test('notifications unfold from the fixed bell and reverse without trapping focu
 for (const variant of ['desktop', 'mobile', 'reduced'] as const) {
   test(`living workspace keeps one composer from welcome to transcript (${variant})`, async ({
     page,
-  }) => {
+  }, info) => {
     const mobile = variant === 'mobile';
     const size = mobile ? { width: 390, height: 844 } : { width: 1280, height: 880 };
     await page.setViewportSize(size);
@@ -904,6 +930,11 @@ for (const variant of ['desktop', 'mobile', 'reduced'] as const) {
         ).toEqual([]);
       } else {
         await expect(page.locator('[data-pulse-in-flight]')).toHaveCount(1);
+        if (assetDir) {
+          await page.screenshot({ path: info.outputPath(`${variant}-startup-start.png`) });
+          await page.waitForTimeout(280);
+          await page.screenshot({ path: info.outputPath(`${variant}-startup-flight.png`) });
+        }
         expect(await startup.evaluate(el => getComputedStyle(el).pointerEvents)).toBe('none');
         await expect(startup).toHaveCount(0);
       }
@@ -990,6 +1021,7 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
     [1024, 768],
     [768, 1024],
     [390, 844],
+    [375, 812],
     [720, 450], // 1440×900 at 200% zoom exposes a 720×450 CSS-pixel viewport.
   ]) {
     await page.setViewportSize({ width, height });
@@ -1014,7 +1046,7 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
                 .querySelector<HTMLElement>('[data-testid="navigation-highlight"]')
                 ?.getBoundingClientRect();
               const active = document
-                .querySelector<HTMLElement>('aside [aria-current="page"]')
+                .querySelector<HTMLElement>('.th-v4-nav-rail [aria-current="page"]')
                 ?.getBoundingClientRect();
               return highlight && active
                 ? Math.abs(highlight.y - active.y)
@@ -1025,7 +1057,7 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
       }
       const metrics = await page.evaluate(() => {
         const main = document.querySelector<HTMLElement>('#main-content')!;
-        const sidebar = document.querySelector<HTMLElement>('aside')!;
+        const sidebar = document.querySelector<HTMLElement>('.th-v4-nav-rail')!;
         const header = document.querySelector<HTMLElement>('header')!;
         const shell = document.querySelector<HTMLElement>('.th-workspace')!;
         return {
@@ -1047,7 +1079,7 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
             ?.getBoundingClientRect()
             .toJSON(),
           activeNav: document
-            .querySelector<HTMLElement>('aside [aria-current="page"]')
+            .querySelector<HTMLElement>('.th-v4-nav-rail [aria-current="page"]')
             ?.getBoundingClientRect()
             .toJSON(),
         };
@@ -1060,8 +1092,8 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
         height + 1
       );
       expect(metrics.shell).toBe(height);
-      expect(metrics.sidebar).toBe(width >= 1024 ? 252 : 0);
-      if (width >= 1024) {
+      expect(metrics.sidebar).toBe(width >= 1200 ? 68 : 0);
+      if (width >= 1200) {
         expect(metrics.navHighlight).toBeDefined();
         expect(metrics.activeNav).toBeDefined();
         expect(metrics.navHighlight!.y).toBeCloseTo(metrics.activeNav!.y, 0);
@@ -1087,11 +1119,18 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
       await expect(page.locator('#main-content')).toHaveJSProperty('scrollTop', 0);
     }
   }
-  await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page
+    .getByRole('navigation', { name: 'Mobile navigation' })
+    .getByRole('button', { name: 'Explore' })
+    .click();
   await expect(page.getByRole('dialog', { name: 'Workspace navigation' })).toBeVisible();
   await expect(page.getByRole('dialog').getByRole('link', { name: 'AI Workspace' })).toBeFocused();
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('button', { name: 'Open navigation' })).toBeFocused();
+  await expect(
+    page
+      .getByRole('navigation', { name: 'Mobile navigation' })
+      .getByRole('button', { name: 'Explore' })
+  ).toBeFocused();
   expect(
     (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
       .violations
@@ -1104,7 +1143,11 @@ test('long conversation history scrolls inside the chat without moving the appli
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1280, height: 800 });
   await signIn(page, '/#/ai-workspace');
-  await createConversation(page, 'Long history layout verification');
+  const firstId = await createConversationRecord(page, 'Long history layout verification');
+  await createConversationRecord(page, 'Second scroll restoration conversation');
+  await page.goto(`/#/ai-workspace?conversation=${firstId}`);
+  await page.reload();
+  await expect(page.getByTestId('chat-title')).toHaveText('Long history layout verification');
   for (let index = 0; index < 5; index++) {
     await send(page, `Layout history item ${index}: ${'a detailed prompt '.repeat(16)}`);
     await expect(page.getByRole('heading', { name: 'Fixture response' })).toHaveCount(index + 1);
@@ -1124,6 +1167,20 @@ test('long conversation history scrolls inside the chat without moving the appli
   expect(await page.locator('header').evaluate(el => el.getBoundingClientRect().top)).toBe(
     headerTop
   );
+  await history.evaluate(el => {
+    el.scrollTop = 0;
+  });
+  await expect.poll(() => history.evaluate(el => el.scrollTop)).toBe(0);
+  await page
+    .getByRole('complementary', { name: 'Conversation sidebar' })
+    .getByRole('link', { name: 'Second scroll restoration conversation' })
+    .click();
+  await expect(page.getByTestId('chat-title')).toHaveText('Second scroll restoration conversation');
+  await page
+    .getByRole('complementary', { name: 'Conversation sidebar' })
+    .getByRole('link', { name: 'Long history layout verification' })
+    .click();
+  await expect.poll(() => history.evaluate(el => el.scrollTop)).toBe(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toBeVisible();
   await history.scrollIntoViewIfNeeded();
@@ -1176,13 +1233,24 @@ test('captures the approved desktop and mobile design and checks accessibility',
   await page.screenshot({ path: info.outputPath('desktop-conversation.png') });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByTestId('chat-title')).toHaveText('Web Alpha verification');
-  await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page
+    .getByRole('navigation', { name: 'Mobile navigation' })
+    .getByRole('button', { name: 'Chats' })
+    .click();
   await expect(
-    page.getByRole('dialog').getByRole('link', { name: 'Web Alpha verification' })
+    page
+      .getByRole('complementary', { name: 'Conversation sidebar' })
+      .getByRole('link', { name: 'Web Alpha verification' })
   ).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.screenshot({
+    path: info.outputPath('mobile-conversation-history.png'),
+    fullPage: true,
+  });
+  await page
+    .getByRole('complementary', { name: 'Conversation sidebar' })
+    .getByRole('link', { name: 'Web Alpha verification' })
+    .click();
   await page.screenshot({ path: info.outputPath('mobile-conversation.png'), fullPage: true });
 });
 

@@ -188,6 +188,10 @@ export default function ConversationWorkspace({
   const createUncertain = useRef(false);
   const followLatest = useRef(true);
   const previousConversation = useRef<string | null>(null);
+  const scrollPositions = useRef(new Map<string, number>());
+  const followLatestByConversation = useRef(new Map<string, boolean>());
+  const pendingScrollRestore = useRef<{ id: string | null; top: number } | null>(null);
+  const animatedConversation = useRef<string | null>(null);
   const activeSend = useRef(new Set<string>());
   const activeStream = useRef<AbortController | null>(null);
   const fieldId = useId();
@@ -302,8 +306,19 @@ export default function ConversationWorkspace({
   useLayoutEffect(() => {
     if (!active || !log.current) return;
     const switched = previousConversation.current !== id;
-    previousConversation.current = id;
-    if (switched) followLatest.current = true;
+    if (switched) {
+      previousConversation.current = id;
+      const key = id ?? '__new__';
+      followLatest.current = followLatestByConversation.current.get(key) ?? true;
+      const savedTop = scrollPositions.current.get(key);
+      pendingScrollRestore.current = savedTop === undefined ? null : { id, top: savedTop };
+    }
+    if (pendingScrollRestore.current?.id === id) {
+      if (detail.isPending) return;
+      log.current.scrollTop = pendingScrollRestore.current.top;
+      pendingScrollRestore.current = null;
+      return;
+    }
     if (followLatest.current)
       log.current.scrollTo({
         top: log.current.scrollHeight,
@@ -312,7 +327,29 @@ export default function ConversationWorkspace({
             ? 'instant'
             : 'smooth',
       });
-  }, [active, awaitingHistory, id, live?.partial, messages, reduced]);
+  }, [active, awaitingHistory, detail.isPending, id, live?.partial, messages, reduced]);
+
+  useLayoutEffect(() => {
+    if (animatedConversation.current === null) {
+      animatedConversation.current = id;
+      return;
+    }
+    if (!active) {
+      animatedConversation.current = id;
+      return;
+    }
+    if (animatedConversation.current === id) return;
+    animatedConversation.current = id;
+    if (reduced || matchMedia('(prefers-reduced-motion: reduce)').matches || !log.current) return;
+    const animation = log.current.animate(
+      [
+        { opacity: 0.82, transform: 'translateY(5px)' },
+        { opacity: 1, transform: 'none' },
+      ],
+      { duration: 220, easing: 'cubic-bezier(.22,.8,.27,1)' }
+    );
+    return () => animation.cancel();
+  }, [active, id, reduced]);
 
   const command = useMutation({
     mutationFn: (text: string) => api.create({ title: titleFromMessage(text) }),
@@ -601,7 +638,11 @@ export default function ConversationWorkspace({
             tabIndex={snapshot?.messages.length ? 0 : undefined}
             onScroll={event => {
               const el = event.currentTarget;
-              followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+              const isFollowing = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+              const key = id ?? '__new__';
+              scrollPositions.current.set(key, el.scrollTop);
+              followLatest.current = isFollowing;
+              followLatestByConversation.current.set(key, isFollowing);
             }}
             className="th-v4-message-log flex min-h-[230px] flex-1 flex-col gap-7 overflow-y-auto p-5"
           >
