@@ -36,6 +36,12 @@ DEFAULT_PASSWORD_HASH_ITERATIONS = 600_000
 MAX_LOGIN_BODY_BYTES = 4096
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _CSRF_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_WEB_ATTACHMENT_UPLOAD_PATH_RE = re.compile(
+    r"^/v1/web/conversations/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/attachments$"
+)
+_WEB_ATTACHMENT_MEDIA_TYPES = frozenset(
+    {"image/png", "image/jpeg", "application/pdf"}
+)
 
 
 class WebAuthConfigurationError(ValueError):
@@ -473,10 +479,21 @@ def require_web_session(request: Request) -> WebPrincipal:
     assert context.config is not None and context.store is not None
     session_id, session = _request_cookie_session(request, context)
     if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
-        content_type = request.headers.get("content-type", "").split(";", 1)[0]
-        if content_type.strip().lower() != "application/json":
+        content_type = (
+            request.headers.get("content-type", "")
+            .split(";", 1)[0]
+            .strip()
+            .lower()
+        )
+        is_allowed_attachment = (
+            request.method.upper() == "POST"
+            and _WEB_ATTACHMENT_UPLOAD_PATH_RE.fullmatch(request.url.path)
+            and content_type in _WEB_ATTACHMENT_MEDIA_TYPES
+        )
+        if content_type != "application/json" and not is_allowed_attachment:
             raise HTTPException(
-                status_code=415, detail="Content-Type must be application/json"
+                status_code=415,
+                detail="Content-Type must be application/json or an allowed attachment type",
             )
         _validate_request_origin(request, context.config)
         csrf = request.headers.get("x-thozha-csrf", "")

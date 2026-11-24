@@ -254,11 +254,11 @@ exclude = [
 ]
 # The publishing workflow builds this UI before packaging. Keep its generated
 # files even though the directory is intentionally ignored by Git.
-artifacts = ["/src/openjarvis/server/static/**"]
+artifacts = ["/src/openjarvis/server/static/**", "/src/openjarvis/server/*.swift"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/openjarvis"]
-artifacts = ["/src/openjarvis/server/static/**"]
+artifacts = ["/src/openjarvis/server/static/**", "/src/openjarvis/server/*.swift"]
 exclude = [
     "/src/openjarvis/agents/claude_code_runner",
 ]

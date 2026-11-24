@@ -48,6 +48,30 @@ export interface WebMessage {
   error_code: string | null;
   created_at: string;
   updated_at: string;
+  attachment_ids?: string[];
+  attachments?: WebAttachmentMetadata[];
+}
+
+export interface WebMessageCreate {
+  content: string;
+  /** Uploaded, owner-scoped OCR/PDF text is included in context; max 5 IDs. */
+  attachment_ids?: string[];
+}
+
+/** Metadata only; OCR text and raw bytes are not part of conversation responses. */
+export interface WebAttachmentMetadata {
+  id: string;
+  file_name: string;
+  media_type: "image/png" | "image/jpeg" | "application/pdf";
+  size_bytes: number;
+  sha256: string;
+  page_count: number;
+  created_at: string;
+}
+
+export interface WebAttachmentUploadResult {
+  attachment: WebAttachmentMetadata;
+  replayed: boolean;
 }
 
 export interface WebConversationEvent {
