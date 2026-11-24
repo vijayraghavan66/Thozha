@@ -368,7 +368,43 @@ def _approval_payload(item: dict[str, Any]) -> dict[str, Any]:
 async def create_pairing_invitation(request: Request) -> dict[str, Any]:
     _authorize_local_pair_ui(request, state_changing=True)
     store = get_supervisor_store()
-    transport, body = await _pair_invitation_request(request)
+    transport, _body = await _pair_invitation_request(request)
+    payload = create_signed_pairing_qr(store, request, transport=transport)
+    return JSONResponse(content=payload, headers={"Cache-Control": "no-store"})
+
+
+async def _pair_invitation_request(request: Request) -> tuple[str, dict[str, Any]]:
+    """Accept no body (legacy loopback pairing) or an explicit Wi-Fi request only."""
+    content_length = request.headers.get("content-length", "0")
+    try:
+        if int(content_length or "0") > 1024:
+            raise HTTPException(status_code=413, detail="Pairing request is too large")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid pairing request length") from exc
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 1024:
+            raise HTTPException(status_code=413, detail="Pairing request is too large")
+    if not raw:
+        return "loopback", {}
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(status_code=415, detail="Pairing request must be JSON")
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid pairing request JSON") from exc
+    if not isinstance(value, dict) or set(value) != {"transport"} or value.get("transport") != "wifi":
+        raise HTTPException(status_code=422, detail="Only an explicit {transport: wifi} request is supported")
+    return "wifi", value
+
+
+def create_signed_pairing_qr(
+    store: Any, request: Request, *, transport: str
+) -> dict[str, Any]:
+    """Create the same signed QR payload for the local Mac UI or authenticated Web owner."""
+    if transport not in {"loopback", "wifi"}:
+        raise HTTPException(status_code=422, detail="Unsupported pairing transport")
     private_key, public_der, server_fingerprint = _pairing_server_identity(store)
     import base64
     from cryptography.hazmat.primitives import hashes
@@ -404,36 +440,7 @@ async def create_pairing_invitation(request: Request) -> dict[str, Any]:
     qr_payload["server_signature"] = base64.b64encode(
         private_key.sign(canonical, ec.ECDSA(hashes.SHA256()))
     ).decode("ascii")
-    return JSONResponse(
-        content={**qr_payload, "qr_payload": qr_payload},
-        headers={"Cache-Control": "no-store"},
-    )
-
-
-async def _pair_invitation_request(request: Request) -> tuple[str, dict[str, Any]]:
-    """Accept no body (legacy loopback pairing) or an explicit Wi-Fi request only."""
-    content_length = request.headers.get("content-length", "0")
-    try:
-        if int(content_length or "0") > 1024:
-            raise HTTPException(status_code=413, detail="Pairing request is too large")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid pairing request length") from exc
-    raw = bytearray()
-    async for chunk in request.stream():
-        raw.extend(chunk)
-        if len(raw) > 1024:
-            raise HTTPException(status_code=413, detail="Pairing request is too large")
-    if not raw:
-        return "loopback", {}
-    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
-        raise HTTPException(status_code=415, detail="Pairing request must be JSON")
-    try:
-        value = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid pairing request JSON") from exc
-    if not isinstance(value, dict) or set(value) != {"transport"} or value.get("transport") != "wifi":
-        raise HTTPException(status_code=422, detail="Only an explicit {transport: wifi} request is supported")
-    return "wifi", value
+    return {**qr_payload, "qr_payload": qr_payload}
 
 
 def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:

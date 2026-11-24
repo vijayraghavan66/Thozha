@@ -13,7 +13,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, StrictBool
@@ -30,6 +30,22 @@ class DeviceRevokeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PairingInvitationRequest(BaseModel):
+    transport: Literal["wifi"]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PairingDecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PairingCancelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 def _web_user_id(principal: Any) -> str:
     user_id = (
         principal.get("user_id")
@@ -38,6 +54,20 @@ def _web_user_id(principal: Any) -> str:
     )
     if not isinstance(user_id, str) or not user_id.strip():
         raise HTTPException(status_code=401, detail="Invalid Web session principal")
+    return user_id
+
+
+def _require_supervisor_owner(request: Request, principal: Any) -> str:
+    """Require the authenticated Web principal to be the owner of this Mac store."""
+    context = getattr(request.app.state, "thozha_web_auth", None)
+    config = getattr(context, "config", None)
+    owner_id = getattr(config, "owner_id", None)
+    user_id = _web_user_id(principal)
+    if not isinstance(owner_id, str) or not owner_id:
+        raise HTTPException(status_code=503, detail="Web pairing owner is unavailable")
+    if user_id != owner_id:
+        # Keep installation ownership opaque; do not reveal another account's status.
+        raise HTTPException(status_code=404, detail="Pairing request not found")
     return user_id
 
 
@@ -174,6 +204,21 @@ def create_web_devices_router(
         response.headers["Cache-Control"] = "no-store"
         return {"devices": devices, "count": len(devices)}
 
+    @router.get("/pairing-requests")
+    async def list_pairing_requests(
+        request: Request,
+        response: Response,
+        limit: int = 50,
+        principal=Depends(require_web_session),
+    ):
+        _require_supervisor_owner(request, principal)
+        if not 1 <= limit <= 100:
+            raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+        store = get_store(request)
+        requests = store.pending_device_pairings(limit)
+        response.headers["Cache-Control"] = "no-store"
+        return {"requests": requests, "count": len(requests)}
+
     @router.get("/{device_id}")
     async def get_device(
         device_id: str,
@@ -197,6 +242,83 @@ def create_web_devices_router(
             raise HTTPException(status_code=404, detail="Paired device not found")
         response.headers["Cache-Control"] = "no-store"
         return device
+
+    @router.post("/pairing-invitations")
+    async def create_pairing_invitation(
+        request: Request,
+        body: PairingInvitationRequest,
+        response: Response,
+        principal=Depends(require_web_session),
+    ):
+        _require_supervisor_owner(request, principal)
+        store = get_store(request)
+        from openjarvis.server.supervisor_routes import create_signed_pairing_qr
+
+        qr = create_signed_pairing_qr(store, request, transport=body.transport)
+        response.headers["Cache-Control"] = "no-store"
+        return qr
+
+    @router.post("/pairing-requests/{invitation_id}/decision")
+    async def decide_pairing_request(
+        invitation_id: str,
+        request: Request,
+        body: PairingDecisionRequest,
+        response: Response,
+        principal=Depends(require_web_session),
+    ):
+        _require_supervisor_owner(request, principal)
+        if not _DEVICE_ID_RE.fullmatch(invitation_id):
+            raise HTTPException(status_code=404, detail="Pairing request not found")
+        store = get_store(request)
+        try:
+            status = store.decide_device_pairing(invitation_id, body.decision)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Pairing request not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail="Pairing request is no longer pending") from exc
+        response.headers["Cache-Control"] = "no-store"
+        return {"invitation_id": invitation_id, "status": status}
+
+    @router.post("/pairing-invitations/{invitation_id}/cancel")
+    async def cancel_pairing_invitation(
+        invitation_id: str,
+        request: Request,
+        body: PairingCancelRequest,
+        response: Response,
+        principal=Depends(require_web_session),
+    ):
+        _require_supervisor_owner(request, principal)
+        if not _DEVICE_ID_RE.fullmatch(invitation_id):
+            raise HTTPException(status_code=404, detail="Pairing invitation not found")
+        store = get_store(request)
+        try:
+            status = store.cancel_device_pairing(invitation_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Pairing invitation not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail="Pairing invitation was already claimed") from exc
+        response.headers["Cache-Control"] = "no-store"
+        return {"invitation_id": invitation_id, "status": status}
+
+    @router.get("/pairing-invitations/{invitation_id}")
+    async def get_pairing_invitation(
+        invitation_id: str,
+        request: Request,
+        response: Response,
+        principal=Depends(require_web_session),
+    ):
+        _require_supervisor_owner(request, principal)
+        if not _DEVICE_ID_RE.fullmatch(invitation_id):
+            raise HTTPException(status_code=404, detail="Pairing invitation not found")
+        store = get_store(request)
+        try:
+            status = store.device_pairing_status(invitation_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Pairing invitation not found") from exc
+        # The Web owner sees status only. The temporary claim challenge remains
+        # available exclusively through the invitation-scoped Android API.
+        response.headers["Cache-Control"] = "no-store"
+        return {"invitation_id": invitation_id, "status": status["status"]}
 
     @router.post("/{device_id}/revoke")
     async def revoke_device(
@@ -292,4 +414,9 @@ def create_web_devices_router(
     return router
 
 
-__all__ = ["DeviceRevokeRequest", "create_web_devices_router"]
+__all__ = [
+    "DeviceRevokeRequest",
+    "PairingDecisionRequest",
+    "PairingInvitationRequest",
+    "create_web_devices_router",
+]

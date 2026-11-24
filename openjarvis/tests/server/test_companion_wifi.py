@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import contextlib
 import subprocess
@@ -21,7 +22,7 @@ from fastapi.testclient import TestClient
 import openjarvis.server.companion_wifi as wifi
 from openjarvis.server.companion_wifi import ensure_local_gateway_tls_identity, validate_wifi_bind_host
 from openjarvis.server import companion_wifi_gateway
-from openjarvis.server.supervisor_routes import _canonical_pairing_payload, router
+from openjarvis.server.supervisor_routes import _canonical_pairing_payload, _pairing_server_identity, router
 from openjarvis.tasks.supervisor import SupervisorStore
 
 
@@ -320,6 +321,234 @@ def _pairing_test_client(tmp_path, monkeypatch):
     app.include_router(router)
     client = TestClient(app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 12345))
     return client, store
+
+
+def _android_pairing_proof(challenge: str):
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key_b64 = base64.b64encode(private_key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo,
+    )).decode("ascii")
+    signature_b64 = base64.b64encode(
+        private_key.sign(challenge.encode("utf-8"), ec.ECDSA(hashes.SHA256()))
+    ).decode("ascii")
+    return private_key, public_key_b64, signature_b64
+
+
+def test_v2_pairing_vector_matches_the_android_parser_contract():
+    vector_path = Path(__file__).parents[1] / "fixtures" / "pairing_v2_cross_language.test.json"
+    payload = json.loads(vector_path.read_text(encoding="utf-8"))
+    unsigned = dict(payload)
+    signature = base64.b64decode(unsigned.pop("server_signature"), validate=True)
+    public_der = base64.b64decode(unsigned["server_public_key"], validate=True)
+    public_key = serialization.load_der_public_key(public_der)
+    assert payload["server_fingerprint"] == "sha256:" + hashlib.sha256(public_der).hexdigest()
+    public_key.verify(signature, _canonical_pairing_payload(unsigned), ec.ECDSA(hashes.SHA256()))
+
+    tampered = dict(unsigned, gateway_address="192.168.1.45")
+    with pytest.raises(InvalidSignature):
+        public_key.verify(signature, _canonical_pairing_payload(tampered), ec.ECDSA(hashes.SHA256()))
+
+
+def test_software_android_client_completes_actual_qr_pairing_and_restarts_isolated_store(tmp_path, monkeypatch):
+    client, store = _pairing_test_client(tmp_path, monkeypatch)
+    owner_headers = {"Origin": "http://127.0.0.1:8000"}
+
+    created = client.post("/v1/jarvis/pair/invitations", headers=owner_headers)
+    assert created.status_code == 200
+    assert created.headers["cache-control"] == "no-store"
+    payload = created.json()["qr_payload"]
+    assert payload["protocol"] == "openjarvis-pairing-v1"
+    assert payload["server_url"] == "http://127.0.0.1:8000"
+    assert payload["expires_at"]
+    unsigned_payload = dict(payload)
+    server_signature = base64.b64decode(unsigned_payload.pop("server_signature"), validate=True)
+    server_public_der = base64.b64decode(unsigned_payload["server_public_key"], validate=True)
+    server_public_key = serialization.load_der_public_key(server_public_der)
+    assert payload["server_fingerprint"] == "sha256:" + hashlib.sha256(server_public_der).hexdigest()
+    server_public_key.verify(server_signature, _canonical_pairing_payload(unsigned_payload), ec.ECDSA(hashes.SHA256()))
+    tampered = dict(unsigned_payload, server_url="http://attacker.invalid:8000")
+    with pytest.raises(InvalidSignature):
+        server_public_key.verify(server_signature, _canonical_pairing_payload(tampered), ec.ECDSA(hashes.SHA256()))
+
+    # The Android app's first network call happens only after QR verification
+    # and an explicit Request pairing action; it proves possession of a fresh key.
+    phone_key, phone_public_b64, phone_signature_b64 = _android_pairing_proof(payload["challenge"])
+    invitation_id = payload["invitation_id"]
+    requested = client.post("/v1/jarvis/pair/complete", json={
+        "invitation_id": invitation_id,
+        "device_name": "Isolated Android protocol test",
+        "public_key": phone_public_b64,
+        "signature": phone_signature_b64,
+    })
+    assert requested.status_code == 200
+    assert requested.json()["status"] == "PENDING_CONFIRMATION"
+    assert "access_token" not in requested.json()
+
+    pending = client.get("/v1/jarvis/pair/pending")
+    assert pending.status_code == 200
+    item = next(row for row in pending.json()["requests"] if row["id"] == invitation_id)
+    assert item["device_name"] == "Isolated Android protocol test"
+    assert item["device_fingerprint"].startswith("SHA256:")
+
+    owner_decision = client.post(
+        f"/v1/jarvis/pair/{invitation_id}/decision",
+        headers=owner_headers,
+        json={"decision": "approve"},
+    )
+    assert owner_decision.status_code == 200
+    assert owner_decision.json() == {"invitation_id": invitation_id, "status": "APPROVED"}
+
+    status = client.get(f"/v1/jarvis/pair/status/{invitation_id}")
+    assert status.status_code == 200
+    claim_challenge = status.json()["claim_challenge"]
+    claim_signature = base64.b64encode(
+        phone_key.sign(claim_challenge.encode("utf-8"), ec.ECDSA(hashes.SHA256()))
+    ).decode("ascii")
+    claimed = client.post("/v1/jarvis/pair/claim", json={
+        "invitation_id": invitation_id,
+        "signature": claim_signature,
+    })
+    assert claimed.status_code == 200
+    credentials = claimed.json()
+    assert credentials["device_id"]
+    access_token = credentials["access_token"]
+    token_hash = hashlib.sha256(access_token.encode("utf-8")).hexdigest()
+    assert store._db.execute(
+        "SELECT 1 FROM paired_devices WHERE id=? AND token_hash=? AND revoked_at IS NULL",
+        (credentials["device_id"], token_hash),
+    ).fetchone()
+    assert store._db.execute(
+        "SELECT 1 FROM paired_devices WHERE id=? AND token_hash=?",
+        (credentials["device_id"], access_token),
+    ).fetchone() is None
+    assert store.authenticate_device_token(access_token) == credentials["device_id"]
+    assert client.post("/v1/jarvis/pair/claim", json={
+        "invitation_id": invitation_id,
+        "signature": claim_signature,
+    }).status_code == 409
+
+    db_path = tmp_path / "supervisor.db"
+    store.close()
+    reopened = SupervisorStore(str(db_path))
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", reopened)
+    assert reopened.device_pairing_status(invitation_id)["status"] == "TOKEN_ISSUED"
+    assert reopened.authenticate_device_token(access_token) == credentials["device_id"]
+    assert reopened.revoke_device(credentials["device_id"])
+    assert reopened.authenticate_device_token(access_token) is None
+    reopened.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
+def test_pairing_api_rejects_wrong_device_duplicate_proof_expiry_and_remote_owner(tmp_path, monkeypatch):
+    client, store = _pairing_test_client(tmp_path, monkeypatch)
+    owner_headers = {"Origin": "http://127.0.0.1:8000"}
+    created = client.post("/v1/jarvis/pair/invitations", headers=owner_headers)
+    payload = created.json()["qr_payload"]
+    invitation_id = payload["invitation_id"]
+    _wrong_key, _wrong_public, wrong_signature = _android_pairing_proof(payload["challenge"])
+    # Bind a different device public key to the signed request: proof must fail.
+    other_key = ec.generate_private_key(ec.SECP256R1())
+    other_public = base64.b64encode(other_key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo,
+    )).decode("ascii")
+    wrong_device = client.post("/v1/jarvis/pair/complete", json={
+        "invitation_id": invitation_id,
+        "device_name": "Wrong identity",
+        "public_key": other_public,
+        "signature": wrong_signature,
+    })
+    assert wrong_device.status_code == 409
+    assert store.device_pairing_status(invitation_id)["status"] == "INVITED"
+
+    _phone_key, phone_public, phone_signature = _android_pairing_proof(payload["challenge"])
+    valid_body = {
+        "invitation_id": invitation_id,
+        "device_name": "Retry after invalid proof",
+        "public_key": phone_public,
+        "signature": phone_signature,
+    }
+    assert client.post("/v1/jarvis/pair/complete", json=valid_body).status_code == 200
+    assert client.post("/v1/jarvis/pair/complete", json=valid_body).status_code == 409
+
+    # Same-origin and loopback are required for the Mac-owner decision surface.
+    remote = TestClient(app=client.app, base_url="http://192.168.1.4:8000", client=("192.168.1.4", 12345))
+    assert remote.get("/v1/jarvis/pair/pending").status_code == 403
+    assert remote.post(
+        f"/v1/jarvis/pair/{invitation_id}/decision",
+        headers=owner_headers,
+        json={"decision": "approve"},
+    ).status_code == 403
+
+    # An unrelated invitation expiring is terminal and cannot be completed.
+    expired_id, expired_challenge, _expires = store.begin_device_pairing()
+    with store._tx() as db:
+        db.execute(
+            "UPDATE device_pairings SET expires_at=? WHERE id=?",
+            ("2000-01-01T00:00:00+00:00", expired_id),
+        )
+    assert client.get(f"/v1/jarvis/pair/status/{expired_id}").json()["status"] == "EXPIRED"
+    _expired_key, expired_public, expired_signature = _android_pairing_proof(expired_challenge)
+    expired = client.post("/v1/jarvis/pair/complete", json={
+        "invitation_id": expired_id,
+        "device_name": "Expired test identity",
+        "public_key": expired_public,
+        "signature": expired_signature,
+    })
+    assert expired.status_code == 409
+    store.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
+def test_pairing_owner_rejection_never_issues_device_credentials(tmp_path, monkeypatch):
+    client, store = _pairing_test_client(tmp_path, monkeypatch)
+    owner_headers = {"Origin": "http://127.0.0.1:8000"}
+    invitation = client.post("/v1/jarvis/pair/invitations", headers=owner_headers).json()["qr_payload"]
+    _phone_key, public_key, signature = _android_pairing_proof(invitation["challenge"])
+    requested = client.post("/v1/jarvis/pair/complete", json={
+        "invitation_id": invitation["invitation_id"],
+        "device_name": "Rejected isolated test device",
+        "public_key": public_key,
+        "signature": signature,
+    })
+    assert requested.status_code == 200
+    rejected = client.post(
+        f"/v1/jarvis/pair/{invitation['invitation_id']}/decision",
+        headers=owner_headers,
+        json={"decision": "reject"},
+    )
+    assert rejected.status_code == 200
+    assert rejected.json()["status"] == "REJECTED"
+    assert client.get(f"/v1/jarvis/pair/status/{invitation['invitation_id']}").json()["status"] == "REJECTED"
+    assert client.post("/v1/jarvis/pair/claim", json={
+        "invitation_id": invitation["invitation_id"],
+        "signature": signature,
+    }).status_code == 409
+    assert store._db.execute("SELECT COUNT(*) FROM paired_devices").fetchone()[0] == 0
+    assert client.post(
+        f"/v1/jarvis/pair/{invitation['invitation_id']}/decision",
+        headers=owner_headers,
+        json={"decision": "approve"},
+    ).status_code == 409
+    store.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
+def test_concurrent_isolated_pairing_requests_receive_distinct_invitation_ids(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    _client, store = _pairing_test_client(tmp_path, monkeypatch)
+    # Create the local identity before concurrency so the test focuses on the
+    # supervisor's invitation transaction, not first-run key-file creation.
+    _pairing_server_identity(store)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        invitations = list(executor.map(lambda _index: store.begin_device_pairing(), range(32)))
+    ids = [invitation[0] for invitation in invitations]
+    assert len(ids) == len(set(ids)) == 32
+    assert store._db.execute(
+        "SELECT COUNT(*) FROM device_pairings WHERE status='INVITED'",
+    ).fetchone()[0] == 32
+    store.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
 
 
 def test_wifi_qr_creation_stays_loopback_origin_guarded_and_v1_default(tmp_path, monkeypatch):

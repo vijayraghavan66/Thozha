@@ -246,6 +246,67 @@ export interface WebDeviceRevokeResult {
   notification_token_cleanup: "none" | "revoked";
 }
 
+export interface WebPairingInvitationCreate {
+  transport: "wifi";
+}
+
+export interface PairingQrPayloadV2 {
+  protocol: "openjarvis-pairing-v2";
+  server_url: string;
+  gateway_address: string;
+  gateway_port: "8443";
+  gateway_certificate_sha256: string;
+  server_fingerprint: string;
+  server_public_key: string;
+  invitation_id: string;
+  challenge: string;
+  expires_at: string;
+  server_signature: string;
+}
+
+export interface WebPairingInvitationResponse extends PairingQrPayloadV2 {
+  qr_payload: PairingQrPayloadV2;
+}
+
+export type PairingLifecycle =
+  | "INVITED"
+  | "PENDING_CONFIRMATION"
+  | "APPROVED"
+  | "REJECTED"
+  | "EXPIRED"
+  | "CANCELLED"
+  | "TOKEN_ISSUED";
+
+export interface WebPairingRequest {
+  id: string;
+  status: "PENDING_CONFIRMATION";
+  device_name: string;
+  device_fingerprint: string;
+  requested_at: string | null;
+  expires_at: string;
+}
+
+export interface WebPairingRequestList {
+  requests: WebPairingRequest[];
+  count: number;
+}
+
+export interface WebPairingDecision {
+  decision: "approve" | "reject";
+}
+
+export type WebPairingCancelRequest = Record<string, never>;
+
+export interface WebPairingDecisionResult {
+  invitation_id: string;
+  status: "APPROVED" | "REJECTED" | "EXPIRED" | "CANCELLED";
+}
+
+export interface WebPairingInvitationStatus {
+  invitation_id: string;
+  status: PairingLifecycle;
+}
+
 export interface WebArtifact {
   artifact_id: string;
   task_id: string;
@@ -325,5 +386,7 @@ export const WEB_API_V1 = {
   readiness: "/v1/web/supervisor/readiness",
   approvals: "/v1/web/approvals",
   devices: "/v1/web/devices",
+  pairingInvitations: "/v1/web/devices/pairing-invitations",
+  pairingRequests: "/v1/web/devices/pairing-requests",
   automations: "/v1/web/automations",
 } as const;
