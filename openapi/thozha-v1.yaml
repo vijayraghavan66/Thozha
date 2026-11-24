@@ -744,6 +744,134 @@ paths:
               schema: { $ref: '#/components/schemas/WebDeviceList' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/web/devices/pairing-invitations:
+    post:
+      operationId: createWebPairingInvitation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: browser auth is configured and a private Wi-Fi gateway is verified
+      tags: [companion]
+      description: >
+        Creates a five-minute signed Wi-Fi QR invitation for the authenticated
+        owner of this Mac installation. The endpoint fails closed unless the
+        configured private Wi-Fi address, SSID, pinned gateway certificate,
+        and gateway listener are verified. It never creates a loopback-only QR
+        through the Web UI and does not add the resulting phone to the separate
+        THOZHA_WEB_ALLOWED_DEVICE_IDS task-actor mapping.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebPairingInvitationCreate' }
+      responses:
+        '200':
+          description: Signed v2 QR payload. Response is no-store.
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebPairingInvitationResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Local Wi-Fi pairing is disabled or its configured identity/listener is unavailable.
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/devices/pairing-requests:
+    get:
+      operationId: listWebPairingRequests
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth is configured for this Mac owner
+      tags: [companion]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Unexpired devices that proved possession and await owner confirmation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebPairingRequestList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/devices/pairing-requests/{invitation_id}/decision:
+    post:
+      operationId: decideWebPairingRequest
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: browser auth is configured for this Mac owner
+      tags: [companion]
+      parameters:
+        - $ref: '#/components/parameters/PairingInvitationId'
+      description: >
+        Records the authenticated Mac installation owner's explicit decision.
+        Approve permits only the invitation-scoped phone claim; it does not
+        itself issue a device credential. Reject never creates a paired device.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebPairingDecision' }
+      responses:
+        '200':
+          description: Owner decision recorded or invitation expired before decision.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebPairingDecisionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+  /v1/web/devices/pairing-invitations/{invitation_id}:
+    get:
+      operationId: getWebPairingInvitationStatus
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth is configured for this Mac owner
+      tags: [companion]
+      parameters:
+        - $ref: '#/components/parameters/PairingInvitationId'
+      description: Returns invitation lifecycle only; never returns the phone's claim challenge or device token.
+      responses:
+        '200':
+          description: Pairing status for the invitation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebPairingInvitationStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/devices/pairing-invitations/{invitation_id}/cancel:
+    post:
+      operationId: cancelWebPairingInvitation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: browser auth is configured for this Mac owner
+      tags: [companion]
+      parameters:
+        - $ref: '#/components/parameters/PairingInvitationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebPairingCancelRequest' }
+      responses:
+        '200':
+          description: Invitation cancelled, expired, or already rejected. Issued device credentials are not revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebPairingDecisionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
   /v1/web/devices/{device_id}:
     parameters:
       - $ref: '#/components/parameters/WebDeviceId'
@@ -1465,6 +1593,11 @@ components:
       in: path
       required: true
       schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+    PairingInvitationId:
+      name: invitation_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[0-9a-f]{32}$' }
   schemas:
     Error:
       type: object
@@ -1713,6 +1846,84 @@ components:
         status: { type: string, enum: [revoked, already_revoked] }
         device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
         notification_token_cleanup: { type: string, enum: [none, revoked] }
+    WebPairingInvitationCreate:
+      type: object
+      additionalProperties: false
+      required: [transport]
+      properties:
+        transport: { type: string, const: wifi }
+    PairingQrPayloadV2:
+      type: object
+      additionalProperties: false
+      required: [protocol, server_url, gateway_address, gateway_port, gateway_certificate_sha256, server_fingerprint, server_public_key, invitation_id, challenge, expires_at, server_signature]
+      properties:
+        protocol: { type: string, const: openjarvis-pairing-v2 }
+        server_url: { type: string, format: uri }
+        gateway_address: { type: string, format: ipv4 }
+        gateway_port: { type: string, const: '8443' }
+        gateway_certificate_sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        server_fingerprint: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        server_public_key: { type: string, contentEncoding: base64 }
+        invitation_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        challenge: { type: string, minLength: 1 }
+        expires_at: { type: string, format: date-time }
+        server_signature: { type: string, contentEncoding: base64 }
+    WebPairingInvitationResponse:
+      type: object
+      additionalProperties: false
+      required: [protocol, server_url, gateway_address, gateway_port, gateway_certificate_sha256, server_fingerprint, server_public_key, invitation_id, challenge, expires_at, server_signature, qr_payload]
+      properties:
+        protocol: { type: string, const: openjarvis-pairing-v2 }
+        server_url: { type: string, format: uri }
+        gateway_address: { type: string, format: ipv4 }
+        gateway_port: { type: string, const: '8443' }
+        gateway_certificate_sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        server_fingerprint: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        server_public_key: { type: string, contentEncoding: base64 }
+        invitation_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        challenge: { type: string, minLength: 1 }
+        expires_at: { type: string, format: date-time }
+        server_signature: { type: string, contentEncoding: base64 }
+        qr_payload: { $ref: '#/components/schemas/PairingQrPayloadV2' }
+    WebPairingRequest:
+      type: object
+      required: [id, status, device_name, device_fingerprint, expires_at]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        status: { type: string, const: PENDING_CONFIRMATION }
+        device_name: { type: string, maxLength: 80 }
+        device_fingerprint: { type: string }
+        requested_at: { type: [string, 'null'], format: date-time }
+        expires_at: { type: string, format: date-time }
+    WebPairingRequestList:
+      type: object
+      required: [requests, count]
+      properties:
+        requests: { type: array, items: { $ref: '#/components/schemas/WebPairingRequest' } }
+        count: { type: integer, minimum: 0 }
+    WebPairingDecision:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+    WebPairingDecisionResult:
+      type: object
+      required: [invitation_id, status]
+      properties:
+        invitation_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        status: { type: string, enum: [APPROVED, REJECTED, EXPIRED, CANCELLED] }
+    WebPairingInvitationStatus:
+      type: object
+      required: [invitation_id, status]
+      properties:
+        invitation_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        status:
+          type: string
+          enum: [INVITED, PENDING_CONFIRMATION, APPROVED, REJECTED, EXPIRED, CANCELLED, TOKEN_ISSUED]
+    WebPairingCancelRequest:
+      type: object
+      additionalProperties: false
     WebAutomationCreate:
       type: object
       additionalProperties: false
