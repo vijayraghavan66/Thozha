@@ -147,6 +147,28 @@ paths:
               schema: { $ref: '#/components/schemas/WebConversationDetail' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: renameWebConversation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: Requires exact same-origin Origin, application/json, and X-Thozha-CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebConversationRename' }
+      responses:
+        '200':
+          description: Renamed owner-scoped conversation; title is persisted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebConversation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { description: Title is blank after trimming or exceeds the supported UTF-8 length. }
     delete:
       operationId: deleteWebConversation
       security:
@@ -1440,6 +1462,12 @@ components:
       additionalProperties: false
       properties:
         title: { type: [string, 'null'], maxLength: 160 }
+    WebConversationRename:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 160, description: Trimmed title must be non-blank and at most 160 UTF-8 bytes. }
     WebConversation:
       type: object
       properties:
@@ -1475,12 +1503,21 @@ components:
         updated_at: { type: string, format: date-time }
     WebConversationEvent:
       type: object
+      description: >
+        A completed event may include memory_context_count and memory_ids for explicit,
+        relevant chat-context memories. Memory content is never included in event details.
       properties:
         sequence: { type: integer }
         message_id: { type: string, format: uuid }
         event_type: { type: string, enum: [accepted, queued, started, completed, failed, cancelled, cancellation_requested] }
         created_at: { type: string, format: date-time }
-        details: { type: object, additionalProperties: true }
+        details:
+          type: object
+          additionalProperties: true
+          properties:
+            memory_context_count: { type: integer, minimum: 0, maximum: 3 }
+            memory_ids: { type: array, maxItems: 3, items: { type: string, pattern: '^[0-9a-f]{32}$' } }
+            error_code: { type: string }
     WebMessageAccepted:
       type: object
       required: [conversation_id, message_id, response_id, status, replayed]
@@ -1501,6 +1538,10 @@ components:
       type: object
       additionalProperties: false
       required: [content]
+      description: >
+        Memories are stored owner-scoped and are not automatically injected into chat unless
+        explicitly tagged `chat_context`. `sensitive`, `private`, `no_chat`, and
+        `never_inject` tags override that opt-in.
       properties:
         content: { type: string, minLength: 1, maxLength: 16384 }
         title: { type: [string, 'null'], maxLength: 160 }
