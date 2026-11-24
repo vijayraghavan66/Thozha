@@ -15,6 +15,8 @@ import {
   WebApiError,
   type Conversation,
   type ConversationEvent,
+  type WebAttachmentMediaType,
+  type WebAttachmentMetadata,
   type WebMessage,
   type WorkspaceApi,
 } from '../api/client';
@@ -54,8 +56,79 @@ const failures: Record<string, string> = {
   generation_failed: 'The configured model could not complete the response.',
   process_interrupted: 'The host restarted before the response completed.',
 };
-type Attempt = { id: string; key: string; text: string };
+type AttachmentDraft = {
+  key: string;
+  file: File;
+  mediaType: WebAttachmentMediaType;
+  status: 'ready' | 'uploading' | 'uploaded' | 'failed' | 'interrupted';
+  progress?: number;
+  metadata?: WebAttachmentMetadata;
+  error?: string;
+  canRemove?: boolean;
+};
+type Attempt = { id: string; key: string; text: string; attachments: AttachmentDraft[] };
 type SendIssue = { attempt: Attempt; message: string; uncertain: boolean };
+type AttachmentFeedback = { message: string; error: boolean };
+const maxAttachmentSize = 8 * 1024 * 1024;
+const maxConversationAttachmentBytes = 30 * 1024 * 1024;
+const maxMessageAttachments = 5;
+const maxConversationAttachments = 10;
+
+class AttachmentUploadError extends Error {
+  constructor(readonly original: unknown) {
+    super('Attachment upload failed');
+    this.name = 'AttachmentUploadError';
+  }
+}
+
+function mediaTypeFor(file: File): WebAttachmentMediaType | undefined {
+  if (file.type === 'image/png' || file.type === 'image/jpeg' || file.type === 'application/pdf')
+    return file.type;
+  if (file.type) return undefined;
+  const extension = file.name.toLowerCase().split('.').pop();
+  if (extension === 'png') return 'image/png';
+  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
+  if (extension === 'pdf') return 'application/pdf';
+  return undefined;
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB'];
+  let value = bytes / 1024;
+  let unit = units[0];
+  if (value >= 1024) {
+    value /= 1024;
+    unit = units[1];
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${unit}`;
+}
+
+function attachmentUploadError(error: unknown) {
+  if (error instanceof WebApiError && error.detail) return error.detail;
+  return errorText(error, 'upload the attachment');
+}
+
+function AttachmentPreview({ file, mediaType }: { file: File; mediaType: WebAttachmentMediaType }) {
+  const [url, setUrl] = useState<string>();
+  useEffect(() => {
+    if (mediaType === 'application/pdf') return;
+    const next = URL.createObjectURL(file);
+    setUrl(next);
+    return () => URL.revokeObjectURL(next);
+  }, [file, mediaType]);
+  if (mediaType !== 'application/pdf' && url)
+    return <img src={url} alt="" className="h-11 w-11 shrink-0 rounded-md object-cover" />;
+  return (
+    <span
+      aria-hidden="true"
+      className="grid h-11 w-11 shrink-0 place-items-center rounded-md border border-white/10 bg-white/[.04] text-[10px] font-medium text-[#c4c5cb]"
+    >
+      {mediaType === 'application/pdf' ? 'PDF' : 'IMG'}
+    </span>
+  );
+}
+
 function omitConversation<T>(entries: Record<string, T>, id: string) {
   if (!(id in entries)) return entries;
   const next = { ...entries };
@@ -76,18 +149,41 @@ function Message({
   cancel,
   reuse,
   live,
+  attachments,
 }: {
   message: WebMessage;
   cancellation: boolean;
   cancel?: () => void;
   reuse?: () => void;
   live?: LiveResponse;
+  attachments?: WebAttachmentMetadata[];
 }) {
   if (message.role === 'user') {
     return (
-      <div className="th-v4-user-message ml-auto max-w-[85%] rounded-2xl rounded-br-sm border border-white/15 bg-[#2b2c32] px-4 py-3 text-[13px]">
+      <div className="th-v4-user-message ml-auto max-w-[85%] rounded-2xl rounded-br-sm border border-white/15 bg-[#2b2c32] px-4 py-3 text-[13px] text-[#f1f1f3]">
         <span className="sr-only">You: </span>
         <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        {attachments?.length ? (
+          <ul aria-label="Attached files" className="mt-3 space-y-2 border-t border-white/10 pt-2">
+            {attachments.map(attachment => (
+              <li key={attachment.id} className="flex min-w-0 items-start justify-between gap-3">
+                <span className="min-w-0 break-all text-[11px] font-medium">
+                  {attachment.file_name}
+                </span>
+                <span className="shrink-0 text-[10px] text-[#c4c5cb]">
+                  {attachment.media_type === 'application/pdf'
+                    ? `${attachment.page_count} page${attachment.page_count === 1 ? '' : 's'}`
+                    : attachment.media_type === 'image/png'
+                      ? 'PNG'
+                      : 'JPEG'}{' '}
+                  · {formatBytes(attachment.size_bytes)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : message.attachment_ids?.length ? (
+          <p className="mt-2 text-[10px] text-[#c4c5cb]">Saved attachment metadata unavailable.</p>
+        ) : null}
       </div>
     );
   }
@@ -169,6 +265,8 @@ export default function ConversationWorkspace({
   const [selection, setSelection] = useState<string | null>(null);
   const [archived, setArchived] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [attachmentDrafts, setAttachmentDrafts] = useState<Record<string, AttachmentDraft[]>>({});
+  const [attachmentFeedback, setAttachmentFeedback] = useState<AttachmentFeedback>();
   const [issues, setIssues] = useState<Record<string, SendIssue | undefined>>({});
   const [receipts, setReceipts] = useState<Record<string, string | undefined>>({});
   const [live, setLive] = useState<LiveResponse>();
@@ -182,6 +280,7 @@ export default function ConversationWorkspace({
   const [notice, setNotice] = useState('');
   const log = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const attachmentInput = useRef<HTMLInputElement>(null);
   const composerOrigin = useRef<number | undefined>(undefined);
   const focusDraft = useRef(false);
   const createLock = useRef(false);
@@ -201,6 +300,7 @@ export default function ConversationWorkspace({
     if (!changedConversationId) return;
     setSelection(previous => (previous === changedConversationId ? null : previous));
     setDrafts(previous => omitConversation(previous, changedConversationId));
+    setAttachmentDrafts(previous => omitConversation(previous, changedConversationId));
     setIssues(previous => omitConversation(previous, changedConversationId));
     setReceipts(previous => omitConversation(previous, changedConversationId));
   }, [changedConversationId]);
@@ -253,6 +353,15 @@ export default function ConversationWorkspace({
     (writingNew || snapshot?.messages.length === 0) &&
     !(id && (receipts[id] || live?.conversationId === id));
   const draft = id ? (drafts[id] ?? '') : writingNew ? firstDraft : '';
+  const attachmentDraftKey = id ?? '__new__';
+  const selectedAttachments = attachmentDrafts[attachmentDraftKey] ?? [];
+  useEffect(() => {
+    if (active && welcome && selectedAttachments.length) {
+      const container = log.current?.parentElement;
+      if (container) container.scrollTop = container.scrollHeight;
+    }
+  }, [active, welcome, selectedAttachments.length]);
+  const savedAttachments = messages?.flatMap(message => message.attachments ?? []) ?? [];
   const slash = parseSlash(draft);
   const candidates = slash?.completing
     ? slashCommands.filter(entry => !('deferred' in entry) && entry.name.startsWith(slash.name))
@@ -352,21 +461,33 @@ export default function ConversationWorkspace({
   }, [active, id, reduced]);
 
   const command = useMutation({
-    mutationFn: (text: string) => api.create({ title: titleFromMessage(text) }),
-    onSuccess: async (created, text) => {
+    mutationFn: ({ text }: { text: string; attachments: AttachmentDraft[] }) =>
+      api.create({ title: titleFromMessage(text) }),
+    onSuccess: async (created, input) => {
       await cache.cancelQueries({ queryKey: listKey });
       if (active) measureComposerOrigin();
       cache.setQueryData<{ items: Conversation[] }>(listKey, initial => ({
         items: [created, ...(initial?.items ?? []).filter(item => item.id !== created.id)],
       }));
-      setDrafts(previous => ({ ...previous, [created.id]: text }));
+      setDrafts(previous => ({ ...previous, [created.id]: input.text }));
+      setAttachmentDrafts(previous => {
+        const next = { ...previous };
+        delete next.__new__;
+        if (input.attachments.length) next[created.id] = input.attachments;
+        return next;
+      });
       setFirstDraft('');
       setFresh(false);
       setArchived(false);
       setSelection(created.id);
       if (window.location.hash.startsWith('#/ai-workspace') || !window.location.hash)
         window.location.hash = `#/ai-workspace?conversation=${encodeURIComponent(created.id)}`;
-      beginSend({ id: created.id, key: crypto.randomUUID(), text });
+      beginSend({
+        id: created.id,
+        key: crypto.randomUUID(),
+        text: input.text,
+        attachments: input.attachments,
+      });
       void cache.invalidateQueries({ queryKey: listKey });
     },
     onError: error => {
@@ -388,86 +509,161 @@ export default function ConversationWorkspace({
     setReceipts(previous => ({ ...previous, [attempt.id]: responseId }));
     setIssues(previous => ({ ...previous, [attempt.id]: undefined }));
     setDrafts(previous => ({ ...previous, [attempt.id]: '' }));
+    setAttachmentDrafts(previous => omitConversation(previous, attempt.id));
+    setAttachmentFeedback(undefined);
     void cache.invalidateQueries({ queryKey: detailKey(attempt.id) });
     void cache.invalidateQueries({ queryKey: listKey });
   }
 
+  function updateAttachmentDraft(
+    conversationId: string,
+    attachmentKey: string,
+    patch: Partial<AttachmentDraft>
+  ) {
+    setAttachmentDrafts(previous => ({
+      ...previous,
+      [conversationId]: (previous[conversationId] ?? []).map(attachment =>
+        attachment.key === attachmentKey ? { ...attachment, ...patch } : attachment
+      ),
+    }));
+  }
+
   const send = useMutation({
     mutationFn: async ({ attempt, recovery }: { attempt: Attempt; recovery: boolean }) => {
-      const body = { content: attempt.text };
-      if (!recovery) {
-        const controller = new AbortController();
-        activeStream.current = controller;
-        let acknowledged = false;
-        let responseId: string | undefined;
-        let chunks: string[] = [];
-        let frame: number | undefined;
-        function flush() {
-          frame = undefined;
-          if (!chunks.length) return;
-          const text = chunks.join('');
-          chunks = [];
-          setLive(current =>
-            current && current.responseId === responseId && current.mode === 'engine_stream'
-              ? { ...current, partial: current.partial + text }
-              : current
-          );
-        }
-        try {
-          await api.stream(attempt.id, body, attempt.key, controller.signal, event => {
-            switch (event.event) {
-              case 'accepted':
-                acknowledged = true;
-                responseId = event.data.response_id;
-                setLive({
-                  conversationId: attempt.id,
-                  responseId: event.data.response_id,
-                  partial: '',
-                });
-                recordAcceptance(attempt, event.data.response_id);
-                break;
-              case 'stream_mode':
-                setLive(current =>
-                  current?.responseId === event.data.response_id
-                    ? { ...current, mode: event.data.mode }
-                    : current
-                );
-                break;
-              case 'delta':
-                if (event.data.response_id === responseId) {
-                  chunks.push(event.data.content);
-                  frame ??= requestAnimationFrame(flush);
-                }
-                break;
-            }
-          });
-          return;
-        } catch (error) {
-          if (controller.signal.aborted) throw error;
-          if (acknowledged) {
-            setNotice(
-              'The response connection ended early. Checking saved status; no message was resent.'
-            );
-            return;
+      const controller = new AbortController();
+      activeStream.current = controller;
+      try {
+        const attachmentIds: string[] = [];
+        for (const attachment of attempt.attachments) {
+          if (attachment.metadata) {
+            attachmentIds.push(attachment.metadata.id);
+            continue;
           }
-          if (!(error instanceof WebApiError && (error.status === 404 || error.status === 405)))
-            throw error;
-          setNotice(
-            'Streaming is unavailable on this host. Checking the response in saved history.'
-          );
-        } finally {
-          activeStream.current = null;
-          if (frame !== undefined) cancelAnimationFrame(frame);
-          if (!controller.signal.aborted) flush();
-          setLive(current =>
-            current && current.responseId === responseId ? { ...current, ended: true } : current
-          );
+          setAttachmentFeedback(undefined);
+          updateAttachmentDraft(attempt.id, attachment.key, {
+            status: 'uploading',
+            progress: undefined,
+            error: undefined,
+          });
+          try {
+            const uploaded = await api.uploadAttachment(
+              attempt.id,
+              attachment.file,
+              attachment.mediaType,
+              attachment.key,
+              controller.signal,
+              (sent, total) =>
+                updateAttachmentDraft(attempt.id, attachment.key, {
+                  progress: Math.min(100, Math.round((sent / total) * 100)),
+                })
+            );
+            attachmentIds.push(uploaded.attachment.id);
+            updateAttachmentDraft(attempt.id, attachment.key, {
+              status: 'uploaded',
+              progress: 100,
+              metadata: uploaded.attachment,
+              error: undefined,
+              canRemove: false,
+            });
+          } catch (error) {
+            const interrupted =
+              controller.signal.aborted ||
+              (error instanceof DOMException && error.name === 'AbortError');
+            const status = error instanceof WebApiError ? error.status : undefined;
+            const canRemove = [413, 415, 422, 429, 503].includes(status ?? 0);
+            const message = interrupted
+              ? 'Upload interrupted. Retrying uses the same idempotency key; the host may have received it.'
+              : attachmentUploadError(error);
+            updateAttachmentDraft(attempt.id, attachment.key, {
+              status: interrupted ? 'interrupted' : 'failed',
+              canRemove,
+              error: message,
+            });
+            setAttachmentFeedback({
+              message: `Could not upload ${attachment.file.name}: ${message}`,
+              error: true,
+            });
+            throw new AttachmentUploadError(error);
+          }
         }
+        const body = {
+          content: attempt.text,
+          ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
+        };
+        if (!recovery) {
+          let acknowledged = false;
+          let responseId: string | undefined;
+          let chunks: string[] = [];
+          let frame: number | undefined;
+          function flush() {
+            frame = undefined;
+            if (!chunks.length) return;
+            const text = chunks.join('');
+            chunks = [];
+            setLive(current =>
+              current && current.responseId === responseId && current.mode === 'engine_stream'
+                ? { ...current, partial: current.partial + text }
+                : current
+            );
+          }
+          try {
+            await api.stream(attempt.id, body, attempt.key, controller.signal, event => {
+              switch (event.event) {
+                case 'accepted':
+                  acknowledged = true;
+                  responseId = event.data.response_id;
+                  setLive({
+                    conversationId: attempt.id,
+                    responseId: event.data.response_id,
+                    partial: '',
+                  });
+                  recordAcceptance(attempt, event.data.response_id);
+                  break;
+                case 'stream_mode':
+                  setLive(current =>
+                    current?.responseId === event.data.response_id
+                      ? { ...current, mode: event.data.mode }
+                      : current
+                  );
+                  break;
+                case 'delta':
+                  if (event.data.response_id === responseId) {
+                    chunks.push(event.data.content);
+                    frame ??= requestAnimationFrame(flush);
+                  }
+                  break;
+              }
+            });
+            return;
+          } catch (error) {
+            if (controller.signal.aborted) throw error;
+            if (acknowledged) {
+              setNotice(
+                'The response connection ended early. Checking saved status; no message was resent.'
+              );
+              return;
+            }
+            if (!(error instanceof WebApiError && (error.status === 404 || error.status === 405)))
+              throw error;
+            setNotice(
+              'Streaming is unavailable on this host. Checking the response in saved history.'
+            );
+          } finally {
+            if (frame !== undefined) cancelAnimationFrame(frame);
+            if (!controller.signal.aborted) flush();
+            setLive(current =>
+              current && current.responseId === responseId ? { ...current, ended: true } : current
+            );
+          }
+        }
+        const accepted = await api.submit(attempt.id, body, attempt.key);
+        recordAcceptance(attempt, accepted.response_id);
+      } finally {
+        if (activeStream.current === controller) activeStream.current = null;
       }
-      const accepted = await api.submit(attempt.id, body, attempt.key);
-      recordAcceptance(attempt, accepted.response_id);
     },
     onError: (error, { attempt }) => {
+      if (error instanceof AttachmentUploadError) return;
       if (error instanceof DOMException && error.name === 'AbortError') return;
       const uncertain = mayHaveBeenAccepted(error);
       setIssues(previous => ({
@@ -514,11 +710,85 @@ export default function ConversationWorkspace({
     if (activeSend.current.size || !connected) return;
     activeSend.current.add(attempt.id);
     setNotice('');
+    setAttachmentFeedback(undefined);
     send.mutate({ attempt, recovery });
   }
 
   function measureComposerOrigin() {
     composerOrigin.current = composer.current?.form?.getBoundingClientRect().top;
+  }
+
+  function addFiles(files: FileList | null) {
+    if (!files) return;
+    setAttachmentFeedback(undefined);
+    const staged = attachmentDrafts[attachmentDraftKey] ?? [];
+    const savedCount = savedAttachments.length;
+    const savedBytes = savedAttachments.reduce(
+      (total, attachment) => total + attachment.size_bytes,
+      0
+    );
+    let stagedBytes = staged.reduce((total, attachment) => total + attachment.file.size, 0);
+    const accepted: AttachmentDraft[] = [];
+    const errors: string[] = [];
+    for (const file of Array.from(files)) {
+      const mediaType = mediaTypeFor(file);
+      if (!mediaType) {
+        errors.push(`${file.name}: choose a PNG, JPEG, or PDF file.`);
+        continue;
+      }
+      if (file.size === 0 || file.size > maxAttachmentSize) {
+        errors.push(`${file.name}: files must be between 1 byte and 8 MiB.`);
+        continue;
+      }
+      if (staged.length + accepted.length >= maxMessageAttachments) {
+        errors.push(`A message can include at most ${maxMessageAttachments} files.`);
+        break;
+      }
+      if (savedCount + staged.length + accepted.length >= maxConversationAttachments) {
+        errors.push(`A conversation can include at most ${maxConversationAttachments} files.`);
+        break;
+      }
+      if (savedBytes + stagedBytes + file.size > maxConversationAttachmentBytes) {
+        errors.push('The conversation attachment limit is 30 MiB.');
+        continue;
+      }
+      const duplicate = [...staged, ...accepted].some(
+        attachment =>
+          attachment.file.name === file.name &&
+          attachment.file.size === file.size &&
+          attachment.file.lastModified === file.lastModified
+      );
+      if (duplicate) {
+        errors.push(`${file.name}: this file is already staged.`);
+        continue;
+      }
+      accepted.push({
+        key: crypto.randomUUID(),
+        file,
+        mediaType,
+        status: 'ready',
+        canRemove: true,
+      });
+      stagedBytes += file.size;
+    }
+    if (accepted.length)
+      setAttachmentDrafts(previous => ({
+        ...previous,
+        [attachmentDraftKey]: [...(previous[attachmentDraftKey] ?? []), ...accepted],
+      }));
+    if (errors.length) setAttachmentFeedback({ message: errors.join(' '), error: true });
+  }
+
+  function removeAttachment(attachmentKey: string) {
+    setAttachmentDrafts(previous => {
+      const remaining = (previous[attachmentDraftKey] ?? []).filter(
+        attachment => attachment.key !== attachmentKey
+      );
+      return remaining.length
+        ? { ...previous, [attachmentDraftKey]: remaining }
+        : omitConversation(previous, attachmentDraftKey);
+    });
+    setAttachmentFeedback(undefined);
   }
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -527,6 +797,13 @@ export default function ConversationWorkspace({
     if (composerDisabled || !value || createLock.current) return;
     setPaletteDismissed(true);
     if (slash) {
+      if (selectedAttachments.length) {
+        setAttachmentFeedback({
+          message: 'Send attachments with a normal conversation message, not a slash command.',
+          error: true,
+        });
+        return;
+      }
       if (!slash.command || 'deferred' in slash.command) {
         setSlashError(
           slash.command
@@ -548,11 +825,17 @@ export default function ConversationWorkspace({
       }
       return;
     }
-    if (id) beginSend({ id, key: crypto.randomUUID(), text: value });
+    if (id)
+      beginSend({
+        id,
+        key: crypto.randomUUID(),
+        text: value,
+        attachments: selectedAttachments,
+      });
     else if (writingNew && !createUncertain.current && !activeSend.current.size) {
       createLock.current = true;
       setSlashError('');
-      command.mutate(value);
+      command.mutate({ text: value, attachments: selectedAttachments });
     }
   }
 
@@ -564,6 +847,8 @@ export default function ConversationWorkspace({
     setFresh(true);
     setArchived(false);
     setFirstDraft('');
+    setAttachmentDrafts(previous => omitConversation(previous, '__new__'));
+    setAttachmentFeedback(undefined);
     setNotice('');
     setSlashError('');
     setPaletteDismissed(false);
@@ -606,7 +891,7 @@ export default function ConversationWorkspace({
         )}
       <div className="th-v4-chat-workspace">
         <div
-          className={`th-v4-conversation flex min-h-0 min-w-0 flex-col overflow-hidden ${welcome ? 'is-welcome' : ''}`}
+          className={`th-v4-conversation flex min-h-0 min-w-0 flex-col overflow-hidden ${welcome ? 'is-welcome' : ''} ${selectedAttachments.length ? 'has-attachments' : ''}`}
         >
           <p role="status" className={notice || archived ? `px-5 pt-3 ${muted}` : 'sr-only'}>
             {notice || (archived ? 'Archived · read-only' : '')}
@@ -676,6 +961,7 @@ export default function ConversationWorkspace({
                   key={message.id}
                   message={message}
                   cancellation={pendingCancellation.has(message.id)}
+                  attachments={message.attachments}
                   live={live?.responseId === message.id ? live : undefined}
                   cancel={
                     connected && id && !cancel.isPending
@@ -712,7 +998,16 @@ export default function ConversationWorkspace({
                     className={outline}
                     type="button"
                     disabled={!connected || send.isPending}
-                    onClick={() => beginSend(issue.attempt, true)}
+                    onClick={() =>
+                      beginSend(
+                        {
+                          ...issue.attempt,
+                          attachments:
+                            attachmentDrafts[issue.attempt.id] ?? issue.attempt.attachments,
+                        },
+                        true
+                      )
+                    }
                   >
                     Retry send safely
                   </button>
@@ -778,6 +1073,86 @@ export default function ConversationWorkspace({
                   <Chip>{slash.command.usage} · Command</Chip>
                 </div>
               )}
+              <input
+                ref={attachmentInput}
+                type="file"
+                accept="image/png,image/jpeg,application/pdf,.png,.jpg,.jpeg,.pdf"
+                multiple
+                className="sr-only"
+                aria-label="Choose PNG, JPEG, or PDF attachments"
+                onChange={event => {
+                  addFiles(event.currentTarget.files);
+                  event.currentTarget.value = '';
+                }}
+              />
+              {attachmentFeedback && (
+                <div className="px-2 pt-2">
+                  <Notice error={attachmentFeedback.error}>{attachmentFeedback.message}</Notice>
+                </div>
+              )}
+              {selectedAttachments.length > 0 && (
+                <ul aria-label="Attachments to send" className="space-y-2 px-2 pt-2">
+                  {selectedAttachments.map(attachment => (
+                    <li
+                      key={attachment.key}
+                      className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[.04] px-3 py-2"
+                    >
+                      <AttachmentPreview file={attachment.file} mediaType={attachment.mediaType} />
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className="truncate text-[11px] font-medium"
+                          title={attachment.file.name}
+                        >
+                          {attachment.metadata?.file_name ?? attachment.file.name}
+                        </p>
+                        <p
+                          role={attachment.status === 'uploading' ? 'status' : undefined}
+                          className={`mt-1 truncate text-[10px] ${attachment.error ? 'text-[#e1c3c3]' : muted}`}
+                        >
+                          {attachment.error ??
+                            (attachment.status === 'uploading'
+                              ? attachment.progress === undefined
+                                ? 'Uploading to the Thozha host…'
+                                : attachment.progress === 100
+                                  ? 'Transfer complete · Processing on host…'
+                                  : `Uploading · ${attachment.progress}%`
+                              : attachment.status === 'uploaded'
+                                ? `Uploaded · ${formatBytes(attachment.metadata?.size_bytes ?? attachment.file.size)}`
+                                : attachment.status === 'interrupted'
+                                  ? 'Upload interrupted. Retry uses the same upload key.'
+                                  : `${attachment.mediaType.replace('application/', '').replace('image/', '').toUpperCase()} · ${formatBytes(attachment.file.size)}`)}
+                        </p>
+                        {attachment.status === 'uploading' && attachment.progress !== undefined && (
+                          <progress
+                            className="mt-1 h-1 w-full accent-[#c4c5cb]"
+                            value={attachment.progress}
+                            max={100}
+                            aria-label={`Upload progress for ${attachment.file.name}`}
+                          />
+                        )}
+                      </div>
+                      {attachment.status === 'uploading' ? (
+                        <button
+                          type="button"
+                          className={outline}
+                          onClick={() => activeStream.current?.abort()}
+                        >
+                          Cancel upload
+                        </button>
+                      ) : (attachment.status === 'ready' || attachment.canRemove) && !sending ? (
+                        <button
+                          type="button"
+                          className={outline}
+                          aria-label={`Remove ${attachment.file.name}`}
+                          onClick={() => removeAttachment(attachment.key)}
+                        >
+                          Remove
+                        </button>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
               <textarea
                 ref={composer}
                 rows={2}
@@ -829,7 +1204,20 @@ export default function ConversationWorkspace({
                 className="min-h-[48px] w-full resize-y rounded-lg bg-transparent px-3 py-2 text-xs leading-6 text-white placeholder:text-[#a4a5af]"
               />
               <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1">
-                <span id={fieldId} className="text-[10px] text-[#a4a5af]">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className={outline}
+                    disabled={composerDisabled}
+                    onClick={() => attachmentInput.current?.click()}
+                  >
+                    Attach file
+                  </button>
+                  <span id={fieldId} className="text-[10px] text-[#a4a5af]">
+                    PNG, JPEG, or PDF · 8 MiB each · up to 5 per message
+                  </span>
+                </div>
+                <span className="text-[10px] text-[#a4a5af]">
                   {paletteOpen
                     ? 'Arrow keys to navigate · Enter or Tab to select · Escape to close'
                     : 'Enter to send · Shift+Enter for newline · / for commands'}

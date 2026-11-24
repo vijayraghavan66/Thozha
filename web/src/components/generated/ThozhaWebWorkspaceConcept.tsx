@@ -403,7 +403,7 @@ export function ThozhaWebWorkspaceConcept({
     connected: !problem,
     onAction: openHistoryAction,
     onNew: startNewConversation,
-    onSelect: () => setMobileHistory(false),
+    onSelect: closeMobileHistory,
   };
 
   function openConversationAction(action: ConversationAction, fallback: HTMLElement | null = null) {
@@ -437,7 +437,8 @@ export function ThozhaWebWorkspaceConcept({
       currentPage(currentHash) === 'AI Workspace' &&
       new URLSearchParams(currentHash.split('?')[1]).get('conversation') === changedId
     ) {
-      window.history.replaceState(window.history.state, '', '#/ai-workspace');
+      if (conversationAction?.type === 'delete') startNewConversation();
+      else window.history.replaceState(window.history.state, '', '#/ai-workspace');
       setHash(window.location.hash);
     }
     setChangedConversationId(changedId);
@@ -445,7 +446,6 @@ export function ThozhaWebWorkspaceConcept({
     setConversationAction(null);
     setConversationRename(null);
     requestAnimationFrame(() => {
-      if (document.activeElement !== document.body) return;
       const fallback = conversationFallback.current;
       (fallback?.isConnected ? fallback : main.current)?.focus({ preventScroll: true });
     });
@@ -597,8 +597,20 @@ export function ThozhaWebWorkspaceConcept({
   }
 
   function startNewConversation() {
-    setMobileHistory(false);
+    closeMobileHistory();
     window.location.hash = `#/ai-workspace?new=${crypto.randomUUID()}`;
+  }
+
+  function closeMobileHistory() {
+    if (compact && mobileHistory) {
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      requestAnimationFrame(() =>
+        document
+          .querySelector<HTMLButtonElement>('[aria-label="Back to conversations"]')
+          ?.focus({ preventScroll: true })
+      );
+    }
+    setMobileHistory(false);
   }
 
   function openMobileChats() {

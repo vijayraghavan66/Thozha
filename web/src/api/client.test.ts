@@ -114,6 +114,7 @@ describe('owner-scoped supervisor API', () => {
         { status: 200 }
       );
     });
+
     const api = createWebApi(fetcher).authorized('test-csrf', vi.fn());
     await expect(
       api.submitTask({ ...body, capability_scope: [...body.capability_scope] })
@@ -181,5 +182,181 @@ describe('owner-scoped supervisor API', () => {
       api.streamTaskEvents(taskId, 7, new AbortController().signal, vi.fn(), onEvent)
     ).rejects.toMatchObject({ kind: 'protocol' });
     expect(onEvent.mock.calls).toEqual([[event]]);
+  });
+});
+
+describe('device pairing and conversation attachments', () => {
+  const invitationId = 'a'.repeat(32);
+  const qrPayload = {
+    protocol: 'openjarvis-pairing-v2',
+    server_url: 'https://192.0.2.10:8443',
+    gateway_address: '192.0.2.10',
+    gateway_port: '8443',
+    gateway_certificate_sha256: `sha256:${'1'.repeat(64)}`,
+    server_fingerprint: `sha256:${'2'.repeat(64)}`,
+    server_public_key: 'fixture-public-key',
+    invitation_id: invitationId,
+    challenge: 'fixture-challenge',
+    expires_at: '2026-11-23T00:05:00Z',
+    server_signature: 'fixture-signature',
+  };
+
+  it('uses the owner session for invitation, status, pending-request, decision, and cancellation routes', async () => {
+    const requestId = 'b'.repeat(32);
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ ...qrPayload, qr_payload: qrPayload }))
+      .mockResolvedValueOnce(
+        Response.json({ invitation_id: invitationId, status: 'PENDING_CONFIRMATION' })
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          count: 1,
+          requests: [
+            {
+              id: requestId,
+              status: 'PENDING_CONFIRMATION',
+              device_name: 'Fixture phone',
+              device_fingerprint: 'sha256:fixture',
+              requested_at: '2026-11-23T00:00:01Z',
+              expires_at: '2026-11-23T00:05:00Z',
+            },
+          ],
+        })
+      )
+      .mockResolvedValueOnce(Response.json({ invitation_id: requestId, status: 'APPROVED' }))
+      .mockResolvedValueOnce(Response.json({ invitation_id: invitationId, status: 'CANCELLED' }));
+    const api = createWebApi(fetcher).authorized('test-csrf', vi.fn());
+
+    await expect(api.createPairingInvitation()).resolves.toMatchObject({
+      qr_payload: qrPayload,
+    });
+    await expect(api.getPairingInvitationStatus(invitationId)).resolves.toEqual({
+      invitation_id: invitationId,
+      status: 'PENDING_CONFIRMATION',
+    });
+    await expect(api.listPairingRequests()).resolves.toMatchObject({ count: 1 });
+    await expect(api.decidePairingRequest(requestId, 'approve')).resolves.toEqual({
+      invitation_id: requestId,
+      status: 'APPROVED',
+    });
+    await expect(api.cancelPairingInvitation(invitationId)).resolves.toEqual({
+      invitation_id: invitationId,
+      status: 'CANCELLED',
+    });
+
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      '/v1/web/devices/pairing-invitations',
+      `/v1/web/devices/pairing-invitations/${invitationId}`,
+      '/v1/web/devices/pairing-requests?limit=50',
+      `/v1/web/devices/pairing-requests/${requestId}/decision`,
+      `/v1/web/devices/pairing-invitations/${invitationId}/cancel`,
+    ]);
+    const [createInit, , , decisionInit, cancelInit] = fetcher.mock.calls.map(([, init]) => init);
+    expect(new Headers(createInit?.headers).get('X-Thozha-CSRF')).toBe('test-csrf');
+    expect(JSON.parse(String(createInit?.body))).toEqual({ transport: 'wifi' });
+    expect(JSON.parse(String(decisionInit?.body))).toEqual({ decision: 'approve' });
+    expect(JSON.parse(String(cancelInit?.body))).toEqual({});
+    expect(fetcher.mock.calls.every(([, init]) => init?.credentials === 'same-origin')).toBe(true);
+  });
+
+  it('uploads raw bytes with an idempotency key and safe metadata headers', async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const file = new File([bytes], 'report-测试.png', { type: 'image/png' });
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url, init) => {
+      expect(url).toBe(`/v1/web/conversations/${conversation}/attachments`);
+      expect(init?.method).toBe('POST');
+      expect(init?.body).toBe(file);
+      expect(await new Response(init?.body).arrayBuffer()).toEqual(bytes.buffer);
+      const headers = new Headers(init?.headers);
+      expect(headers.get('Content-Type')).toBe('image/png');
+      expect(headers.get('X-File-Name')).toBe('report-__.png');
+      expect(headers.get('Idempotency-Key')).toBe('stable-upload-key');
+      expect(headers.get('X-Thozha-CSRF')).toBe('test-csrf');
+      return Response.json(
+        {
+          attachment: {
+            id: 'c'.repeat(32),
+            file_name: 'report-__.png',
+            media_type: 'image/png',
+            size_bytes: bytes.byteLength,
+            sha256: 'd'.repeat(64),
+            page_count: 1,
+            created_at: '2026-11-23T00:00:00Z',
+          },
+          replayed: false,
+        },
+        { status: 201 }
+      );
+    });
+    const api = createWebApi(fetcher).authorized('test-csrf', vi.fn());
+    await expect(
+      api.uploadAttachment(conversation, file, 'image/png', 'stable-upload-key')
+    ).resolves.toMatchObject({
+      attachment: { file_name: 'report-__.png', size_bytes: 4 },
+    });
+  });
+
+  it('reports measured transfer bytes without treating transfer completion as a saved attachment', async () => {
+    const file = new File([new Uint8Array([1, 2, 3, 4])], 'report.png', {
+      type: 'image/png',
+    });
+    const headers = new Map<string, string>();
+    class ProgressUpload {
+      status = 201;
+      responseURL = `http://localhost:3000/v1/web/conversations/${conversation}/attachments`;
+      responseText = JSON.stringify({
+        attachment: {
+          id: 'c'.repeat(32),
+          file_name: 'report.png',
+          media_type: 'image/png',
+          size_bytes: 4,
+          sha256: 'd'.repeat(64),
+          page_count: 1,
+          created_at: '2026-11-23T00:00:00Z',
+        },
+        replayed: false,
+      });
+      upload = { onprogress: null as ((event: ProgressEvent) => void) | null };
+      onload: (() => void) | null = null;
+      open(method: string, url: string) {
+        expect(method).toBe('POST');
+        expect(url).toBe(`/v1/web/conversations/${conversation}/attachments`);
+      }
+      setRequestHeader(name: string, value: string) {
+        headers.set(name, value);
+      }
+      getResponseHeader() {
+        return 'application/json';
+      }
+      send(body: File) {
+        expect(body).toBe(file);
+        this.upload.onprogress?.({ lengthComputable: true, loaded: 2, total: 4 } as ProgressEvent);
+        this.upload.onprogress?.({ lengthComputable: true, loaded: 4, total: 4 } as ProgressEvent);
+        this.onload?.();
+      }
+      abort() {
+        throw new Error('An unrequested abort must not occur.');
+      }
+    }
+    vi.stubGlobal('XMLHttpRequest', ProgressUpload);
+    try {
+      const progress: number[] = [];
+      const api = createWebApi(vi.fn<typeof fetch>()).authorized('test-csrf', vi.fn());
+      const uploaded = await api.uploadAttachment(
+        conversation,
+        file,
+        'image/png',
+        'stable-upload-key',
+        undefined,
+        (sent, total) => progress.push(Math.round((sent / total) * 100))
+      );
+      expect(progress).toEqual([50, 100]);
+      expect(uploaded.attachment.file_name).toBe('report.png');
+      expect(headers.get('X-Thozha-CSRF')).toBe('test-csrf');
+      expect(headers.get('Idempotency-Key')).toBe('stable-upload-key');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

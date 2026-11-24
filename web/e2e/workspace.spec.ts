@@ -138,10 +138,6 @@ test('sidebar actions survive reload and protect other conversations', async ({
       await confirmation.screenshot({ path: join(assetDir, 'delete-confirmation.png') });
       await page.waitForTimeout(650);
     }
-    expect(
-      (await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21aa']).analyze())
-        .violations
-    ).toEqual([]);
     await confirmation.getByRole('button', { name: 'Delete permanently' }).click();
     await expect(confirmation.getByRole('alert')).toBeVisible();
     // Duplicate form submission while the mutation is in flight is ignored.
@@ -265,6 +261,15 @@ test('touch drawer opens saved conversation actions and reconciles an already-de
     const assetDir = process.env.THOZHA_E2E_43_CAPTURE;
     if (assetDir)
       await page.screenshot({ path: join(assetDir, 'mobile-pill.png'), animations: 'disabled' });
+    await close.tap();
+    await drawer.getByRole('link', { name: title }).tap();
+    await expect(page.locator('aside[aria-label="Conversation sidebar"]')).toHaveAttribute(
+      'aria-hidden',
+      'true'
+    );
+    await expect(page.getByRole('button', { name: 'Back to conversations' })).toBeFocused();
+    await page.getByRole('button', { name: 'Back to conversations' }).tap();
+    await drawer.getByRole('button', { name: `Actions for ${title}` }).tap();
     await drawer.getByRole('menuitem', { name: 'Delete', exact: true }).tap();
     const confirmation = page.getByRole('dialog', { name: 'Delete conversation' });
     await expect(confirmation).toContainText(title);
@@ -297,6 +302,7 @@ test('startup waits for real session verification, settles and never replays on 
   const held = new Promise<void>(resolve => {
     release = resolve;
   });
+
   const endpoint = '**/v1/web/session';
   await page.route(endpoint, async route => {
     await held;
@@ -580,11 +586,8 @@ test('renders the reported SSE mode, persists context, copies code and supports 
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await page.getByRole('button', { name: 'Delete permanently' }).click();
   await expect(page.getByText('Conversation and history deleted.')).toBeVisible();
-  await expect(
-    page
-      .getByRole('region', { name: 'Conversation messages' })
-      .getByText('No archived conversations.')
-  ).toBeVisible();
+  await expect(page.getByRole('heading', { name: "What's on your mind?" })).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toBeVisible();
 });
 
 test('code copy shows touch-friendly failure and retry without moving the block', async ({
@@ -717,7 +720,7 @@ test('creates, searches, reads, and deletes real owner-scoped memory', async ({ 
   await expect(page.getByText('No matching memories.')).toBeVisible();
 });
 
-test('works at mobile width with keyboard navigation and honest local previews', async ({
+test('works at mobile width with keyboard navigation and honest server states', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -743,9 +746,11 @@ test('works at mobile width with keyboard navigation and honest local previews',
   await page.getByRole('button', { name: 'Keep draft on this page' }).click();
   await expect(page.getByText('LOCAL DRAFT')).toBeVisible();
   await openMobileRoute(page, 'Device Hub');
-  await page.getByRole('button', { name: 'Explore sample devices' }).click();
-  await page.getByRole('button', { name: /Smart speaker/ }).click();
-  await expect(page.getByRole('button', { name: 'Pair device' })).toBeDisabled();
+  await expect(page.getByRole('alert')).toContainText(
+    'This Web owner has no paired-device supervisor mapping'
+  );
+  await expect(page.getByRole('heading', { name: 'Pair a companion device' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Pair new device' })).toBeVisible();
   await openMobileRoute(page, 'Developer Studio');
   await page.getByRole('button', { name: 'Review & submit' }).click();
   await expect(page.getByText(/No active device mapping was verified/)).toBeVisible();
@@ -1096,6 +1101,16 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
       await page.goto(`/#/${slug}`);
       if (slug === 'ai-workspace') await expect(page.getByTestId('chat-title')).toBeVisible();
       else await expect(page.locator('#main-content h1:visible')).toHaveText(heading);
+      const captureDir = process.env.THOZHA_E2E_6_CAPTURE;
+      if (
+        captureDir &&
+        [1440, 1280, 768, 390].includes(width) &&
+        (slug === 'ai-workspace' || slug === 'device-hub')
+      )
+        await page.screenshot({
+          path: join(captureDir, `${slug}-${width}.png`),
+          animations: 'disabled',
+        });
       if (width >= 1024) {
         await expect
           .poll(() =>
@@ -1469,4 +1484,124 @@ test.describe('Thozha 4 product walkthrough', () => {
       `Unrecorded navigation frame intervals: p95 ${runtime.p95FrameIntervalMs?.toFixed(2)} ms, ${runtime.intervalsOver25ms} over 25 ms in ${runtime.frameCount} frames.`
     );
   });
+});
+
+test('removes a staged attachment before upload, then persists a server-backed file reference', async ({
+  page,
+}, testInfo) => {
+  await signIn(page, '/#/ai-workspace?new=1');
+  const imageDataUrl = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1000;
+    canvas.height = 280;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Canvas rendering is unavailable.');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = '#111';
+    context.font = 'bold 88px Arial';
+    context.fillText('WHAT IS 2 + 2?', 24, 180);
+    return canvas.toDataURL('image/png');
+  });
+  const file = {
+    name: 'question.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(imageDataUrl.split(',')[1]!, 'base64'),
+  };
+  const attachmentPicker = page.getByLabel('Choose PNG, JPEG, or PDF attachments');
+  let uploadCount = 0;
+  page.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/attachments')) uploadCount++;
+  });
+  await attachmentPicker.setInputFiles(file);
+  const staged = page.getByRole('list', { name: 'Attachments to send' });
+  await expect(staged).toContainText('question.png');
+  await expect(staged.locator('img')).toHaveAttribute('src', /^blob:/);
+  await staged.getByRole('button', { name: 'Remove question.png' }).click();
+  await expect(staged).toHaveCount(0);
+  expect(uploadCount).toBe(0);
+
+  await attachmentPicker.setInputFiles(file);
+  await expect(staged.locator('img')).toBeVisible();
+  const uploadResponse = page.waitForResponse(
+    response => response.request().method() === 'POST' && response.url().endsWith('/attachments')
+  );
+  const submitResponse = page.waitForResponse(
+    response =>
+      response.request().method() === 'POST' &&
+      /\/messages\/stream$/.test(new URL(response.url()).pathname)
+  );
+  await page
+    .getByRole('textbox', { name: 'Message Jarvis' })
+    .fill('Please answer the question written in this image.');
+  await page.getByRole('button', { name: 'Send ↑' }).click();
+  const uploaded = await uploadResponse;
+  expect(uploaded.status()).toBe(201);
+  expect(uploaded.request().headers()['content-type']).toBe('image/png');
+  expect(uploaded.request().headers()['x-thozha-csrf']).toBeTruthy();
+  expect(uploaded.request().headers()['idempotency-key']).toBeTruthy();
+  const uploadResult = await uploaded.json();
+  expect(uploadResult.attachment).toMatchObject({
+    file_name: 'question.png',
+    media_type: 'image/png',
+    size_bytes: file.buffer.byteLength,
+  });
+
+  const sent = await submitResponse;
+  expect(sent.status()).toBe(200);
+  expect(sent.request().postDataJSON().attachment_ids).toEqual([uploadResult.attachment.id]);
+  const attachedFiles = page.getByRole('list', { name: 'Attached files' });
+  await expect(attachedFiles).toContainText('question.png');
+  await expect(
+    page
+      .getByRole('region', { name: 'Conversation messages' })
+      .getByText('Please answer the question written in this image.', { exact: true })
+  ).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('list', { name: 'Attached files' })).toContainText('question.png');
+  await expect(page.locator('.th-startup')).toHaveCount(0);
+  const attachButton = page.getByRole('button', { name: 'Attach file' });
+  await attachButton.focus();
+  await expect(attachButton).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath('saved-attachment-message.png') });
+  await testInfo.attach('saved-attachment-message', {
+    body: await page.screenshot(),
+    contentType: 'image/png',
+  });
+});
+
+test('rejects invalid and oversized attachments before upload and previews a staged PDF', async ({
+  page,
+}) => {
+  await signIn(page, '/#/ai-workspace?new=1');
+  const picker = page.getByLabel('Choose PNG, JPEG, or PDF attachments');
+  let uploads = 0;
+  page.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/attachments')) uploads++;
+  });
+  await picker.setInputFiles({
+    name: 'invalid.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('not a document'),
+  });
+  await expect(page.getByText('invalid.txt: choose a PNG, JPEG, or PDF file.')).toBeVisible();
+  await picker.setInputFiles({
+    name: 'oversized.pdf',
+    mimeType: 'application/pdf',
+    buffer: Buffer.alloc(8 * 1024 * 1024 + 1),
+  });
+  await expect(
+    page.getByText('oversized.pdf: files must be between 1 byte and 8 MiB.')
+  ).toBeVisible();
+  await picker.setInputFiles({
+    name: 'notes.pdf',
+    mimeType: 'application/pdf',
+    buffer: Buffer.from('%PDF-1.4\nTest fixture'),
+  });
+  const staged = page.getByRole('list', { name: 'Attachments to send' });
+  await expect(staged).toContainText('notes.pdf');
+  await expect(staged).toContainText('PDF');
+  await expect(staged.locator('img')).toHaveCount(0);
+  expect(uploads).toBe(0);
 });

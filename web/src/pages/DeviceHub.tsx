@@ -5,13 +5,12 @@ import type { PairedDevice } from '../api/control';
 import { LiquidCard } from '../components/LiquidSurface';
 import { formatDate, muted, outline, solid } from '../components/styles';
 import { Chip, Head, Loading, Modal, Notice, Panel, Row } from '../components/ui';
-import { DeviceExamples } from './WorkspacePages';
+import DevicePairing from './DevicePairing';
 import {
   approvalsKey,
   automationCapabilitiesKey,
   controlError,
   devicesKey,
-  httpStatus,
   tasksKey,
   useDevices,
 } from './controlState';
@@ -56,19 +55,6 @@ export default function DeviceHub({ api, connected }: { api: WorkspaceApi; conne
       void cache.invalidateQueries({ queryKey: automationCapabilitiesKey });
     },
   });
-  if ([403, 404].includes(httpStatus(devices.error) ?? 0)) {
-    return (
-      <>
-        {message && <Notice>{message}</Notice>}
-        <DeviceExamples />
-        <div className="mt-3">
-          <Notice retry={connected ? () => void devices.refetch() : undefined}>
-            {controlError(devices.error, 'list mapped devices')}
-          </Notice>
-        </div>
-      </>
-    );
-  }
   const pairing = detail.isSuccess ? detail.data : undefined;
   return (
     <>
@@ -87,6 +73,7 @@ export default function DeviceHub({ api, connected }: { api: WorkspaceApi; conne
           </button>
         }
       />
+      <DevicePairing api={api} connected={connected} />
       {message && (
         <div className="mb-4">
           <Notice>{message}</Notice>

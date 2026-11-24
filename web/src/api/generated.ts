@@ -1,4 +1,4 @@
-// Generated from openapi/thozha-v1.yaml at c77ab1cfe59f5d633f1e6be3f7a7242f8a70c539.
+// Generated from openapi/thozha-v1.yaml at 0f0541d903d1aaa5144dda79881d853aa1ff8443.
 // Do not edit. Run npm run contract:generate.
 
 export interface paths {
@@ -102,6 +102,44 @@ export interface paths {
         put?: never;
         /** @description Requires exact same-origin Origin, application/json, and X-Thozha-CSRF. */
         post: operations["archiveWebConversation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/web/conversations/{conversation_id}/attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: components["parameters"]["WebConversationId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Uploads a raw PNG, JPEG, or PDF body (8 MiB/file; ten files and 30 MiB per conversation; 100 MiB per owner). The file is stored in the owner-scoped conversation database. macOS Vision/PDFKit extracts text locally; only extracted, bounded text is added to model context when the message references the returned attachment ID. This is OCR/text extraction, not image-native visual reasoning. Attachment content is treated as untrusted data and is never used to enable tools. */
+        post: operations["uploadWebConversationAttachment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/web/conversations/{conversation_id}/attachments/{attachment_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: components["parameters"]["WebConversationId"];
+                attachment_id: string;
+            };
+            cookie?: never;
+        };
+        get: operations["downloadWebConversationAttachment"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -432,6 +470,89 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/web/devices/pairing-invitations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Creates a five-minute signed Wi-Fi QR invitation for the authenticated owner of this Mac installation. The endpoint fails closed unless the configured private Wi-Fi address, SSID, pinned gateway certificate, and gateway listener are verified. It never creates a loopback-only QR through the Web UI and does not add the resulting phone to the separate THOZHA_WEB_ALLOWED_DEVICE_IDS task-actor mapping. */
+        post: operations["createWebPairingInvitation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/web/devices/pairing-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listWebPairingRequests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/web/devices/pairing-requests/{invitation_id}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Records the authenticated Mac installation owner's explicit decision. Approve permits only the invitation-scoped phone claim; it does not itself issue a device credential. Reject never creates a paired device. */
+        post: operations["decideWebPairingRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/web/devices/pairing-invitations/{invitation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Returns invitation lifecycle only; never returns the phone's claim challenge or device token. */
+        get: operations["getWebPairingInvitationStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/web/devices/pairing-invitations/{invitation_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cancelWebPairingInvitation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/web/devices/{device_id}": {
         parameters: {
             query?: never;
@@ -667,6 +788,19 @@ export interface components {
             created_at?: string;
             /** Format: date-time */
             updated_at?: string;
+            attachment_ids?: string[];
+            attachments?: components["schemas"]["WebAttachmentMetadata"][];
+        };
+        WebAttachmentMetadata: {
+            id: string;
+            file_name: string;
+            /** @enum {string} */
+            media_type: "image/png" | "image/jpeg" | "application/pdf";
+            size_bytes: number;
+            sha256: string;
+            page_count: number;
+            /** Format: date-time */
+            created_at: string;
         };
         /** @description A completed event may include memory_context_count and memory_ids for explicit, relevant chat-context memories. Memory content is never included in event details. */
         WebConversationEvent: {
@@ -680,6 +814,8 @@ export interface components {
             details?: {
                 memory_context_count?: number;
                 memory_ids?: string[];
+                attachment_context_count?: number;
+                attachment_context_chars?: number;
                 error_code?: string;
             } & {
                 [key: string]: unknown;
@@ -689,8 +825,13 @@ export interface components {
             /** @description Trimmed title must be non-blank and at most 160 UTF-8 bytes. */
             title: string;
         };
+        WebAttachmentUploadResult: {
+            attachment: components["schemas"]["WebAttachmentMetadata"];
+            replayed: boolean;
+        };
         WebMessageCreate: {
             content: string;
+            attachment_ids?: string[];
         };
         WebMessageAccepted: {
             /** Format: uuid */
@@ -856,6 +997,77 @@ export interface components {
             /** @constant */
             status: "active";
         };
+        WebPairingInvitationCreate: {
+            /** @constant */
+            transport: "wifi";
+        };
+        WebPairingInvitationResponse: {
+            /** @constant */
+            protocol: "openjarvis-pairing-v2";
+            /** Format: uri */
+            server_url: string;
+            /** Format: ipv4 */
+            gateway_address: string;
+            /** @constant */
+            gateway_port: "8443";
+            gateway_certificate_sha256: string;
+            server_fingerprint: string;
+            server_public_key: string;
+            invitation_id: string;
+            challenge: string;
+            /** Format: date-time */
+            expires_at: string;
+            server_signature: string;
+            qr_payload: components["schemas"]["PairingQrPayloadV2"];
+        };
+        PairingQrPayloadV2: {
+            /** @constant */
+            protocol: "openjarvis-pairing-v2";
+            /** Format: uri */
+            server_url: string;
+            /** Format: ipv4 */
+            gateway_address: string;
+            /** @constant */
+            gateway_port: "8443";
+            gateway_certificate_sha256: string;
+            server_fingerprint: string;
+            server_public_key: string;
+            invitation_id: string;
+            challenge: string;
+            /** Format: date-time */
+            expires_at: string;
+            server_signature: string;
+        };
+        WebPairingRequestList: {
+            requests: components["schemas"]["WebPairingRequest"][];
+            count: number;
+        };
+        WebPairingRequest: {
+            id: string;
+            /** @constant */
+            status: "PENDING_CONFIRMATION";
+            device_name: string;
+            device_fingerprint: string;
+            /** Format: date-time */
+            requested_at?: string | null;
+            /** Format: date-time */
+            expires_at: string;
+        };
+        WebPairingDecision: {
+            /** @enum {string} */
+            decision: "approve" | "reject";
+        };
+        WebPairingDecisionResult: {
+            invitation_id: string;
+            /** @enum {string} */
+            status: "APPROVED" | "REJECTED" | "EXPIRED" | "CANCELLED";
+        };
+        WebPairingInvitationStatus: {
+            invitation_id: string;
+            /** @enum {string} */
+            status: "INVITED" | "PENDING_CONFIRMATION" | "APPROVED" | "REJECTED" | "EXPIRED" | "CANCELLED" | "TOKEN_ISSUED";
+        };
+        WebPairingCancelRequest: Record<string, never>;
         WebDeviceRevokeResult: {
             /** @enum {string} */
             status: "revoked" | "already_revoked";
@@ -985,6 +1197,7 @@ export interface components {
         WebConversationId: string;
         TaskId: string;
         ApprovalId: string;
+        PairingInvitationId: string;
         WebDeviceId: string;
     };
     requestBodies: never;
@@ -1223,6 +1436,100 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    uploadWebConversationAttachment: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                "X-File-Name"?: string;
+            };
+            path: {
+                conversation_id: components["parameters"]["WebConversationId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "image/png": string;
+                "image/jpeg": string;
+                "application/pdf": string;
+            };
+        };
+        responses: {
+            /** @description Attachment stored and text extraction completed; OCR text is not returned. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebAttachmentUploadResult"];
+                };
+            };
+            400: components["responses"]["InvalidRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            /** @description File or per-conversation storage limit exceeded. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unsupported media type or file signature. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Malformed document or no extractable text. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Document extractor concurrency limit reached; retry after a short delay. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    downloadWebConversationAttachment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: components["parameters"]["WebConversationId"];
+                attachment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Original owner-uploaded attachment. */
+            200: {
+                headers: {
+                    "X-Content-SHA256"?: string;
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": string;
+                    "image/jpeg": string;
+                    "application/pdf": string;
+                };
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
@@ -1811,6 +2118,153 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    createWebPairingInvitation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebPairingInvitationCreate"];
+            };
+        };
+        responses: {
+            /** @description Signed v2 QR payload. Response is no-store. */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebPairingInvitationResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Local Wi-Fi pairing is disabled or its configured identity/listener is unavailable. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            422: components["responses"]["InvalidRequest"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listWebPairingRequests: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Unexpired devices that proved possession and await owner confirmation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebPairingRequestList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    decideWebPairingRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                invitation_id: components["parameters"]["PairingInvitationId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebPairingDecision"];
+            };
+        };
+        responses: {
+            /** @description Owner decision recorded or invitation expired before decision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebPairingDecisionResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["InvalidRequest"];
+        };
+    };
+    getWebPairingInvitationStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                invitation_id: components["parameters"]["PairingInvitationId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pairing status for the invitation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebPairingInvitationStatus"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    cancelWebPairingInvitation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                invitation_id: components["parameters"]["PairingInvitationId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebPairingCancelRequest"];
+            };
+        };
+        responses: {
+            /** @description Invitation cancelled, expired, or already rejected. Issued device credentials are not revoked. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebPairingDecisionResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["InvalidRequest"];
         };
     };
     getWebDevice: {

@@ -108,6 +108,66 @@ const device = z.object({
   expires_at: date,
   status: z.literal('active'),
 }) satisfies z.ZodType<Schemas['WebDevice']>;
+const fingerprint = z.string().regex(/^sha256:[0-9a-f]{64}$/);
+const pairingQrPayload = z
+  .object({
+    protocol: z.literal('openjarvis-pairing-v2'),
+    server_url: z.string().url(),
+    gateway_address: z.string().regex(/^(?:\d{1,3}\.){3}\d{1,3}$/),
+    gateway_port: z.literal('8443'),
+    gateway_certificate_sha256: fingerprint,
+    server_fingerprint: fingerprint,
+    server_public_key: z.string().min(1),
+    invitation_id: id,
+    challenge: z.string().min(1),
+    expires_at: date,
+    server_signature: z.string().min(1),
+  })
+  .strict() satisfies z.ZodType<Schemas['PairingQrPayloadV2']>;
+const pairingInvitation = z
+  .object({
+    protocol: z.literal('openjarvis-pairing-v2'),
+    server_url: z.string().url(),
+    gateway_address: z.string().regex(/^(?:\d{1,3}\.){3}\d{1,3}$/),
+    gateway_port: z.literal('8443'),
+    gateway_certificate_sha256: fingerprint,
+    server_fingerprint: fingerprint,
+    server_public_key: z.string().min(1),
+    invitation_id: id,
+    challenge: z.string().min(1),
+    expires_at: date,
+    server_signature: z.string().min(1),
+    qr_payload: pairingQrPayload,
+  })
+  .strict() satisfies z.ZodType<Schemas['WebPairingInvitationResponse']>;
+const pairingRequest = z.object({
+  id,
+  status: z.literal('PENDING_CONFIRMATION'),
+  device_name: z.string().max(80),
+  device_fingerprint: z.string().min(1),
+  requested_at: date.nullable().optional(),
+  expires_at: date,
+}) satisfies z.ZodType<Schemas['WebPairingRequest']>;
+const pairingRequestList = z.object({
+  requests: z.array(pairingRequest),
+  count: z.number().int().nonnegative(),
+}) satisfies z.ZodType<Schemas['WebPairingRequestList']>;
+const pairingDecisionResult = z.object({
+  invitation_id: id,
+  status: z.enum(['APPROVED', 'REJECTED', 'EXPIRED', 'CANCELLED']),
+}) satisfies z.ZodType<Schemas['WebPairingDecisionResult']>;
+const pairingInvitationStatus = z.object({
+  invitation_id: id,
+  status: z.enum([
+    'INVITED',
+    'PENDING_CONFIRMATION',
+    'APPROVED',
+    'REJECTED',
+    'EXPIRED',
+    'CANCELLED',
+    'TOKEN_ISSUED',
+  ]),
+}) satisfies z.ZodType<Schemas['WebPairingInvitationStatus']>;
 const revoke = z.object({
   status: z.enum(['revoked', 'already_revoked']),
   device_id: id,
@@ -165,6 +225,10 @@ const automationReceipt = z.object({
 export type SupervisorTask = z.infer<typeof task>;
 export type SupervisorEvent = z.infer<typeof event>;
 export type PairedDevice = z.infer<typeof device>;
+export type PairingInvitation = z.infer<typeof pairingInvitation>;
+export type PairingInvitationStatus = z.infer<typeof pairingInvitationStatus>;
+export type PairingRequest = z.infer<typeof pairingRequest>;
+export type PairingDecision = Schemas['WebPairingDecision']['decision'];
 export type SupervisorArtifact = z.infer<typeof artifact>;
 export type WebAutomation = z.infer<typeof automation>;
 export type AutomationCapabilities = z.infer<typeof capabilities>;
@@ -173,6 +237,8 @@ const tasksPath: keyof paths = '/v1/web/tasks';
 const pendingPath: keyof paths = '/v1/web/approvals/pending';
 const approvalsPath = '/v1/web/approvals';
 const devicesPath: keyof paths = '/v1/web/devices';
+const pairingInvitationsPath: keyof paths = '/v1/web/devices/pairing-invitations';
+const pairingRequestsPath: keyof paths = '/v1/web/devices/pairing-requests';
 const automationsPath: keyof paths = '/v1/web/automations';
 const authorityPath: keyof paths = '/v1/web/automations/capabilities';
 const taskPath = (taskId: string) => `${tasksPath}/${encodeURIComponent(taskId)}`;
@@ -317,6 +383,39 @@ export function createControlApi(request: JsonRequest, exchange: Exchange, csrf:
         ...write,
         body: { confirm: true },
       }).then(data => sameId(data, data.device_id, deviceId)),
+    createPairingInvitation: () =>
+      request(pairingInvitationsPath, 200, pairingInvitation, {
+        ...write,
+        body: { transport: 'wifi' } satisfies Schemas['WebPairingInvitationCreate'],
+      }),
+    getPairingInvitationStatus: (invitationId: string, signal?: AbortSignal) =>
+      request(
+        `${pairingInvitationsPath}/${encodeURIComponent(invitationId)}`,
+        200,
+        pairingInvitationStatus,
+        { signal }
+      ).then(data => sameId(data, data.invitation_id, invitationId)),
+    cancelPairingInvitation: (invitationId: string) =>
+      request(
+        `${pairingInvitationsPath}/${encodeURIComponent(invitationId)}/cancel`,
+        200,
+        pairingDecisionResult,
+        { ...write, body: {} satisfies Schemas['WebPairingCancelRequest'] }
+      ).then(data => sameId(data, data.invitation_id, invitationId)),
+    listPairingRequests: (limit = 50, signal?: AbortSignal) =>
+      request(
+        `${pairingRequestsPath}?${new URLSearchParams({ limit: String(limit) })}`,
+        200,
+        pairingRequestList,
+        { signal }
+      ),
+    decidePairingRequest: (invitationId: string, decision: PairingDecision) =>
+      request(
+        `${pairingRequestsPath}/${encodeURIComponent(invitationId)}/decision`,
+        200,
+        pairingDecisionResult,
+        { ...write, body: { decision } satisfies Schemas['WebPairingDecision'] }
+      ).then(data => sameId(data, data.invitation_id, invitationId)),
     listArtifacts: async (taskId: string, signal?: AbortSignal) => {
       const data = await request(
         `${taskPath(taskId)}/artifacts`,

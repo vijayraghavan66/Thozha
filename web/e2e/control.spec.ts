@@ -357,3 +357,132 @@ test('shows real mapped pairings and requires a confirmed revocation', async ({ 
   await expect(page.getByRole('button', { name: /Revocation test pairing/ })).toHaveCount(0);
   expect((await page.request.get(`/v1/web/devices/${removed}`)).status()).toBe(404);
 });
+
+test('labels unavailable Wi-Fi pairing honestly and never shows a fabricated QR', async ({
+  page,
+}) => {
+  await signIn(page);
+  const pendingRequests = page.waitForResponse(
+    response =>
+      response.request().method() === 'GET' &&
+      response.url().includes('/v1/web/devices/pairing-requests?limit=50')
+  );
+  await page.getByRole('link', { name: 'Device Hub' }).click();
+  expect((await pendingRequests).status()).toBe(200);
+  const createRequest = page.waitForResponse(
+    response =>
+      response.request().method() === 'POST' &&
+      response.url().endsWith('/v1/web/devices/pairing-invitations')
+  );
+  await page.getByRole('button', { name: 'Pair new device' }).click();
+  expect((await createRequest).status()).toBe(409);
+  const dialog = page.getByRole('dialog', { name: 'Pair new device' });
+  await expect(dialog.getByRole('alert')).toBeVisible();
+  await expect(dialog).toContainText('No QR code was created');
+  await expect(
+    dialog.getByRole('img', { name: 'Signed Wi-Fi pairing invitation QR code' })
+  ).toHaveCount(0);
+});
+
+test('uses only the nested invitation payload and reviews identity before granting a pairing decision', async ({
+  page,
+}, testInfo) => {
+  await signIn(page);
+  await page.getByRole('link', { name: 'Device Hub' }).click();
+  const invitationId = 'c'.repeat(32);
+  const payload = {
+    protocol: 'openjarvis-pairing-v2',
+    server_url: 'https://192.0.2.10:8443',
+    gateway_address: '192.0.2.10',
+    gateway_port: '8443',
+    gateway_certificate_sha256: `sha256:${'1'.repeat(64)}`,
+    server_fingerprint: `sha256:${'2'.repeat(64)}`,
+    server_public_key: 'fixture-public-key',
+    invitation_id: invitationId,
+    challenge: 'fixture-challenge',
+    expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+    server_signature: 'fixture-signature',
+  };
+  let invitationState = 'INVITED';
+  await page.route(/\/v1\/web\/devices\/pairing-requests(?:\?[^#]*)?$/, route =>
+    route.fulfill({ status: 200, json: { requests: [], count: 0 } })
+  );
+  await page.route('**/v1/web/devices/pairing-invitations', async route => {
+    expect(route.request().postDataJSON()).toEqual({ transport: 'wifi' });
+    await route.fulfill({
+      status: 200,
+      json: { ...payload, qr_payload: payload },
+    });
+  });
+  await page.route(`**/v1/web/devices/pairing-invitations/${invitationId}`, route =>
+    route.fulfill({
+      status: 200,
+      json: { invitation_id: invitationId, status: invitationState },
+    })
+  );
+  await page.route(`**/v1/web/devices/pairing-invitations/${invitationId}/cancel`, async route => {
+    expect(route.request().postDataJSON()).toEqual({});
+    invitationState = 'CANCELLED';
+    await route.fulfill({
+      status: 200,
+      json: { invitation_id: invitationId, status: 'CANCELLED' },
+    });
+  });
+  await page.getByRole('button', { name: 'Pair new device' }).click();
+  const pairing = page.getByRole('dialog', { name: 'Pair new device' });
+  const qr = pairing.getByRole('img', { name: 'Signed Wi-Fi pairing invitation QR code' });
+  await expect(qr).toBeVisible();
+  await expect(pairing).toContainText(payload.server_fingerprint);
+  await expect(pairing).toContainText('Pairing never automatically authorizes Web task execution');
+  await page.screenshot({
+    path: testInfo.outputPath('pairing-invitation.png'),
+    animations: 'disabled',
+  });
+  await pairing.getByRole('button', { name: 'Cancel invitation' }).click();
+  await expect(pairing.getByText('CANCELLED', { exact: true })).toBeVisible();
+  await pairing.getByRole('button', { name: 'Close Pair new device' }).click();
+
+  const requestId = 'd'.repeat(32);
+  let decided = false;
+  await page.route(/\/v1\/web\/devices\/pairing-requests(?:\?[^#]*)?$/, route =>
+    route.fulfill({
+      status: 200,
+      json: {
+        requests: decided
+          ? []
+          : [
+              {
+                id: requestId,
+                status: 'PENDING_CONFIRMATION',
+                device_name: 'Fixture Android',
+                device_fingerprint: `sha256:${'3'.repeat(64)}`,
+                requested_at: new Date().toISOString(),
+                expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+              },
+            ],
+        count: decided ? 0 : 1,
+      },
+    })
+  );
+  await page.route(`**/v1/web/devices/pairing-requests/${requestId}/decision`, async route => {
+    expect(route.request().postDataJSON()).toEqual({ decision: 'approve' });
+    decided = true;
+    await route.fulfill({
+      status: 200,
+      json: { invitation_id: requestId, status: 'APPROVED' },
+    });
+  });
+  await page.reload();
+  const pairingPanel = page.getByRole('region', { name: 'Secure device pairing' });
+  await expect(pairingPanel.getByText('Fixture Android')).toBeVisible();
+  await pairingPanel.getByRole('button', { name: 'Review identity' }).click();
+  const review = page.getByRole('dialog', { name: 'Review pairing request' });
+  await expect(review).toContainText(`sha256:${'3'.repeat(64)}`);
+  const response = page.waitForResponse(response =>
+    response.url().endsWith(`/pairing-requests/${requestId}/decision`)
+  );
+  await review.getByRole('button', { name: 'Approve pairing' }).click();
+  expect((await response).status()).toBe(200);
+  await expect(pairingPanel).toContainText('The phone must still complete its key-proof claim');
+  await expect(pairingPanel.getByText('No pending pairing requests.')).toBeVisible();
+});
