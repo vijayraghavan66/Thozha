@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.js",
+    "simulate:scale": "node scripts/simulate-scale.mjs",
     "dev": "wrangler dev --local"
   },
   "devDependencies": {
