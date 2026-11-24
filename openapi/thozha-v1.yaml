@@ -31,6 +31,38 @@ paths:
                 type: object
                 properties:
                   status: { type: string, const: ok }
+  /v1/jarvis/pair/{invitation_id}/cancel:
+    post:
+      operationId: cancelLocalPairingInvitation
+      security: []
+      tags: [companion]
+      description: >
+        Cancels an unclaimed QR pairing invitation on the Mac. This is a
+        state-changing Mac-local UI operation; the caller must be loopback and
+        send an allowed same-origin Origin. It never revokes an already issued
+        paired-device credential. If the invitation has already been claimed,
+        the caller must use the separate owner-confirmed device revocation flow.
+      parameters:
+        - name: invitation_id
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+      responses:
+        '200':
+          description: Current terminal status after cancellation attempt.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invitation_id, status]
+                properties:
+                  invitation_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+                  status: { type: string, enum: [CANCELLED, EXPIRED, REJECTED] }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The invitation was already claimed; revoke the resulting device instead.
+        '503': { $ref: '#/components/responses/Unavailable' }
   /v1/web/session/login:
     post:
       operationId: createWebSession
