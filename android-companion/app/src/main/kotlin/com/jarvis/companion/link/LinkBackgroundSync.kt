@@ -31,10 +31,30 @@ object LinkBackgroundSync {
     fun run(context: Context): SyncReport? {
         val settings = LinkSettings(context)
         if (!canRun(context)) return null
-        val report = LinkService.runtime(context).syncNow(settings.relayUrl)
+        val runtime = LinkService.runtime(context)
+        val startedAtMs = System.currentTimeMillis()
+        val startedNs = android.os.SystemClock.elapsedRealtimeNanos()
+        val report = runtime.syncNow(settings.relayUrl)
+        val newlyPersisted = report.updates.filter { row ->
+            val receivedAt = (row["received_at_unix_ms"] as? Number)?.toLong() ?: 0L
+            receivedAt >= startedAtMs
+        }
+        val newlyPersistedTerminal = newlyPersisted.count { row ->
+            (row["state"] as? String)?.uppercase() in TERMINAL_TASK_STATES
+        }
+        val latestReceiptAt = newlyPersisted.maxOfOrNull { row ->
+            (row["received_at_unix_ms"] as? Number)?.toLong() ?: 0L
+        } ?: 0L
+        val safeError = report.error.takeIf { it.matches(Regex("[A-Z0-9_]{1,48}")) } ?: if (report.error.isBlank()) "none" else "other"
+        android.util.Log.i(
+            "JarvisDelivery",
+            "event=link_sync_persisted mode=${settings.mode.wire} elapsed_ms=${android.os.SystemClock.elapsedRealtimeNanos().minus(startedNs) / 1_000_000} new_updates=${newlyPersisted.size} new_terminal=$newlyPersistedTerminal receipt_to_sync_end_ms=${if (latestReceiptAt > 0) (System.currentTimeMillis() - latestReceiptAt).coerceAtLeast(0) else -1} error=$safeError",
+        )
         report.newApprovals.forEach { LinkAlerts.notifyApproval(context, it) }
         return report
     }
+
+    private val TERMINAL_TASK_STATES = setOf("COMPLETED", "FAILED", "CANCELLED", "REJECTED", "EXPIRED", "INDETERMINATE")
 }
 
 /**

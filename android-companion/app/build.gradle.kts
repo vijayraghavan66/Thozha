@@ -297,6 +297,14 @@ tasks.register<JavaExec>("verifyExecutionLanes") {
     mainClass.set("com.jarvis.companion.ui.ExecutionLanesCheck")
 }
 
+tasks.register<JavaExec>("verifyLinkSyncPolicy") {
+    group = "verification"
+    description = "Checks durable active-task detection, lifecycle catch-up coalescing, deduplication and terminal/cancelled stop behavior."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.ui.LinkSyncPolicyChecks")
+}
+
 tasks.register<JavaExec>("verifyFastCommand") {
     group = "verification"
     dependsOn("compileDebugUnitTestKotlin")

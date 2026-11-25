@@ -49,7 +49,7 @@ enum class Tab(val label: String) { HOME("Home"), ACTIVITY("Activity"), APPROVAL
 enum class Overlay { SETTINGS, HISTORY }
 
 /** States the Mac reports while work is still open. Used for polling and for the presence signal. */
-val ActiveStates = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "WAITING_CONNECTION", "PAUSED", "SENT", "QUEUED", "UNCONFIRMED")
+val ActiveStates = LinkSyncPolicy.activeStates
 
 /**
  * Holds everything the Compose screens show. Mac task snapshots come from the authenticated supervisor API;
@@ -60,6 +60,7 @@ val ActiveStates = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING
 class JarvisStore(private val app: Context) {
     private val main = Handler(Looper.getMainLooper())
     private val lanes = ExecutionLanes()
+    private val linkSyncGate = CoalescingSyncGate()
     private val sessions = ChatSessions(app)
     private val localHistory = LocalAiConversationHistory(app)
     private val localAi = LocalAiManager.get(app)
@@ -258,8 +259,11 @@ class JarvisStore(private val app: Context) {
             ?.get("text") as? String ?: ""
 
     /** Whether any request is still open on the Mac or waiting to be delivered. */
-    fun hasActiveWork(): Boolean = entries.any {
-        it["transport"] != "local" && (it["state"] as? String) in ActiveStates
+    fun hasActiveWork(): Boolean {
+        // Compose state is hydrated asynchronously on launch/resume. Read the durable Link snapshot too,
+        // so a SENT task restored from disk uses the existing active cadence immediately.
+        val durableConversation = runCatching { LinkService.runtime(app).conversation() }.getOrNull()
+        return LinkSyncPolicy.hasActiveWork(entries, durableConversation)
     }
 
     fun hasRunningWork(): Boolean = entries.any {
@@ -363,7 +367,14 @@ class JarvisStore(private val app: Context) {
         ui {
             localWifiPin = currentWifiPin
             lastMacApiTransport = currentApiTransport
-            entries = mergeEntries(conversation, localHistory.all())
+            val nextEntries = mergeEntries(conversation, localHistory.all())
+            val newlyVisibleTerminal = nextEntries.filter { row ->
+                if (row["transport"] == "local" || !LinkSyncPolicy.isTerminalDeliveryState(row["state"] as? String)) return@filter false
+                val id = row["message_id"] as? String ?: return@filter false
+                val previous = entries.firstOrNull { it["message_id"] == id }
+                !LinkSyncPolicy.isTerminalDeliveryState(previous?.get("state") as? String)
+            }
+            entries = nextEntries
             taskUpdates = updatesSnapshot
             taskRegistry = taskRegistrySnapshot
             taskEventHistory = taskEventSnapshot
@@ -382,7 +393,51 @@ class JarvisStore(private val app: Context) {
             macApiSyncError = apiError
             if (snapshot != null) telegram = snapshot
             sessionList = sessions.all()
+            newlyVisibleTerminal.forEach(::logTerminalVisible)
         }
+    }
+
+    /**
+     * Projects events that a transport has already authenticated and durably persisted. The WSS event
+     * client may call this after its cursor/ACK transaction; it performs no network request and emits
+     * no notification. Telegram continues to use [refreshLocal] after its normal Link sync.
+     */
+    fun refreshPersistedLinkState() = background(lanes.local) {
+        val runtime = LinkService.runtime(app)
+        val conversation = runtime.conversation()
+        val updates = runtime.recentUpdates()
+        val registry = runtime.taskRegistry()
+        val eventHistory = runtime.taskEventHistory()
+        val status = runtime.status()
+        ui {
+            val nextEntries = mergeEntries(conversation, localHistory.all())
+            val newlyVisibleTerminal = nextEntries.filter { row ->
+                if (row["transport"] == "local" || !LinkSyncPolicy.isTerminalDeliveryState(row["state"] as? String)) return@filter false
+                val id = row["message_id"] as? String ?: return@filter false
+                val previous = entries.firstOrNull { it["message_id"] == id }
+                !LinkSyncPolicy.isTerminalDeliveryState(previous?.get("state") as? String)
+            }
+            entries = nextEntries
+            taskUpdates = updates
+            taskRegistry = registry
+            taskEventHistory = eventHistory
+            linkStatus = status
+            newlyVisibleTerminal.forEach(::logTerminalVisible)
+        }
+    }
+
+    private fun logTerminalVisible(row: Map<String, Any>) {
+        val id = row["message_id"] as? String ?: return
+        val createdAt = (row["created_at_unix_ms"] as? Number)?.toLong() ?: 0L
+        val persistedAt = (row["updated_at_unix_ms"] as? Number)?.toLong() ?: 0L
+        val nowMs = System.currentTimeMillis()
+        val requestHash = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(id.toByteArray(Charsets.UTF_8)).take(6).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val visibleState = (row["state"] as? String)?.uppercase()?.takeIf { it.matches(Regex("[A-Z_]{1,32}")) } ?: "UNKNOWN"
+        android.util.Log.i(
+            "JarvisDelivery",
+            "event=terminal_visible request_hash=$requestHash state=$visibleState request_to_ui_ms=${if (createdAt > 0) (nowMs - createdAt).coerceAtLeast(0) else -1} persisted_to_ui_ms=${if (persistedAt > 0) (nowMs - persistedAt).coerceAtLeast(0) else -1}",
+        )
     }
 
     /** Telegram reports every change through the session listener; this keeps the latest snapshot. */
@@ -521,15 +576,45 @@ class JarvisStore(private val app: Context) {
     }
 
     fun syncNow() = ui {
-        if (syncing) return@ui
+        // A foreground/resume/manual catch-up that overlaps a slow tunnel exchange is coalesced into
+        // exactly one follow-up instead of being silently discarded or starting a competing poller.
+        if (!linkSyncGate.request()) return@ui
         syncing = true
+        runLinkSync()
+    }
+
+    private fun runLinkSync() {
+        val startedNs = System.nanoTime()
+        val mode = LinkSettings(app).mode
         background(lanes.sync) {
-            if (LinkSettings(app).mode == com.jarvis.companion.link.LinkMode.TEST_RELAY) {
-                runCatching { LinkBackgroundSync.run(app) }
+            var report: com.jarvis.link.SyncReport? = null
+            var failureType: String? = null
+            try {
+                if (mode == com.jarvis.companion.link.LinkMode.TEST_RELAY) {
+                    val result = runCatching { LinkBackgroundSync.run(app) }
+                    report = result.getOrNull()
+                    failureType = result.exceptionOrNull()?.javaClass?.simpleName
+                }
+                if (hasMacApiPairing()) lastMacApiProbeAttemptMs = 0L
+            } finally {
+                val elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNs)
+                val reportError = report?.error?.takeIf { it.matches(Regex("[A-Z0-9_]{1,48}")) }
+                    ?: report?.error?.takeIf { it.isNotBlank() }?.let { "other" }
+                val outcome = reportError ?: failureType?.takeIf { it.matches(Regex("[A-Za-z0-9]{1,48}")) }
+                    ?: if (report == null) "route_unavailable" else "none"
+                android.util.Log.i(
+                    "JarvisDelivery",
+                    "event=sync_finished mode=${mode.wire} elapsed_ms=$elapsedMs approvals=${report?.newApprovals?.size ?: 0} updates=${report?.updates?.size ?: 0} outcome=$outcome",
+                )
+                ui {
+                    refreshLocal()
+                    if (linkSyncGate.complete()) {
+                        runLinkSync()
+                    } else {
+                        syncing = false
+                    }
+                }
             }
-            if (hasMacApiPairing()) lastMacApiProbeAttemptMs = 0L
-            ui { syncing = false }
-            refreshLocal()
         }
     }
 
