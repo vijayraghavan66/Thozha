@@ -210,6 +210,7 @@ fun LiveScreen(
                         listOf(
                             "Identity" to localWifi.identityLabel,
                             "Last route" to localWifi.latestRouteLabel,
+                            "LAN events" to store.lanTransportStatus,
                         ),
                     )
                     TextAction(

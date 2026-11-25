@@ -31,28 +31,28 @@ fun main() {
     // --- transport selection -------------------------------------------------------------------------------
     check(
         !MacTransportSelection.usePairedMacApi(
-            hasMacApiPairing = true, testRelaySelected = true,
+            hasMacApiPairing = true, pairedLocalRouteReady = false,
             directReadOnlyCommand = true, routeIsMac = true,
         ),
-        "explicit Link test-relay mode routes Home chat through the authenticated relay",
+        "without a pinned, permitted local route, Android keeps the authenticated Link fallback",
     )
     check(
         MacTransportSelection.usePairedMacApi(
-            hasMacApiPairing = true, testRelaySelected = false,
+            hasMacApiPairing = true, pairedLocalRouteReady = true,
             directReadOnlyCommand = true, routeIsMac = false,
         ),
-        "Local USB mode keeps the existing direct paired Mac status path",
+        "a paired local route carries read-only Mac status directly",
     )
     check(
         MacTransportSelection.usePairedMacApi(
-            hasMacApiPairing = true, testRelaySelected = false,
+            hasMacApiPairing = true, pairedLocalRouteReady = true,
             directReadOnlyCommand = false, routeIsMac = true,
         ),
-        "Local USB mode keeps paired Mac API routing for ordinary Mac requests",
+        "a paired local route carries ordinary Mac tasks directly",
     )
     check(
         !MacTransportSelection.usePairedMacApi(
-            hasMacApiPairing = false, testRelaySelected = false,
+            hasMacApiPairing = false, pairedLocalRouteReady = true,
             directReadOnlyCommand = true, routeIsMac = true,
         ),
         "a missing direct pairing never becomes an API route",

@@ -1,11 +1,11 @@
 package com.jarvis.companion.presentation
 
-/** Keeps a paired USB API as the default, while honoring an explicit Link test-relay selection. */
+/** Selects direct paired transport only when its required private route is configured. */
 object MacTransportSelection {
     fun usePairedMacApi(
         hasMacApiPairing: Boolean,
-        testRelaySelected: Boolean,
+        pairedLocalRouteReady: Boolean,
         directReadOnlyCommand: Boolean,
         routeIsMac: Boolean,
-    ): Boolean = hasMacApiPairing && !testRelaySelected && (directReadOnlyCommand || routeIsMac)
+    ): Boolean = hasMacApiPairing && pairedLocalRouteReady && (directReadOnlyCommand || routeIsMac)
 }

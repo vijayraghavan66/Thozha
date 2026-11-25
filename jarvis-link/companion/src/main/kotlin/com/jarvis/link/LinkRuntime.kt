@@ -335,6 +335,18 @@ class LinkRuntime(
     fun taskRegistry(): List<Map<String, Any>> = (load()["task_registry"] as? List<Map<String, Any>>) ?: emptyList()
     fun taskEventHistory(): List<Map<String, Any>> = (load()["task_event_history"] as? List<Map<String, Any>>) ?: emptyList()
 
+    /** Updates only the selected response transport for an existing idempotent request. */
+    fun updateLocalTaskTransport(requestId: String, transport: String): Boolean = synchronized(stateLock) {
+        require(requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid request ID" }
+        require(transport in setOf("api", "link", "telegram")) { "invalid conversation transport" }
+        val rows = conversation().toMutableList()
+        val index = rows.indexOfFirst { it["message_id"] == requestId }
+        if (index < 0) return@synchronized false
+        rows[index] = LinkedHashMap(rows[index]).apply { put("transport", transport); put("updated_at_unix_ms", now()) }
+        save(mapOf("conversation" to rows))
+        true
+    }
+
     /**
      * Returns the durable event cursor for one submitted request. Cursors are per request because the
      * WSS route is task-scoped even though the server's TaskEvent sequence is globally increasing.
@@ -385,7 +397,7 @@ class LinkRuntime(
         require(entryIndex >= 0) { "task event request is not present in the durable conversation" }
         val previousEntry = conversations[entryIndex]
         val boundTask = (previousEntry["task_id"] as? String).orEmpty()
-        require(boundTask.isBlank() || boundTask == supervisorTaskId) { "task event belongs to a different supervisor task" }
+        require(boundTask.isBlank() || boundTask == requestId || boundTask == supervisorTaskId) { "task event belongs to a different supervisor task" }
 
         val normalizedState = normalizeStreamTaskState(taskState)
             ?: when (eventType) {
@@ -412,7 +424,7 @@ class LinkRuntime(
                 "status" to normalizedState,
                 "event_type" to eventType,
                 "timestamp_unix_ms" to eventTime,
-                "event" to eventType,
+                "event" to streamEventLabel(eventType),
                 "summary" to summary,
             )
             if (toolName.isNotBlank()) row["tool_name"] = toolName
@@ -491,7 +503,7 @@ class LinkRuntime(
         require(entryIndex >= 0) { "checkpoint request is not present in the durable conversation" }
         val entry = LinkedHashMap(conversations[entryIndex])
         val boundTask = (entry["task_id"] as? String).orEmpty()
-        require(boundTask.isBlank() || boundTask == supervisorTaskId) { "checkpoint belongs to a different supervisor task" }
+        require(boundTask.isBlank() || boundTask == requestId || boundTask == supervisorTaskId) { "checkpoint belongs to a different supervisor task" }
         entry["task_id"] = supervisorTaskId
         conversations[entryIndex] = entry
 
@@ -523,6 +535,28 @@ class LinkRuntime(
         "FAILED", "REJECTED", "EXPIRED", "INDETERMINATE" -> "FAILED"
         "CANCELLED" -> "CANCELLED"
         else -> null
+    }
+
+    private fun streamEventLabel(eventType: String): String = when (eventType) {
+        "task.state" -> "Task status changed"
+        "task.recovered_paused" -> "Task paused for safe recovery"
+        "task.cancelled", "link_task.cancelled" -> "Task cancelled"
+        "link_task.queued" -> "Task queued on Mac"
+        "link_task.started" -> "Mac started the task"
+        "link_task.waiting_approval" -> "Waiting for owner approval"
+        "link_task.approval_consumed", "approval.consumed" -> "Approval accepted"
+        "link_task.approval_rejected" -> "Approval rejected"
+        "link_task.completed" -> "Task completed"
+        "link_task.failed" -> "Task failed"
+        "approval.created" -> "Approval request created"
+        "approval.decision" -> "Approval decision recorded"
+        "approval.expired" -> "Approval expired"
+        "approval.execution_completed" -> "Approved operation completed"
+        "approval.execution_failed" -> "Approved operation failed"
+        "approval.mac_mcp_dispatched" -> "Authorized operation dispatched"
+        "tool.mcp_approval_dispatch_claimed" -> "Authorized operation dispatch claimed"
+        "development.tool_performance" -> "Development step completed"
+        else -> "Task event"
     }
 
     private fun normalizedTaskState(value: String): String = when (value.trim().uppercase()) {

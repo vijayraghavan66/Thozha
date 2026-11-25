@@ -632,6 +632,11 @@ object CompanionProtocolTest {
         val requestId = "a1".repeat(16)
         val supervisorTaskId = "b2".repeat(16)
         first.recordLocalTaskRequest(requestId, "read-only status", transport = "link", lookupLinkStatus = false)
+        // Link acceptance initially binds the conversation to the request/message ID until the Mac
+        // returns its supervisor task ID. The authenticated WSS event may safely replace this placeholder.
+        first.recordLocalTaskResult(requestId, requestId, "SENT", "Waiting for Mac")
+        check(first.updateLocalTaskTransport(requestId, "telegram"))
+        check(first.conversation().single()["transport"] == "telegram")
 
         check(first.taskEventStreamCursor(requestId) == 0L)
         check(first.persistTaskEventStreamEvent(

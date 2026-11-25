@@ -31,6 +31,21 @@ import com.jarvis.companion.model.JarvisTask
 import com.jarvis.companion.model.Approval
 import com.jarvis.companion.data.JarvisApi
 import com.jarvis.companion.data.SecureStore
+import com.jarvis.companion.data.AndroidLocalGatewayTaskEventWssChannel
+import com.jarvis.companion.data.AndroidNsdLocalMacDiscovery
+import com.jarvis.companion.data.DiscoveredMacGateway
+import com.jarvis.companion.data.LocalGatewayDiscovery
+import com.jarvis.companion.data.LocalMacDiscoveryListener
+import com.jarvis.companion.data.LocalMacDiscoveryProvider
+import com.jarvis.companion.data.LocalMacDiscoverySession
+import com.jarvis.companion.data.LocalMacDiscoverySnapshot
+import com.jarvis.companion.data.LocalMacDiscoveryStatus
+import com.jarvis.companion.data.TaskEventChannelListener
+import com.jarvis.companion.data.TaskEventChannelSession
+import com.jarvis.companion.data.TaskEventChannelState
+import com.jarvis.companion.data.TaskEventCursorCheckpoint
+import com.jarvis.companion.data.TaskEventEnvelope
+import com.jarvis.companion.data.TaskEventPersister
 import com.jarvis.companion.telegram.TelegramSession
 import com.jarvis.companion.telegram.TelegramBootstrap
 import com.jarvis.companion.telegram.TelegramSnapshot
@@ -50,6 +65,12 @@ enum class Overlay { SETTINGS, HISTORY }
 
 /** States the Mac reports while work is still open. Used for polling and for the presence signal. */
 val ActiveStates = LinkSyncPolicy.activeStates
+private const val MAX_LOCAL_TASK_EVENT_SESSIONS = 6
+private val TERMINAL_SUPERVISOR_TASK_STATES = setOf("COMPLETED", "FAILED", "CANCELLED", "REJECTED", "EXPIRED", "INDETERMINATE")
+private val TERMINAL_TASK_EVENT_TYPES = setOf(
+    "link_task.completed", "link_task.failed", "link_task.cancelled", "link_task.approval_rejected",
+    "task.cancelled", "approval.expired", "approval.execution_completed", "approval.execution_failed",
+)
 
 /**
  * Holds everything the Compose screens show. Mac task snapshots come from the authenticated supervisor API;
@@ -66,6 +87,13 @@ class JarvisStore(private val app: Context) {
     private val localAi = LocalAiManager.get(app)
     private val secureStore = SecureStore(app)
     private val jarvisApi = JarvisApi(app, secureStore)
+    private val localMacDiscovery: LocalMacDiscoveryProvider = AndroidNsdLocalMacDiscovery(app)
+    private val localTaskEventChannel = AndroidLocalGatewayTaskEventWssChannel(app, secureStore)
+    private val localTaskEventLock = Any()
+    private val localTaskEventSessions = linkedMapOf<String, TaskEventChannelSession>()
+    private val localTaskEventStarts = mutableSetOf<String>()
+    @Volatile private var localMacDiscoverySession: LocalMacDiscoverySession? = null
+    @Volatile private var discoveredPinnedMac: DiscoveredMacGateway? = null
     private val approvalDecisionPrefs = app.getSharedPreferences("jarvis_approval_decisions", Context.MODE_PRIVATE)
     private var destroyed = false
 
@@ -76,6 +104,8 @@ class JarvisStore(private val app: Context) {
     var taskUpdates by mutableStateOf<List<Map<String, Any>>>(emptyList())
     var taskRegistry by mutableStateOf<List<Map<String, Any>>>(emptyList())
     var taskEventHistory by mutableStateOf<List<Map<String, Any>>>(emptyList())
+    var lanTransportStatus by mutableStateOf("Not connected")
+        private set
     /** Read-only task state fetched from the paired Mac supervisor for Activity history. */
     var macSupervisorTasks by mutableStateOf<List<JarvisTask>>(emptyList())
     var approvals by mutableStateOf<List<ApprovalReview>>(emptyList())
@@ -345,6 +375,7 @@ class JarvisStore(private val app: Context) {
             }
         }
         conversation = runtime.conversation()
+        ensureLocalTaskEventWatches(conversation)
         val pending = runtime.pendingApprovals()
         val combinedApprovals = linkedMapOf<String, ApprovalReview>()
         pending.forEach { combinedApprovals[it.approvalId] = it }
@@ -425,6 +456,164 @@ class JarvisStore(private val app: Context) {
             newlyVisibleTerminal.forEach(::logTerminalVisible)
         }
     }
+
+    /**
+     * Starts DNS-SD only for an already-paired, pinned gateway. DNS-SD remains an untrusted hint;
+     * the WSS client validates the saved certificate fingerprint and exact DNS SAN before sending
+     * the existing paired bearer. No address scanning or permission prompt is initiated here.
+     */
+    private fun ensureLocalMacDiscovery() {
+        if (android.os.Build.VERSION.SDK_INT >= 37 && !LocalGatewayDiscovery.localNetworkPermissionGranted(app)) {
+            ui { lanTransportStatus = "Local network permission required" }
+            return
+        }
+        val pin = runCatching { secureStore.localGatewayPin() }.getOrNull()
+        if (pin == null) {
+            ui { lanTransportStatus = "No verified Mac Wi-Fi identity" }
+            return
+        }
+        synchronized(localTaskEventLock) {
+            if (localMacDiscoverySession != null || destroyed) return
+            localMacDiscoverySession = localMacDiscovery.start(LocalMacDiscoveryListener(::onLocalMacDiscoverySnapshot))
+        }
+    }
+
+    private fun onLocalMacDiscoverySnapshot(snapshot: LocalMacDiscoverySnapshot) {
+        val pin = runCatching { secureStore.localGatewayPin() }.getOrNull()
+        val matching = if (pin == null) emptyList() else snapshot.gateways.filter {
+            it.advertisedTlsHostname.equals(pin.hostname, ignoreCase = true) && it.port == pin.port
+        }
+        // Multiple advertisements claiming the same pinned identity are ambiguous; wait for a single candidate.
+        val selected = matching.singleOrNull()
+        discoveredPinnedMac = selected
+        ui {
+            lanTransportStatus = when {
+                snapshot.status == LocalMacDiscoveryStatus.LOCAL_NETWORK_PERMISSION_REQUIRED -> "Local network permission required"
+                snapshot.status == LocalMacDiscoveryStatus.ERROR -> "Mac discovery unavailable"
+                selected != null -> "Paired Mac found; verifying pinned connection"
+                snapshot.status == LocalMacDiscoveryStatus.DISCOVERING -> "Searching for paired Mac"
+                snapshot.gateways.isNotEmpty() -> "Unverified Mac advertisement found"
+                else -> "Paired Mac not found on this LAN"
+            }
+        }
+        val sessions = synchronized(localTaskEventLock) { localTaskEventSessions.values.toList() }
+        sessions.forEach { session -> runCatching { session.updateDiscoveredGateway(selected) } }
+        if (snapshot.status == LocalMacDiscoveryStatus.ERROR || snapshot.status == LocalMacDiscoveryStatus.UNAVAILABLE) {
+            val failed = synchronized(localTaskEventLock) { localMacDiscoverySession.also { localMacDiscoverySession = null } }
+            runCatching { failed?.close() }
+        }
+    }
+
+    private val localTaskEventPersister = object : TaskEventPersister {
+        override fun persistEvent(event: TaskEventEnvelope): Boolean = runCatching {
+            val runtime = LinkService.runtime(app)
+            runtime.persistTaskEventStreamEvent(
+                requestId = event.idempotencyKey,
+                supervisorTaskId = event.supervisorTaskId,
+                sequence = event.sequence,
+                eventType = event.event.state,
+                createdAt = event.event.at,
+                taskState = event.taskState,
+                summary = event.event.message,
+                toolName = event.event.toolName,
+                durationMs = event.event.durationMs,
+            )
+            true
+        }.getOrElse { failure ->
+            android.util.Log.w("JarvisLanEvents", "event=persist_failed type=${failure.javaClass.simpleName}")
+            false
+        }
+
+        override fun persistCheckpoint(checkpoint: TaskEventCursorCheckpoint): Boolean = runCatching {
+            val runtime = LinkService.runtime(app)
+            runtime.persistTaskEventStreamCheckpoint(
+                requestId = checkpoint.idempotencyKey,
+                supervisorTaskId = checkpoint.supervisorTaskId,
+                sequence = checkpoint.sequence,
+            )
+            true
+        }.getOrElse { failure ->
+            android.util.Log.w("JarvisLanEvents", "checkpoint_persist_failed type=${failure.javaClass.simpleName}")
+            false
+        }
+    }
+
+    private fun startLocalTaskEventWatch(requestId: String, supervisorTaskId: String) {
+        if (!requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}")) || !supervisorTaskId.matches(Regex("[0-9a-f]{32}"))) return
+        if (!LocalGatewayDiscovery.localNetworkPermissionGranted(app)) return
+        ensureLocalMacDiscovery()
+        synchronized(localTaskEventLock) {
+            if (destroyed || requestId in localTaskEventSessions || requestId in localTaskEventStarts ||
+                localTaskEventSessions.size + localTaskEventStarts.size >= MAX_LOCAL_TASK_EVENT_SESSIONS
+            ) return
+            localTaskEventStarts += requestId
+        }
+        val runtime = LinkService.runtime(app)
+        val session = runCatching {
+            localTaskEventChannel.open(
+                idempotencyKey = requestId,
+                persistedCursor = { runtime.taskEventStreamCursor(requestId) },
+                persister = localTaskEventPersister,
+                listener = object : TaskEventChannelListener {
+                    override fun onState(state: TaskEventChannelState, safeDiagnosticCode: String?) {
+                        if (state == TaskEventChannelState.CONNECTED) ui { lanTransportStatus = "Connected to paired Mac over LAN" }
+                        else if (state == TaskEventChannelState.FAILED) {
+                            val code = safeDiagnosticCode?.takeIf { it.matches(Regex("[A-Z0-9_]{1,48}")) } ?: "UNAVAILABLE"
+                            ui { lanTransportStatus = "LAN events unavailable ($code); existing transport remains active" }
+                            closeLocalTaskEventWatch(requestId)
+                        }
+                    }
+
+                    override fun onEventPersisted(event: TaskEventEnvelope) {
+                        refreshPersistedLinkState()
+                        if (isTerminalTaskEvent(event.event.state, event.taskState)) {
+                            closeLocalTaskEventWatch(event.idempotencyKey)
+                        }
+                    }
+
+                    override fun onCheckpointPersisted(checkpoint: TaskEventCursorCheckpoint) {
+                        refreshPersistedLinkState()
+                    }
+                },
+            )
+        }.getOrElse { failure ->
+            synchronized(localTaskEventLock) { localTaskEventStarts.remove(requestId) }
+            android.util.Log.w("JarvisLanEvents", "event=watch_open_failed type=${failure.javaClass.simpleName}")
+            return
+        }
+        synchronized(localTaskEventLock) {
+            localTaskEventStarts.remove(requestId)
+            if (destroyed) {
+                session.close()
+                return
+            }
+            localTaskEventSessions[requestId] = session
+        }
+        discoveredPinnedMac?.let { runCatching { session.updateDiscoveredGateway(it) } }
+    }
+
+    private fun closeLocalTaskEventWatch(requestId: String) {
+        val session = synchronized(localTaskEventLock) { localTaskEventSessions.remove(requestId) }
+        session?.close()
+        if (session != null && synchronized(localTaskEventLock) { localTaskEventSessions.isEmpty() }) {
+            ui { lanTransportStatus = "LAN task stream idle; authenticated fallback remains available" }
+        }
+    }
+
+    private fun ensureLocalTaskEventWatches(conversation: List<Map<String, Any>>) {
+        conversation.asSequence()
+            .filter { it["transport"] != "local" && (it["state"] as? String)?.uppercase() in ActiveStates }
+            .mapNotNull { row ->
+                val requestId = row["message_id"] as? String ?: return@mapNotNull null
+                val taskId = row["task_id"] as? String ?: return@mapNotNull null
+                requestId to taskId
+            }
+            .take(MAX_LOCAL_TASK_EVENT_SESSIONS)
+            .forEach { (requestId, taskId) -> startLocalTaskEventWatch(requestId, taskId) }
+    }
+
+    private fun isTerminalTaskEvent(eventType: String, taskState: String?): Boolean =
+        taskState?.uppercase() in TERMINAL_SUPERVISOR_TASK_STATES || eventType in TERMINAL_TASK_EVENT_TYPES
 
     private fun logTerminalVisible(row: Map<String, Any>) {
         val id = row["message_id"] as? String ?: return
@@ -652,6 +841,42 @@ class JarvisStore(private val app: Context) {
         LinkAlerts.notifyTaskUpdates(app, taskEventHistory)
     }
 
+    /**
+     * Reuses the same request ID and typed Link envelope after a paired API transport failure.
+     * The Mac supervisor's idempotency key is shared across transports, so an ambiguous HTTP
+     * timeout cannot create a second execution when Telegram/Link retries the request.
+     */
+    private fun submitViaAuthenticatedLinkFallback(
+        runtime: com.jarvis.link.LinkRuntime,
+        relayUrl: String,
+        requestId: String,
+        text: String,
+        capabilityScope: String,
+        route: RequestRoute,
+        fastCommand: FastCommand?,
+    ): com.jarvis.link.DeliveryResult = when (route) {
+        is RequestRoute.FastCommandUpstream -> when (fastCommand) {
+            FastCommand.MacStatus, FastCommand.MacSystemInfo ->
+                runtime.submitFastCommand(relayUrl, FastCommandRequest.MacStatus, requestId)
+            FastCommand.MacBatteryStatus ->
+                runtime.submitFastCommand(relayUrl, FastCommandRequest.MacBatteryStatus, requestId)
+            is FastCommand.TaskStatus ->
+                runtime.submitFastCommand(relayUrl, FastCommandRequest.TaskStatus(fastCommand.taskId), requestId)
+            is FastCommand.OpenApplication -> runtime.submitFastCommand(
+                relayUrl,
+                FastCommandRequest.OpenApplication(fastCommand.appId.bundleId, requestId),
+                requestId,
+            )
+            null -> error("Fast-command route lost its deterministic command")
+        }
+        is RequestRoute.Mac -> {
+            val capability = if (capabilityScope == "development") SafeCapability.DEVELOPMENT else SafeCapability.ASSISTANT
+            runtime.submit(relayUrl, TaskSubmission(text, setOf(capability), clientRequestId = requestId), null)
+        }
+        is RequestRoute.Local -> error("Local route is unavailable until a verified local model is loaded")
+        is RequestRoute.Rejected -> error("Rejected route reached the Link fallback")
+    }
+
     /** Sends the composer text through the same signed Link path that Telegram carries when connected. */
     fun submit() = ui {
         val text = draft.trim()
@@ -682,9 +907,12 @@ class JarvisStore(private val app: Context) {
         }
         val directReadOnlyCommand = fastCommand is FastCommand.MacStatus ||
             fastCommand is FastCommand.MacBatteryStatus || fastCommand is FastCommand.MacSystemInfo
+        val linkMode = LinkSettings(app).mode
+        val pairedLocalRouteReady = linkMode == com.jarvis.companion.link.LinkMode.LOCAL_USB ||
+            (runCatching { secureStore.localGatewayPin() }.getOrNull() != null && LocalGatewayDiscovery.localNetworkPermissionGranted(app))
         val usePairedMacApi = MacTransportSelection.usePairedMacApi(
             hasMacApiPairing = hasMacApiPairing(),
-            testRelaySelected = LinkSettings(app).mode == com.jarvis.companion.link.LinkMode.TEST_RELAY,
+            pairedLocalRouteReady = pairedLocalRouteReady,
             directReadOnlyCommand = directReadOnlyCommand,
             routeIsMac = fastCommand == null && route is RequestRoute.Mac,
         )
@@ -909,32 +1137,45 @@ class JarvisStore(private val app: Context) {
                             "JarvisStore",
                             "mac_api_task_failed trace=$requestTrace type=${failure.javaClass.simpleName} site=$site status=$status elapsed_ms=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs)}",
                         )
-                        runtime.recordLocalTaskResult(requestId, "", if (unresolved) "RUNNING" else "FAILED", deliveryError(failure))
-                        if (unresolved) lastMacApiProbeAttemptMs = 0L
+                        val fallback = if (unresolved) runCatching {
+                            submitViaAuthenticatedLinkFallback(
+                                runtime = runtime,
+                                relayUrl = LinkSettings(app).relayUrl,
+                                requestId = requestId,
+                                text = text,
+                                capabilityScope = capabilityScope,
+                                route = route,
+                                fastCommand = fastCommand,
+                            )
+                        } else Result.failure(failure)
+                        fallback.onSuccess { delivery ->
+                            val fallbackTransport = if (TelegramSession.activeTunnel() != null) "telegram" else "link"
+                            runtime.updateLocalTaskTransport(requestId, fallbackTransport)
+                            if (delivery.messageId != requestId) {
+                                runtime.recordLocalTaskResult(requestId, "", "FAILED", "The Link fallback could not correlate this request safely.")
+                            } else {
+                                runtime.recordLocalTaskResult(requestId, requestId, if (delivery.queuedOffline) "QUEUED" else "SENT", "")
+                            }
+                            android.util.Log.i("JarvisDelivery", "event=lan_fallback_enqueued trace=$requestTrace transport=$fallbackTransport queued=${delivery.queuedOffline}")
+                            ui { lanTransportStatus = "LAN unavailable; using authenticated ${fallbackTransport.replaceFirstChar(Char::uppercase)} fallback" }
+                        }.onFailure { fallbackFailure ->
+                            runtime.recordLocalTaskResult(
+                                requestId,
+                                "",
+                                if (unresolved) "RUNNING" else "FAILED",
+                                deliveryError(fallbackFailure),
+                            )
+                            if (unresolved) lastMacApiProbeAttemptMs = 0L
+                        }
                     }
                 ui { submitting = false }
                 refreshLocal()
                 return@background
             }
             val delivery = runCatching {
-                val relayUrl = LinkSettings(app).relayUrl
-                when (route) {
-                    is RequestRoute.FastCommandUpstream -> when (fastCommand) {
-                    FastCommand.MacStatus -> runtime.submitFastCommand(relayUrl, FastCommandRequest.MacStatus, requestId)
-                    FastCommand.MacBatteryStatus -> runtime.submitFastCommand(relayUrl, FastCommandRequest.MacBatteryStatus, requestId)
-                    is FastCommand.TaskStatus -> runtime.submitFastCommand(relayUrl, FastCommandRequest.TaskStatus(fastCommand.taskId), requestId)
-                    is FastCommand.OpenApplication -> runtime.submitFastCommand(
-                        relayUrl,
-                        FastCommandRequest.OpenApplication(fastCommand.appId.bundleId, requestId),
-                        requestId,
-                    )
-                    FastCommand.MacSystemInfo -> error("Read-only Mac system info is handled by the paired Mac API")
-                    null -> error("Fast-command route lost its deterministic command")
-                    }
-                    is RequestRoute.Mac -> runtime.submit(relayUrl, TaskSubmission(text, setOf(SafeCapability.ASSISTANT), clientRequestId = requestId), null)
-                    is RequestRoute.Local -> error("Local route is unavailable until a verified local model is loaded")
-                    is RequestRoute.Rejected -> error("Rejected route reached the send executor")
-                }
+                submitViaAuthenticatedLinkFallback(
+                    runtime, LinkSettings(app).relayUrl, requestId, text, capabilityScope, route, fastCommand,
+                )
             }
             delivery.onSuccess { result ->
                 android.util.Log.i("JarvisStore", "submit_enqueued trace=$requestTrace transport=$transport elapsed_ms=${java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - submitStartedNs)} queued=${result.queuedOffline}")
@@ -1294,6 +1535,13 @@ class JarvisStore(private val app: Context) {
     fun destroy() {
         if (localAiRequestRunning) localAi.cancel()
         destroyed = true
+        val activeWss = synchronized(localTaskEventLock) {
+            localTaskEventStarts.clear()
+            localTaskEventSessions.values.toList().also { localTaskEventSessions.clear() }
+        }
+        activeWss.forEach { runCatching { it.close() } }
+        runCatching { localMacDiscoverySession?.close() }
+        localMacDiscoverySession = null
         lanes.close()
         main.removeCallbacksAndMessages(null)
     }

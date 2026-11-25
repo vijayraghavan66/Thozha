@@ -580,7 +580,10 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             ?: throw ApiException("This phone is not paired with the Mac.", 401)
         val base = requireBaseUrl()
         val wifiPin = runCatching { secureStore.localGatewayPin() }.getOrNull()
-        val loopbackReady = wifiPin != null && loopbackEndpointReachable(base)
+        // The explicit test-relay preference is now a fallback, not a reason to bypass an
+        // available pinned LAN gateway. Local USB remains the only mode that prefers ADB reverse.
+        val preferPinnedLan = wifiPin != null && LinkSettings(context).mode == LinkMode.TEST_RELAY
+        val loopbackReady = wifiPin != null && !preferPinnedLan && loopbackEndpointReachable(base)
         val wifiCandidate = wifiPin?.let { pin ->
             if (loopbackReady) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
             else LocalGatewayDiscovery.discoverOrWait(context, pin)

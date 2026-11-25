@@ -754,7 +754,7 @@ class AdvancedActivity : ComponentActivity() {
             addView(text(
                 when (mode) {
                     LinkMode.LOCAL_USB -> "Current mode: Local USB. Debug builds use ADB reverse for the paired Mac API when reachable; the Link relay is off."
-                    LinkMode.TEST_RELAY -> "Current mode: Jarvis Link test relay. Messages go only to the relay URL below, through an encrypted end-to-end channel."
+                    LinkMode.TEST_RELAY -> "Current mode: Automatic local-first. A pinned Mac LAN gateway is preferred; authenticated Link/Telegram is used when LAN is unavailable."
                 },
                 13, color(R.color.muted),
             ).apply { setPadding(0, dp(6), 0, dp(10)) })
@@ -764,11 +764,11 @@ class AdvancedActivity : ComponentActivity() {
             ) { settings.mode = LinkMode.LOCAL_USB; linkMessage = "Switched to local USB. Link is off."; render() })
             gap(this, 8)
             addView(actionButton(
-                if (mode == LinkMode.TEST_RELAY) "Jarvis Link test relay — selected" else "Use Jarvis Link test relay",
+                if (mode == LinkMode.TEST_RELAY) "Automatic LAN first + Link fallback — selected" else "Use automatic LAN first + Link fallback",
                 R.color.signal, secondary = mode != LinkMode.TEST_RELAY,
             ) {
                 settings.mode = LinkMode.TEST_RELAY
-                linkMessage = "Test relay selected. Enter its details, then enroll."
+                linkMessage = "Automatic mode selected. The paired LAN route is preferred; existing authenticated Link/Telegram remains the fallback."
                 requestNotificationPermissionIfNeeded()
                 render()
             })
