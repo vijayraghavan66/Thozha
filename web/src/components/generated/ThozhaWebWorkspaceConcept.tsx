@@ -8,6 +8,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
+import { flushSync } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { Conversation, WorkspaceApi } from '../../api/client';
 import { errorText } from '../../api/client';
@@ -19,6 +20,7 @@ import { LivingPulseMark } from '../../auth/LivingPulseStartup';
 import { AnchoredSurface, NotificationPanel, TravelingSurface } from '../LiquidSurface';
 import { muted } from '../styles';
 import { WorkspaceIcon } from '../WorkspaceIcon';
+import { motionAllowed, type IdentityState } from '../motion';
 import {
   ConversationConfirmation,
   ConversationHistory,
@@ -407,6 +409,8 @@ export function ThozhaWebWorkspaceConcept({
   const [query, setQuery] = useState('');
   const [activeResult, setActiveResult] = useState(0);
   const [motion, setMotion] = useState(motionPreference);
+  const [chatActivity, setChatActivity] = useState<IdentityState>('idle');
+  const routeTransition = useRef<ViewTransition | null>(null);
   const main = useRef<HTMLElement>(null);
   const searchAnchor = useRef<HTMLDivElement>(null);
   const searchTrigger = useRef<HTMLButtonElement>(null);
@@ -450,6 +454,18 @@ export function ThozhaWebWorkspaceConcept({
   const tasks = useTasks(api, 'active', !problem && (page === 'AI Workspace' || page === 'Tasks'));
   const approvals = useApprovals(api, !problem && page === 'AI Workspace');
   const devices = useDevices(api, !problem && page === 'Approvals');
+  const identity: IdentityState = problem
+    ? 'failed'
+    : page === 'AI Workspace' && chatActivity !== 'idle'
+      ? chatActivity
+      : approvals.data?.approvals.some(item => item.status === 'PENDING') ||
+          tasks.data?.tasks.some(item => item.state === 'WAITING_APPROVAL')
+        ? 'approval'
+        : tasks.data?.tasks.some(item =>
+              ['CREATED', 'PLANNING', 'RUNNING', 'VERIFYING'].includes(item.state)
+            )
+          ? 'executing'
+          : 'idle';
   const hasInspector = page === 'AI Workspace' || page === 'Tasks';
   const historyProps = {
     items: conversations.data?.items ?? [],
@@ -516,19 +532,33 @@ export function ThozhaWebWorkspaceConcept({
   }
 
   useEffect(() => {
+    let previous = currentPage(window.location.hash);
     function onNavigate() {
       const next = currentPage(window.location.hash);
-      focusAfterNavigation.current = true;
-      setHash(window.location.hash);
-      if (next === 'AI Workspace') setVisitedChat(true);
-      else setMobileHistory(false);
-      if (!drawerClosingRef.current) setDialog(null);
-      setSearchOpen(false);
-      setNotificationsOpen(false);
+      const update = () => {
+        focusAfterNavigation.current = true;
+        setHash(window.location.hash);
+        if (next === 'AI Workspace') setVisitedChat(true);
+        else setMobileHistory(false);
+        if (!drawerClosingRef.current) setDialog(null);
+        setSearchOpen(false);
+        setNotificationsOpen(false);
+      };
+      routeTransition.current?.skipTransition();
+      if (next !== previous && document.startViewTransition && motionAllowed(main.current)) {
+        const index = (name: Section) => sections.findIndex(([section]) => section === name);
+        document.documentElement.style.setProperty(
+          '--th-route-direction',
+          index(next) > index(previous) ? '1' : '-1'
+        );
+        routeTransition.current = document.startViewTransition(() => flushSync(update));
+      } else update();
+      previous = next;
     }
     window.addEventListener('hashchange', onNavigate);
     return () => {
       window.removeEventListener('hashchange', onNavigate);
+      routeTransition.current?.skipTransition();
       if (drawerCloseTimer.current !== null) window.clearTimeout(drawerCloseTimer.current);
     };
   }, []);
@@ -539,6 +569,27 @@ export function ThozhaWebWorkspaceConcept({
     main.current?.focus({ preventScroll: true });
     main.current?.scrollTo({ top: 0, behavior: 'instant' });
   }, [page]);
+  useEffect(() => {
+    const root = main.current?.closest('.th-workspace');
+    const visibility = () => root?.setAttribute('data-motion-paused', String(document.hidden));
+    visibility();
+    document.addEventListener('visibilitychange', visibility);
+    return () => document.removeEventListener('visibilitychange', visibility);
+  }, []);
+  useEffect(() => {
+    const preference = matchMedia('(prefers-reduced-motion: reduce)');
+    const reduce = () => {
+      if (!motion.reduced && !preference.matches) return;
+      routeTransition.current?.skipTransition();
+      main.current
+        ?.closest('.th-workspace')
+        ?.getAnimations({ subtree: true })
+        .forEach(animation => animation.cancel());
+    };
+    reduce();
+    preference.addEventListener('change', reduce);
+    return () => preference.removeEventListener('change', reduce);
+  }, [motion.reduced]);
   useEffect(() => {
     const query = window.matchMedia('(max-width: 767px)');
     function resize() {
@@ -750,7 +801,7 @@ export function ThozhaWebWorkspaceConcept({
               title="Thozha"
             >
               <span data-pulse-slot className="th-pulse-slot">
-                <LivingPulseMark />
+                <LivingPulseMark state={identity} />
               </span>
             </a>
             <button
@@ -842,7 +893,7 @@ export function ThozhaWebWorkspaceConcept({
             <div className="flex min-w-0 items-center gap-2 sm:gap-3">
               {compact && (
                 <span data-pulse-slot className="th-pulse-slot th-pulse-slot-mobile">
-                  <LivingPulseMark />
+                  <LivingPulseMark state={identity} />
                 </span>
               )}
               {page === 'AI Workspace' && (!compact || !mobileHistory) && (
@@ -1118,6 +1169,7 @@ export function ThozhaWebWorkspaceConcept({
                       active={page === 'AI Workspace'}
                       connected={!problem}
                       reduced={motion.reduced}
+                      onActivityChange={setChatActivity}
                       onReviewTask={objective => {
                         setTaskDraft(objective);
                         go('Tasks');

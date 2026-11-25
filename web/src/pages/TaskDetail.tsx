@@ -8,6 +8,8 @@ import { Chip, Loading, Modal, Notice, Row } from '../components/ui';
 import { approvalsKey, controlError, httpStatus, tasksKey } from './controlState';
 import { isTerminalTask, useTaskProgress } from './useTaskProgress';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
+import { LivingPulseMark } from '../auth/LivingPulseStartup';
+import { taskIdentity } from '../components/motion';
 
 function actualMilestones(events: SupervisorEvent[], state?: string) {
   const transitions = events
@@ -17,18 +19,13 @@ function actualMilestones(events: SupervisorEvent[], state?: string) {
     );
   const reached = new Set(transitions.map(item => item.state));
   if (state) reached.add(state);
+  const submitted = events.find(item =>
+    ['task.created', 'link_task.created'].includes(item.event_type)
+  );
+  const queued = events.find(item => item.event_type === 'link_task.queued');
   return [
-    ['Submitted', reached.has('CREATED'), transitions.find(item => item.state === 'CREATED')?.at],
-    [
-      'Authorization checked',
-      reached.has('PLANNING'),
-      transitions.find(item => item.state === 'PLANNING')?.at,
-    ],
-    [
-      'Queued',
-      reached.has('CREATED') && reached.has('RUNNING'),
-      transitions.find(item => item.state === 'CREATED')?.at,
-    ],
+    ['Submitted', Boolean(submitted) || reached.has('CREATED'), submitted?.created_at],
+    ['Queued', Boolean(queued), queued?.created_at],
     ['Running', reached.has('RUNNING'), transitions.find(item => item.state === 'RUNNING')?.at],
     [
       'Awaiting approval',
@@ -36,7 +33,12 @@ function actualMilestones(events: SupervisorEvent[], state?: string) {
       transitions.find(item => item.state === 'WAITING_APPROVAL')?.at,
     ],
     [
-      'Terminal',
+      'Verifying',
+      reached.has('VERIFYING'),
+      transitions.find(item => item.state === 'VERIFYING')?.at,
+    ],
+    [
+      'Finished',
       reached.has('COMPLETED') || reached.has('FAILED') || reached.has('CANCELLED'),
       transitions.find(item => ['COMPLETED', 'FAILED', 'CANCELLED'].includes(item.state))?.at,
     ],
@@ -215,6 +217,17 @@ export function TaskDetail({
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [showArtifacts, setShowArtifacts] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
+  const events = useRef<HTMLOListElement>(null);
+  const lastSequence = useRef<number | null>(null);
+  useEffect(() => {
+    if (!timeline.events.length) return;
+    const previous = lastSequence.current;
+    lastSequence.current = timeline.events.at(-1)!.seq;
+    if (previous === null) return;
+    events.current?.querySelectorAll<HTMLElement>('[data-sequence]').forEach(element => {
+      if (Number(element.dataset.sequence) > previous) element.dataset.arriving = 'true';
+    });
+  }, [timeline.events]);
   useEffect(() => {
     heading.current?.focus();
   }, []);
@@ -251,6 +264,7 @@ export function TaskDetail({
   return (
     <section
       aria-label="Supervisor task detail"
+      data-task-state={task?.state}
       className="my-4 min-w-0 space-y-3 rounded-xl border border-white/10 p-4"
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -260,7 +274,14 @@ export function TaskDetail({
           </h3>
           <p className={`break-all ${muted}`}>{taskId}</p>
         </div>
-        {task && <Chip>{task.state.replace(/_/g, ' ')}</Chip>}
+        {task && (
+          <div className="th-task-identity">
+            <LivingPulseMark state={taskIdentity(task.state)} />
+            <span key={task.state} className="th-state-arrival">
+              <Chip>{task.state.replace(/_/g, ' ')}</Chip>
+            </span>
+          </div>
+        )}
       </div>
       {progress && (
         <p role="status" className={muted}>
@@ -271,12 +292,13 @@ export function TaskDetail({
         <div className="mt-2">
           <h4 className="text-xs font-semibold">Verified lifecycle</h4>
           <ol
-            className="mt-2 grid grid-cols-3 gap-2 max-sm:grid-cols-2"
+            className="mt-2 grid grid-cols-[repeat(auto-fit,minmax(min(100%,110px),1fr))] gap-2"
             aria-label="Task lifecycle milestones"
           >
             {milestones.map(([label, reached, at]) => (
               <li
                 key={label}
+                data-reached={reached}
                 className={`rounded-lg border p-3 text-xs ${reached ? 'border-white/25 bg-white/[.06]' : 'border-white/[.07] text-[#7f818b]'}`}
               >
                 <b>
@@ -396,11 +418,12 @@ export function TaskDetail({
           )}
           {timeline.events.length > 0 && (
             <ol
+              ref={events}
               className="mt-2 rounded-xl border border-white/10 px-3"
               aria-label="Saved task events"
             >
               {timeline.events.map(item => (
-                <li key={item.seq} data-sequence={item.seq}>
+                <li key={item.seq} data-sequence={item.seq} className="th-timeline-event">
                   <Row
                     main={item.event_type}
                     sub={[formatDate(item.created_at), eventDetail(item)]

@@ -1,5 +1,6 @@
-import { useId, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { muted, outline } from './styles';
+import { motionAllowed, motionEase, motionTiming } from './motion';
 
 export function Panel({ children, cls = '' }: { children: ReactNode; cls?: string }) {
   return (
@@ -113,7 +114,7 @@ export function Notice({
   error?: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/15 bg-[#25262c] px-4 py-3 text-xs leading-5 text-[#e8e9ee]">
+    <div className="th-notice flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/15 bg-[#25262c] px-4 py-3 text-xs leading-5 text-[#e8e9ee]">
       <div role={error ? 'alert' : 'status'}>{children}</div>
       {retry && (
         <button type="button" className={outline} onClick={retry}>
@@ -126,7 +127,7 @@ export function Notice({
 
 export function Loading({ label }: { label: string }) {
   return (
-    <div role="status" className="space-y-3 p-4 text-xs text-[#a4a5af]">
+    <div role="status" className="th-loading space-y-3 p-4 text-xs text-[#a4a5af]">
       <p>{label}</p>
       <div aria-hidden="true" className="h-3 w-2/3 rounded bg-white/10" />
       <div aria-hidden="true" className="h-3 w-1/2 rounded bg-white/[.07]" />
@@ -162,6 +163,36 @@ export function Modal({
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const headingId = useId();
+  const [leaving, setLeaving] = useState(false);
+  const exit = useRef<Animation | null>(null);
+  useEffect(
+    () => () => {
+      if (exit.current) {
+        exit.current.onfinish = null;
+        exit.current.oncancel = null;
+      }
+      exit.current?.cancel();
+    },
+    []
+  );
+  function dismiss() {
+    const element = dialog.current;
+    if (locked || leaving) return;
+    if (!element?.animate || !motionAllowed(element)) {
+      close();
+      return;
+    }
+    setLeaving(true);
+    exit.current = element.animate(
+      [
+        { opacity: 1, translate: '0 0', scale: '1' },
+        { opacity: 0, translate: '0 5px', scale: '.985' },
+      ],
+      { duration: motionTiming.exit, easing: motionEase, fill: 'forwards' }
+    );
+    exit.current.onfinish = close;
+    exit.current.oncancel = close;
+  }
   useLayoutEffect(() => {
     const element = dialog.current;
     if (!element) return;
@@ -187,13 +218,21 @@ export function Modal({
       ref={dialog}
       id={id}
       aria-labelledby={headingId}
+      data-leaving={leaving}
+      inert={leaving}
       className={`m-auto max-h-[90dvh] w-[calc(100%-2rem)] max-w-[460px] overflow-auto rounded-2xl border border-white/20 bg-[#1c1d22] p-4 text-[#ececf0] shadow-2xl backdrop:bg-black/80 ${cls}`}
       onClick={event => {
-        if (event.target === event.currentTarget && !locked) close();
+        if (event.target === event.currentTarget) dismiss();
       }}
       onCancel={event => {
         event.preventDefault();
-        if (!locked) close();
+        dismiss();
+      }}
+      onKeyDown={event => {
+        if (event.key === 'Escape' && !event.defaultPrevented) {
+          event.preventDefault();
+          dismiss();
+        }
       }}
     >
       <div className="mb-3 flex items-center justify-between gap-2">
@@ -204,8 +243,8 @@ export function Modal({
           type="button"
           className="rounded-lg px-3 py-2 text-[#c7c8ce] hover:bg-white/10"
           aria-label={`Close ${title}`}
-          disabled={locked}
-          onClick={close}
+          disabled={locked || leaving}
+          onClick={dismiss}
         >
           ✕
         </button>

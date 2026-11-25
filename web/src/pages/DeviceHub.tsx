@@ -99,6 +99,7 @@ export default function DeviceHub({ api, connected }: { api: WorkspaceApi; conne
           {items.map(item => (
             <LiquidCard
               key={item.device_id}
+              data-pairing-state={item.status}
               aria-pressed={item.device_id === deviceId}
               onClick={() => {
                 select(item.device_id);

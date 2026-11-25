@@ -1,10 +1,24 @@
 import { useLayoutEffect, useRef, type RefObject } from 'react';
+import type { IdentityState } from '../components/motion';
 
 const primary = 'M17 44 C29 43 30 29 40 29 C50 29 51 47 63 40';
 
-export function LivingPulseMark() {
+export function LivingPulseMark({ state }: { state?: IdentityState }) {
+  const mark = useRef<SVGSVGElement>(null);
+  const previous = useRef(state);
+  useLayoutEffect(() => {
+    if (previous.current !== state) mark.current?.setAttribute('data-state-changed', 'true');
+    previous.current = state;
+  }, [state]);
   return (
-    <svg aria-hidden="true" className="th-pulse-mark" viewBox="0 0 80 80" fill="none">
+    <svg
+      ref={mark}
+      aria-hidden="true"
+      className="th-pulse-mark"
+      data-identity={state}
+      viewBox="0 0 80 80"
+      fill="none"
+    >
       <circle className="th-pulse-ring" cx="40" cy="40" r="37" pathLength="1" stroke="#62656e" />
       <path
         className="th-pulse-primary"

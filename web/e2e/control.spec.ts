@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
@@ -96,6 +96,14 @@ test('fixture long task history and execution details own their scroll without m
     await history.getByRole('link').first().click();
     const details = page.getByRole('region', { name: 'Execution details', exact: true });
     await expect(details.getByText('Fixture output line 90.')).toBeVisible();
+    const milestones = details.getByRole('list', { name: 'Task lifecycle milestones' });
+    expect(
+      await milestones
+        .locator('li')
+        .evaluateAll(items =>
+          items.every(item => item.clientWidth >= 100 && item.scrollWidth <= item.clientWidth)
+        )
+    ).toBe(true);
     await details.evaluate(el => (el.scrollTop = el.scrollHeight));
     expect(await details.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
     expect(await main.evaluate(el => el.scrollTop)).toBe(0);
@@ -144,6 +152,7 @@ test('prefills without execution, resumes real supervisor SSE, and reloads the v
       response.headers()['content-type']?.startsWith('text/event-stream')
   );
   const task = await submitTask(page);
+  await expect(page.locator('.th-task-identity [data-identity="executing"]')).toHaveCount(1);
   expect(writes).toEqual([taskPath]);
   expect((await streamed).status()).toBe(200);
   expect(requests.length).toBeGreaterThanOrEqual(2);
@@ -153,6 +162,7 @@ test('prefills without execution, resumes real supervisor SSE, and reloads the v
   const timeline = page.getByRole('list', { name: 'Saved task events' });
   await expect(timeline.getByText('link_task.completed', { exact: true })).toBeVisible();
   await expect(page.getByText('RESULT SHA-256 VERIFIED')).toBeVisible();
+  await expect(page.locator('.th-task-identity [data-identity="completed"]')).toHaveCount(1);
   const seq = await timeline
     .locator('[data-sequence]')
     .evaluateAll(rows => rows.map(row => Number(row.getAttribute('data-sequence'))));
@@ -254,61 +264,79 @@ test('reviews the exact operation, rejects digest mismatch, and records explicit
   page,
 }) => {
   await signIn(page, studio);
-  const headers = await authHeaders(page);
-  for (const choice of ['Reject', 'Approve'] as const) {
-    await page.goto(studio);
-    const task = await submitTask(page, `Fixture approval: ${choice}`, 'assistant');
-    await page
-      .getByRole('navigation', { name: 'Main navigation' })
-      .getByRole('link', { name: 'Approvals', exact: true })
-      .click();
-    await expect(page.getByRole('heading', { name: 'Approvals', exact: true })).toBeVisible();
-    const review = page.waitForResponse(response =>
-      /\/v1\/web\/approvals\/[a-f0-9]{32}$/.test(response.url())
-    );
-    await page.getByRole('button', { name: 'Review approval', exact: true }).click();
-    const approval = await (await review).json();
-    const dialog = page.getByRole('dialog', { name: 'Review exact operation' });
-    await expect(dialog).toContainText('mcp:jarvis_mac:click');
-    await expect(dialog).toContainText('screen-coordinate');
-    await expect(dialog).toContainText('"x": 1');
-    await expect(dialog).toContainText(approval.operation_digest);
-    await expect(dialog).toContainText(
-      `Approval requester device: Isolated test pairing · ${approval.requester_device_id}`
-    );
-    expect(approval.requester_device_id).toBe(task.request.requester_device_id);
-    const decisionPath = `/v1/web/approvals/${approval.id}/decision`;
-    if (choice === 'Reject') {
-      const stale = await page.request.post(decisionPath, {
-        headers,
-        data: {
-          decision: 'reject',
-          task_id: task.id,
-          expected_operation_digest: '0'.repeat(64),
-          requester_device_id: approval.requester_device_id,
-          idempotency_key: randomUUID(),
-        },
-      });
-      expect(stale.status()).toBe(409);
-    }
-    const decided = page.waitForResponse(response => response.url().endsWith(decisionPath));
-    await dialog.getByRole('button', { name: `${choice} this operation` }).click();
-    const response = await decided;
-    expect(response.status()).toBe(200);
-    const decision = response.request().postDataJSON();
-    expect(decision).toMatchObject({
-      task_id: task.id,
-      expected_operation_digest: approval.operation_digest,
-      decision: choice.toLowerCase(),
+  const capture = process.env.THOZHA_E2E_MOTION_CAPTURE;
+  if (capture) {
+    await mkdir(capture, { recursive: true });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    expect(await page.evaluate(() => document.visibilityState)).toBe('visible');
+    await page.screencast.start({
+      path: join(capture, 'fixture-approval-review.webm'),
+      size: { width: 1440, height: 900 },
     });
-    expect(decision).not.toHaveProperty('continuation_objective');
-    const status = choice === 'Reject' ? 'REJECTED' : 'CONSUMED';
-    await expect(dialog).toContainText(`Decision response: ${status}`);
-    const replay = await page.request.post(decisionPath, { headers, data: decision });
-    expect(replay.status()).toBe(200);
-    expect(await replay.json()).toMatchObject({ status });
-    await dialog.getByRole('button', { name: 'Close Review exact operation' }).click();
-    await expect(page.getByText('No pending approvals.')).toBeVisible();
+  }
+  try {
+    const headers = await authHeaders(page);
+    for (const choice of ['Reject', 'Approve'] as const) {
+      if (capture)
+        await page.screencast.showChapter(
+          `Isolated fixture: ${choice.toLowerCase()} exact operation`
+        );
+      await page.goto(studio);
+      const task = await submitTask(page, `Fixture approval: ${choice}`, 'assistant');
+      await page
+        .getByRole('navigation', { name: 'Main navigation' })
+        .getByRole('link', { name: 'Approvals', exact: true })
+        .click();
+      await expect(page.getByRole('heading', { name: 'Approvals', exact: true })).toBeVisible();
+      const review = page.waitForResponse(response =>
+        /\/v1\/web\/approvals\/[a-f0-9]{32}$/.test(response.url())
+      );
+      await page.getByRole('button', { name: 'Review approval', exact: true }).click();
+      const approval = await (await review).json();
+      const dialog = page.getByRole('dialog', { name: 'Review exact operation' });
+      await expect(dialog).toContainText('mcp:jarvis_mac:click');
+      await expect(dialog).toContainText('screen-coordinate');
+      await expect(dialog).toContainText('"x": 1');
+      await expect(dialog).toContainText(approval.operation_digest);
+      await expect(dialog).toContainText(
+        `Approval requester device: Isolated test pairing · ${approval.requester_device_id}`
+      );
+      expect(approval.requester_device_id).toBe(task.request.requester_device_id);
+      const decisionPath = `/v1/web/approvals/${approval.id}/decision`;
+      if (choice === 'Reject') {
+        const stale = await page.request.post(decisionPath, {
+          headers,
+          data: {
+            decision: 'reject',
+            task_id: task.id,
+            expected_operation_digest: '0'.repeat(64),
+            requester_device_id: approval.requester_device_id,
+            idempotency_key: randomUUID(),
+          },
+        });
+        expect(stale.status()).toBe(409);
+      }
+      const decided = page.waitForResponse(response => response.url().endsWith(decisionPath));
+      await dialog.getByRole('button', { name: `${choice} this operation` }).click();
+      const response = await decided;
+      expect(response.status()).toBe(200);
+      const decision = response.request().postDataJSON();
+      expect(decision).toMatchObject({
+        task_id: task.id,
+        expected_operation_digest: approval.operation_digest,
+        decision: choice.toLowerCase(),
+      });
+      expect(decision).not.toHaveProperty('continuation_objective');
+      const status = choice === 'Reject' ? 'REJECTED' : 'CONSUMED';
+      await expect(dialog).toContainText(`Decision response: ${status}`);
+      const replay = await page.request.post(decisionPath, { headers, data: decision });
+      expect(replay.status()).toBe(200);
+      expect(await replay.json()).toMatchObject({ status });
+      await dialog.getByRole('button', { name: 'Close Review exact operation' }).click();
+      await expect(page.getByText('No pending approvals.')).toBeVisible();
+    }
+  } finally {
+    if (capture) await page.screencast.stop();
   }
 });
 

@@ -392,6 +392,7 @@ export default function DeveloperStudio({
                   <a
                     href={taskHref(item.task_id)}
                     className="th-task-row"
+                    data-task-state={item.state}
                     title={item.summary || `Task ${item.task_id}`}
                     aria-current={item.task_id === taskId ? 'true' : undefined}
                   >

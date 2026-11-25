@@ -17,6 +17,8 @@ Shared tokens keep page headings on the same grid: 24–32px desktop gutters, 16
 
 The composer starts with one text line and grows up to 160px before scrolling internally. The paperclip stages supported files; keyboard and attachment details are available under **Message help**. During generation, the send control becomes **Stop generating**, using the existing server-confirmed cancellation operation.
 
+The shared [motion specification](./MOTION.md) documents restrained welcome contours, state-driven Living Pulse identities, interruptible navigation and conversation transitions, dialog dismissal, reduced-motion behavior, and measured performance limitations. Motion never fabricates task progress, token streaming or device connectivity.
+
 Tasks owns its viewport rather than scrolling the entire page: the heading and counters remain stable while **Task history** and **Execution details** scroll independently. **New task** opens the existing review form in a dialog. On phones, selecting a task shows its details with **Back to history**. List responses do not include timestamps or objectives, so the interface displays the real summary and state rather than inventing metadata.
 
 ### Conversation history and startup

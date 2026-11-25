@@ -27,6 +27,13 @@ import { MarkdownMessage } from './MarkdownMessage';
 import { LivingPulseMark } from '../auth/LivingPulseStartup';
 import { WorkspaceIcon } from '../components/WorkspaceIcon';
 import {
+  motionAllowed,
+  motionEase,
+  motionTiming,
+  useSceneArrival,
+  type IdentityState,
+} from '../components/motion';
+import {
   conversationListKey as listKey,
   detailKey,
   isPendingResponse,
@@ -159,7 +166,10 @@ function Message({
 }) {
   if (message.role === 'user') {
     return (
-      <div className="th-v4-user-message ml-auto max-w-[85%] rounded-2xl rounded-br-sm border border-white/15 bg-[#2b2c32] px-4 py-3 text-[13px] text-[#f1f1f3]">
+      <div
+        data-message-id={message.id}
+        className="th-v4-user-message ml-auto max-w-[85%] rounded-2xl rounded-br-sm border border-white/15 bg-[#2b2c32] px-4 py-3 text-[13px] text-[#f1f1f3]"
+      >
         <span className="sr-only">You: </span>
         <p className="whitespace-pre-wrap break-words">{message.content}</p>
         {attachments?.length ? (
@@ -187,8 +197,25 @@ function Message({
     );
   }
   return (
-    <div className="th-v4-assistant-message max-w-[95%] text-[13px] leading-7 [content-visibility:auto] [contain-intrinsic-size:auto_64px]">
-      <div className="mb-2 text-[10px] font-bold tracking-widest text-[#aaacb5]">THOZHA</div>
+    <div
+      data-message-id={message.id}
+      data-response-state={message.status}
+      className="th-v4-assistant-message max-w-[95%] text-[13px] leading-7 [content-visibility:auto] [contain-intrinsic-size:auto_64px]"
+    >
+      <div className="th-message-identity mb-2 text-[10px] font-bold tracking-widest text-[#aaacb5]">
+        <LivingPulseMark
+          state={
+            isPendingResponse(message.status)
+              ? 'thinking'
+              : message.status === 'failed'
+                ? 'failed'
+                : message.status === 'cancelled'
+                  ? 'cancelled'
+                  : 'completed'
+          }
+        />
+        THOZHA
+      </div>
       {message.status === 'completed' && <MarkdownMessage content={message.content} />}
       {isPendingResponse(message.status) && (
         <div className="flex flex-wrap items-center gap-3">
@@ -237,6 +264,7 @@ export default function ConversationWorkspace({
   titleSlot,
   onManageConversation,
   changedConversationId,
+  onActivityChange,
 }: {
   api: WorkspaceApi;
   active: boolean;
@@ -247,6 +275,7 @@ export default function ConversationWorkspace({
   titleSlot: HTMLElement | null;
   onManageConversation: (action: ConversationAction) => void;
   changedConversationId?: string;
+  onActivityChange: (state: IdentityState) => void;
 }) {
   const cache = useQueryClient();
   const [selection, setSelection] = useState<string | null>(null);
@@ -267,6 +296,7 @@ export default function ConversationWorkspace({
   const [notice, setNotice] = useState('');
   const log = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const composerResize = useRef<Animation | null>(null);
   const attachmentInput = useRef<HTMLInputElement>(null);
   const composerOrigin = useRef<number | undefined>(undefined);
   const focusDraft = useRef(false);
@@ -277,12 +307,16 @@ export default function ConversationWorkspace({
   const scrollPositions = useRef(new Map<string, number>());
   const followLatestByConversation = useRef(new Map<string, boolean>());
   const pendingScrollRestore = useRef<{ id: string | null; top: number } | null>(null);
-  const animatedConversation = useRef<string | null>(null);
+  const seenMessages = useRef<{ id: string | null; ids: Set<string> }>({
+    id: null,
+    ids: new Set(),
+  });
   const activeSend = useRef(new Set<string>());
   const activeStream = useRef<AbortController | null>(null);
   const fieldId = useId();
   const enabled = active && connected;
   useEffect(() => () => activeStream.current?.abort(), []);
+  useEffect(() => () => composerResize.current?.cancel(), []);
   useEffect(() => {
     if (!changedConversationId) return;
     setSelection(previous => (previous === changedConversationId ? null : previous));
@@ -370,14 +404,28 @@ export default function ConversationWorkspace({
     if (!active || !textarea) return;
     function resize() {
       if (!textarea) return;
+      const before = textarea.getBoundingClientRect().height;
+      composerResize.current?.cancel();
       textarea.style.height = 'auto';
-      textarea.style.height = `${Math.min(160, textarea.scrollHeight)}px`;
+      const height = Math.min(160, textarea.scrollHeight);
+      textarea.style.height = `${height}px`;
+      if (!reduced && textarea.animate && motionAllowed(textarea) && Math.abs(before - height) > 1)
+        composerResize.current = textarea.animate(
+          [{ height: `${before}px` }, { height: `${height}px` }],
+          { duration: motionTiming.control, easing: motionEase }
+        );
     }
     resize();
-    const observer = new ResizeObserver(resize);
+    let width = textarea.getBoundingClientRect().width;
+    const observer = new ResizeObserver(() => {
+      const next = textarea.getBoundingClientRect().width;
+      if (next === width) return;
+      width = next;
+      resize();
+    });
     observer.observe(textarea, { box: 'border-box' });
     return () => observer.disconnect();
-  }, [active, draft, id, writingNew]);
+  }, [active, draft, id, writingNew, reduced]);
   const generatingMessage = messages?.find(
     message => message.role === 'assistant' && isPendingResponse(message.status)
   );
@@ -435,33 +483,40 @@ export default function ConversationWorkspace({
       log.current.scrollTo({
         top: log.current.scrollHeight,
         behavior:
-          switched || reduced || matchMedia('(prefers-reduced-motion: reduce)').matches
+          switched ||
+          live?.partial ||
+          reduced ||
+          matchMedia('(prefers-reduced-motion: reduce)').matches
             ? 'instant'
             : 'smooth',
       });
   }, [active, awaitingHistory, detail.isPending, id, live?.partial, messages, reduced]);
 
+  useSceneArrival(log, id, active && !reduced);
   useLayoutEffect(() => {
-    if (animatedConversation.current === null) {
-      animatedConversation.current = id;
-      return;
+    if (!messages) return;
+    const previous = seenMessages.current;
+    const arrivals = previous.id === id ? messages.filter(item => !previous.ids.has(item.id)) : [];
+    seenMessages.current = { id, ids: new Set(messages.map(item => item.id)) };
+    if (!active || reduced || !motionAllowed(log.current)) return;
+    const animations: Animation[] = [];
+    for (const message of arrivals) {
+      const node = Array.from(
+        log.current?.querySelectorAll<HTMLElement>('[data-message-id]') ?? []
+      ).find(element => element.dataset.messageId === message.id);
+      if (!node?.animate) continue;
+      animations.push(
+        node.animate(
+          [
+            { opacity: 0, translate: message.role === 'user' ? '0 9px' : '0 6px' },
+            { opacity: 1, translate: '0 0' },
+          ],
+          { duration: motionTiming.panel, easing: motionEase }
+        )
+      );
     }
-    if (!active) {
-      animatedConversation.current = id;
-      return;
-    }
-    if (animatedConversation.current === id) return;
-    animatedConversation.current = id;
-    if (reduced || matchMedia('(prefers-reduced-motion: reduce)').matches || !log.current) return;
-    const animation = log.current.animate(
-      [
-        { opacity: 0.82, transform: 'translateY(5px)' },
-        { opacity: 1, transform: 'none' },
-      ],
-      { duration: 220, easing: 'cubic-bezier(.22,.8,.27,1)' }
-    );
-    return () => animation.cancel();
-  }, [active, id, reduced]);
+    return () => animations.forEach(animation => animation.cancel());
+  }, [active, id, messages, reduced]);
 
   const command = useMutation({
     mutationFn: ({ text }: { text: string; attachments: AttachmentDraft[] }) =>
@@ -701,6 +756,16 @@ export default function ConversationWorkspace({
   });
 
   const sending = send.isPending;
+  const lastAssistant = messages?.filter(message => message.role === 'assistant').at(-1);
+  const activity: IdentityState =
+    sending || pending || awaitingHistory
+      ? 'thinking'
+      : issue || lastAssistant?.status === 'failed'
+        ? 'failed'
+        : 'idle';
+  useEffect(() => {
+    if (active) onActivityChange(activity);
+  }, [active, activity, onActivityChange]);
   const composerDisabled =
     !canWrite ||
     command.isPending ||
@@ -894,6 +959,7 @@ export default function ConversationWorkspace({
         )}
       <div className="th-v4-chat-workspace">
         <div
+          data-activity={activity}
           className={`th-v4-conversation flex min-h-0 min-w-0 flex-col overflow-hidden ${welcome ? 'is-welcome' : ''} ${selectedAttachments.length ? 'has-attachments' : ''}`}
         >
           <p role="status" className={notice || archived ? `px-5 pt-3 ${muted}` : 'sr-only'}>
@@ -937,7 +1003,7 @@ export default function ConversationWorkspace({
             {welcome && (
               <div className="th-v4-empty th-v4-welcome text-center">
                 <div className="th-v4-welcome-mark" aria-hidden="true">
-                  <LivingPulseMark />
+                  <LivingPulseMark state="idle" />
                 </div>
                 <h2>What's on your mind?</h2>
                 <p>An idea, a question, or something worth building.</p>

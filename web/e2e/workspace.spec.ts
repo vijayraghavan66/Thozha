@@ -475,6 +475,7 @@ test('mobile slash commands stay local and refuse tasks without verified readine
   await expect(status).toContainText('Host reports: degraded');
   await expect(status).toContainText('No active device mapping was verified');
   await page.keyboard.press('Escape');
+  await expect(status).toBeHidden();
   await composer.fill('/not-a-command');
   await composer.press('Enter');
   await expect(page.getByRole('alert')).toContainText('Unknown command');
@@ -541,6 +542,8 @@ test('renders the reported SSE mode, persists context, copies code and supports 
   const stream = page.waitForResponse(response => response.url().endsWith('/messages/stream'));
   await send(page, 'Remember the name Thozha Alpha for context.');
   expect((await stream).headers()['content-type']).toContain('text/event-stream');
+  await expect(page.locator('.th-v4-conversation')).toHaveAttribute('data-activity', 'thinking');
+  await expect(page.locator('.th-message-identity [data-identity="thinking"]')).toHaveCount(1);
   if (process.env.THOZHA_E2E_MODE === 'buffered') {
     await expect(
       page.getByText('Buffered response · waiting for the complete result.')
@@ -550,6 +553,8 @@ test('renders the reported SSE mode, persists context, copies code and supports 
     await expect(page.getByLabel('Partial response')).toContainText('Fixture response');
   }
   await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
+  await expect(page.locator('.th-v4-conversation')).toHaveAttribute('data-activity', 'idle');
+  await expect(page.locator('.th-message-identity [data-identity="completed"]')).toHaveCount(1);
   const copy = page.locator('.th-code-copy');
   const bounds = await copy.boundingBox();
   const block = page.locator('.th-markdown pre');
@@ -603,6 +608,64 @@ test('renders the reported SSE mode, persists context, copies code and supports 
   await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toBeVisible();
 });
 
+test('motion preserves the live chat tree across interrupted navigation and respects reduced motion', async ({
+  page,
+}) => {
+  await signIn(page, '/#/ai-workspace?new=motion');
+  const composer = page.getByRole('textbox', { name: 'Message Jarvis' });
+  await composer.fill('Draft survives cinematic navigation');
+  const original = await composer.elementHandle();
+  await page.getByRole('link', { name: 'Tasks', exact: true }).click();
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await page.getByRole('link', { name: 'AI Workspace', exact: true }).click();
+  await expect(composer).toHaveValue('Draft survives cinematic navigation');
+  expect(await original!.evaluate(element => element.isConnected)).toBe(true);
+  await expect(page.locator('#main-content')).toHaveAttribute('data-workspace', 'AI Workspace');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.getByRole('button', { name: 'Open profile menu', exact: true }).click();
+  await expect(page.getByRole('menu', { name: 'Profile and workspace' })).toBeVisible();
+  expect(
+    await page
+      .locator('.th-anchored-surface[data-open="true"]')
+      .evaluate(
+        element =>
+          element
+            .getAnimations({ subtree: true })
+            .filter(animation => animation.playState === 'running').length
+      )
+  ).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Open profile menu', exact: true })).toBeFocused();
+  // Headless Chromium keeps every tab visible; exercise the visibility consumer explicitly.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(page.locator('.th-workspace')).toHaveAttribute('data-motion-paused', 'true');
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect(page.locator('.th-workspace')).toHaveAttribute('data-motion-paused', 'false');
+  await original!.dispose();
+});
+
+test('a reduced-motion change during modal dismissal does not leave an inert dialog', async ({
+  page,
+}) => {
+  await signIn(page, '/#/developer-studio');
+  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'New task', exact: true });
+  await expect(dialog).toBeVisible();
+  await page.getByRole('button', { name: 'Close New task', exact: true }).click();
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(dialog).toBeHidden();
+  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+});
+
 test('composer stays compact, grows to a bound and shrinks without moving the shell', async ({
   page,
 }, info) => {
@@ -621,7 +684,7 @@ test('composer stays compact, grows to a bound and shrinks without moving the sh
     await page.setViewportSize({ width, height });
     await expect(composer).toHaveValue('');
     expect((await composer.boundingBox())!.height).toBeLessThanOrEqual(44);
-    expect((await form.boundingBox())!.height).toBeLessThanOrEqual(100);
+    await expect.poll(async () => (await form.boundingBox())!.height).toBeLessThanOrEqual(100);
     if (capture) await page.screenshot({ path: join(capture, `fixture-empty-chat-${width}.png`) });
     await composer.fill(Array.from({ length: 14 }, (_, index) => `Line ${index + 1}`).join('\n'));
     await expect.poll(async () => (await composer.boundingBox())!.height).toBe(160);
@@ -1007,7 +1070,7 @@ test('notifications unfold from the fixed bell and reverse without trapping focu
   const box = await bell.boundingBox();
   const panel = page.locator('.th-notification-surface');
   const heading = page.getByRole('heading', { name: 'Notifications', exact: true });
-  const collapsed = await panel.evaluate(el => getComputedStyle(el).clipPath);
+  const collapsed = await panel.evaluate(el => getComputedStyle(el).transform);
   await bell.click();
   await expect(heading).toBeFocused();
   await expect(bell).toHaveAttribute('aria-expanded', 'true');
@@ -1018,7 +1081,7 @@ test('notifications unfold from the fixed bell and reverse without trapping focu
   await page.keyboard.press('Escape');
   await expect(bell).toBeFocused();
   await expect(heading).toHaveCount(0);
-  await expect.poll(() => panel.evaluate(el => getComputedStyle(el).clipPath)).toBe(collapsed);
+  await expect.poll(() => panel.evaluate(el => getComputedStyle(el).transform)).toBe(collapsed);
   await bell.click();
   await page.mouse.click(30, 490);
   await expect(bell).toHaveAttribute('aria-expanded', 'false');
