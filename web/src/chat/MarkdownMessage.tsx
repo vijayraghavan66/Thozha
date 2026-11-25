@@ -127,7 +127,12 @@ export function MarkdownMessage({ content }: { content: string }) {
               <span>{children}</span>
             ),
           table: ({ children }) => (
-            <div className="overflow-x-auto">
+            <div
+              className="max-w-full overflow-x-auto overscroll-x-contain rounded-md"
+              role="region"
+              aria-label="Scrollable table"
+              tabIndex={0}
+            >
               <table>{children}</table>
             </div>
           ),

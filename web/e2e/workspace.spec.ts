@@ -621,11 +621,10 @@ test('motion preserves the live chat tree across interrupted navigation and resp
   await signIn(page, '/#/ai-workspace?new=motion');
   const sculpture = page.locator('.th-intelligence-stage .th-silver');
   await expect(sculpture).toHaveAttribute('data-renderer', 'webgl');
-  await expect(sculpture).toHaveAttribute('data-motion', 'running');
-  await page.waitForTimeout(750);
+  await expect(sculpture).toHaveAttribute('data-motion', 'settled');
   const firstFrame = await sculpture.screenshot();
-  await page.waitForTimeout(350);
-  expect((await sculpture.screenshot()).equals(firstFrame)).toBe(false);
+  await page.waitForTimeout(200);
+  expect((await sculpture.screenshot()).equals(firstFrame)).toBe(true);
   const composer = page.getByRole('textbox', { name: 'Message Jarvis' });
   await composer.fill('Draft survives cinematic navigation');
   const original = await composer.elementHandle();
@@ -677,7 +676,7 @@ test('motion preserves the live chat tree across interrupted navigation and resp
   await expect(sculpture).toHaveAttribute('data-renderer', 'fallback');
   await graphics.evaluate(extension => extension?.restoreContext());
   await expect(sculpture).toHaveAttribute('data-renderer', 'webgl');
-  await expect(sculpture).toHaveAttribute('data-motion', 'running');
+  await expect(sculpture).toHaveAttribute('data-motion', 'settled');
   await graphics.dispose();
   await original!.dispose();
 });

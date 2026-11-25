@@ -2291,12 +2291,15 @@ button:disabled {
   .th-composer-input {
     font-size: 16px !important;
   }
+  .th-composer-toolbar {
+    padding-top: 0;
+  }
   .th-composer-attach,
   .th-composer-send,
   .th-composer-help summary,
   .th-attachment-remove {
-    min-width: 40px;
-    min-height: 40px;
+    min-width: 44px;
+    min-height: 44px;
   }
 }
 .th-pairing-steps {

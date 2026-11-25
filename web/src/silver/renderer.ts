@@ -176,8 +176,11 @@ export function mountSilver(canvas: HTMLCanvasElement, host: HTMLElement): Silve
     const root = host.closest('.th-workspace');
     const reduced = () => preference.matches || Boolean(root?.classList.contains('th-stop-motion'));
     const eligible = () => active && visible && !document.hidden && !disposed && !lost;
+    // Keep the silver identity, but stop spending GPU time on an idle workspace.
+    // Task/response state changes wake it again through setState().
     const settled = () =>
-      ['completed', 'failed', 'cancelled'].includes(state) && performance.now() - changed > 1200;
+      ['idle', 'completed', 'failed', 'cancelled'].includes(state) &&
+      performance.now() - changed > 1200;
     function draw(now: number) {
       if (!eligible()) return;
       const dt = last ? Math.min((now - last) / 1000, 0.05) : 0;

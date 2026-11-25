@@ -17,6 +17,15 @@ it('renders Markdown but never loads inline images or enables raw HTML', () => {
   expect(screen.getByRole('button', { name: /Copy code/ })).toBeVisible();
 });
 
+it('makes wide response tables keyboard-scrollable without expanding the chat', () => {
+  render(<MarkdownMessage content={'| Name | Value |\n| --- | --- |\n| Example | Long value |'} />);
+  const region = screen.getByRole('region', { name: 'Scrollable table' });
+  expect(region).toHaveAttribute('tabindex', '0');
+  expect(region).toContainElement(screen.getByRole('table'));
+  region.focus();
+  expect(region).toHaveFocus();
+});
+
 it('labels fenced terminal and output blocks without reclassifying source languages', () => {
   render(
     <MarkdownMessage
