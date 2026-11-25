@@ -49,3 +49,11 @@ describe('local voice turn segmentation', () => {
     expect(data.length).toBe(32044);
   });
 });
+
+it('bounds the initial synthesis phrase without losing or rewriting text', () => {
+  const text =
+    'This is a long introductory phrase, followed by a careful explanation that continues for quite a while before the first sentence finally finishes. The second sentence remains intact.';
+  const chunks = splitSpeech(text, true, 120).sentences;
+  expect(chunks[0].length).toBeLessThanOrEqual(120);
+  expect(chunks.join(' ')).toBe(text);
+});

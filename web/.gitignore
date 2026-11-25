@@ -29,3 +29,5 @@ dist-ssr
 
 # Local voice test output
 voice/results/
+**/__pycache__/
+*.py[cod]

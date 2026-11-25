@@ -22,6 +22,7 @@ lock = threading.Lock()
 requests: queue.Queue = queue.Queue(maxsize=3)
 cancelled: set[str] = set()
 active: set[str] = set()
+asr_slots = threading.BoundedSemaphore(2)
 
 
 def emit(id, **data):
@@ -53,20 +54,40 @@ def transcribe(row):
     with wave.open(io.BytesIO(data)) as wav:
         if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or wav.getframerate() != 16000 or wav.getnframes() > 16000 * 31:
             raise ValueError('Expected bounded mono PCM16 WAV at 16 kHz')
+    if row['id'] in cancelled:
+        return
     start = time.perf_counter()
+    queue_ms = round(1000 * (start - row.get('_queued_at', start)))
     with httpx.Client(base_url='http://127.0.0.1:8000', trust_env=False, timeout=45,
                       headers={'Authorization': 'Bearer ' + credentials()}) as client:
-        health = client.get('/v1/speech/health').raise_for_status().json()
-        if not health.get('available') or health.get('backend') != 'faster-whisper':
-            raise RuntimeError('Local faster-whisper unavailable; no cloud fallback')
+        # Health is checked once per worker, not on every utterance. Its existing
+        # backend health() warms the shared Whisper model; decoding is unchanged.
+        if not getattr(transcribe, '_healthy', False):
+            health = client.get('/v1/speech/health').raise_for_status().json()
+            if not health.get('available') or health.get('backend') != 'faster-whisper':
+                raise RuntimeError('Local faster-whisper unavailable; no cloud fallback')
+            transcribe._healthy = True
+        if row['id'] in cancelled:
+            return
+        decode_start = time.perf_counter()
         response = client.post('/v1/speech/transcribe', files={'file': ('voice.wav', data, 'audio/wav')}, data={'language': 'en'}).raise_for_status().json()
     if row['id'] not in cancelled:
-        emit(row['id'], text=response.get('text', '').strip(), transcription_ms=round(1000 * (time.perf_counter() - start)), done=True)
+        import resource
+        emit(row['id'], text=response.get('text', '').strip(), metrics={
+            'asr_worker_queue_ms': queue_ms,
+            # Includes HTTP and backend queue/decode; API exposes no decode timer.
+            'asr_upstream_roundtrip_ms': round(1000 * (time.perf_counter() - decode_start)),
+            'asr_worker_ms': round(1000 * (time.perf_counter() - start)),
+            'asr_input_sample_rate': 16000,
+            'asr_input_samples': len(data[44:]) // 2,
+            'voice_worker_peak_rss_mib': round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576),
+        }, done=True)
 
 
 def reader():
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     for line in sys.stdin:
+        row = {}
         try:
             if len(line) > 1500000:
                 continue
@@ -80,12 +101,18 @@ def reader():
                 raise ValueError('Unsupported action')
             active.add(id)
             if row['action'] == 'stt':
-                # Admission is bounded by the Node adapter; ASR does not block TTS.
+                if not asr_slots.acquire(blocking=False):
+                    active.discard(id)
+                    emit(id, error='Local transcription busy; retry after this turn.', done=True)
+                    continue
+                row['_queued_at'] = time.perf_counter()
                 pool.submit(run_asr, row)
             else:
                 requests.put_nowait(row)
         except Exception:
-            emit(row.get('id', ''), error='Local voice request rejected', done=True)
+            rejected_id = row.get('id', '') if isinstance(row, dict) else ''
+            active.discard(rejected_id)
+            emit(rejected_id, error='Local voice request rejected', done=True)
     requests.put(None)
     pool.shutdown(wait=False, cancel_futures=True)
 
@@ -98,6 +125,7 @@ def run_asr(row):
     finally:
         active.discard(row['id'])
         cancelled.discard(row['id'])
+        asr_slots.release()
 
 
 def main():
@@ -109,6 +137,7 @@ def main():
     for _ in model.generate(text='Ready.', voice='af_bella', lang_code='a'):
         pass
     emit('ready', ready=True, engine='Kokoro-82M MLX', voices=['af_bella', 'am_adam'])
+    expressive = None
     threading.Thread(target=reader, daemon=True).start()
     while True:
         row = requests.get()
@@ -120,11 +149,20 @@ def main():
                 continue
             start = time.perf_counter()
             text, voice = row['text'], row.get('voice', 'af_bella')
-            if not isinstance(text, str) or not 1 <= len(text) <= 400 or voice not in ('af_bella', 'am_adam'):
+            if not isinstance(text, str) or not 1 <= len(text) <= 400 or voice not in ('af_bella', 'am_adam', 'qwen_ryan'):
                 raise ValueError('Invalid synthesis input')
             chunks = []
             rate = 24000
-            for result in model.generate(text=text, voice=voice, lang_code='a'):
+            if voice == 'qwen_ryan':
+                if expressive is None:
+                    expressive = load_model('mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit')
+                generated = expressive.generate_custom_voice(
+                    text=text, speaker='Ryan', language='English',
+                    instruct='Speak warmly and naturally in a relaxed conversation. Use gentle varied intonation and thoughtful pauses. Do not exaggerate emotion.',
+                    stream=True, streaming_interval=0.32)
+            else:
+                generated = model.generate(text=text, voice=voice, lang_code='a', speed=0.96)
+            for result in generated:
                 if id in cancelled:
                     break
                 chunks.append(np.asarray(result.audio, dtype=np.float32).reshape(-1))
