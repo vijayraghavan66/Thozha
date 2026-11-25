@@ -660,11 +660,12 @@ object CompanionProtocolTest {
         }.isFailure)
         check(first.taskEventStreamCursor(requestId) == 12L)
 
-        check(first.persistTaskEventStreamCheckpoint(requestId, 20L) == TaskEventStreamPersistResult.PERSISTED)
+        check(first.persistTaskEventStreamCheckpoint(requestId, supervisorTaskId, 20L) == TaskEventStreamPersistResult.PERSISTED)
         val recovered = runtime()
         check(recovered.taskEventStreamCursor(requestId) == 20L)
         check(recovered.taskEventHistory().count { it["event_id"] == "wss:$requestId:12" } == 1)
-        check(recovered.persistTaskEventStreamCheckpoint(requestId, 19L) == TaskEventStreamPersistResult.ALREADY_PERSISTED)
+        check(recovered.persistTaskEventStreamCheckpoint(requestId, supervisorTaskId, 19L) == TaskEventStreamPersistResult.ALREADY_PERSISTED)
+        check(runCatching { recovered.persistTaskEventStreamCheckpoint(requestId, "c3".repeat(16), 21L) }.isFailure)
 
         failNextWrite = true
         check(runCatching {

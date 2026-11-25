@@ -477,11 +477,25 @@ class LinkRuntime(
     }
 
     /** Persists a server high-water checkpoint after all preceding public events have been saved. */
-    fun persistTaskEventStreamCheckpoint(requestId: String, sequence: Long): TaskEventStreamPersistResult = synchronized(stateLock) {
+    fun persistTaskEventStreamCheckpoint(
+        requestId: String,
+        supervisorTaskId: String,
+        sequence: Long,
+    ): TaskEventStreamPersistResult = synchronized(stateLock) {
         require(requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid request ID" }
+        require(supervisorTaskId.matches(Regex("[A-Za-z0-9._:-]{1,128}"))) { "invalid supervisor task ID" }
         require(sequence >= 0) { "invalid checkpoint sequence" }
-        require(conversation().any { it["message_id"] == requestId }) { "checkpoint request is not present in the durable conversation" }
-        val cursors = ((load()["task_event_stream_cursors"] as? Map<*, *>) ?: emptyMap<Any, Any>())
+        val current = load()
+        val conversations = conversation().toMutableList()
+        val entryIndex = conversations.indexOfFirst { it["message_id"] == requestId }
+        require(entryIndex >= 0) { "checkpoint request is not present in the durable conversation" }
+        val entry = LinkedHashMap(conversations[entryIndex])
+        val boundTask = (entry["task_id"] as? String).orEmpty()
+        require(boundTask.isBlank() || boundTask == supervisorTaskId) { "checkpoint belongs to a different supervisor task" }
+        entry["task_id"] = supervisorTaskId
+        conversations[entryIndex] = entry
+
+        val cursors = ((current["task_event_stream_cursors"] as? Map<*, *>) ?: emptyMap<Any, Any>())
             .entries.mapNotNull { (key, value) ->
                 val id = key as? String ?: return@mapNotNull null
                 val seq = (value as? Number)?.toLong() ?: return@mapNotNull null
@@ -490,7 +504,12 @@ class LinkRuntime(
         val old = cursors[requestId] ?: 0L
         if (sequence <= old) return@synchronized TaskEventStreamPersistResult.ALREADY_PERSISTED
         cursors[requestId] = sequence
-        save(mapOf("task_event_stream_cursors" to cursors))
+        val registry = ((current["task_registry"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
+        val registryIndex = registry.indexOfFirst { it["request_id"] == requestId }
+        if (registryIndex >= 0) {
+            registry[registryIndex] = LinkedHashMap(registry[registryIndex]).apply { put("supervisor_task_id", supervisorTaskId) }
+        }
+        save(mapOf("task_event_stream_cursors" to cursors, "conversation" to conversations, "task_registry" to registry))
         TaskEventStreamPersistResult.PERSISTED
     }
 
