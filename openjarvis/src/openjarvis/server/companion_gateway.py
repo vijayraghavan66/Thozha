@@ -6,6 +6,7 @@ TLS are enforced by those runners, never by a catch-all proxy route.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -14,13 +15,14 @@ import json
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from openjarvis.core.paths import get_config_dir
@@ -36,6 +38,13 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _NONCE_RE = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _TAILNET_HOST_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+ts\.net$")
+_TASK_EVENTS_SUBPROTOCOL = "thozha.task-events.v1"
+_TASK_EVENTS_MAX_CONNECTIONS = 8
+_TASK_EVENTS_MAX_UNACKED = 32
+_TASK_EVENTS_ACK_TIMEOUT_SECONDS = 15.0
+_TASK_EVENTS_POLL_SECONDS = 0.25
+_TASK_EVENTS_REAUTH_SECONDS = 10.0
+_TASK_EVENTS_HEARTBEAT_SECONDS = 15.0
 
 
 class ReadOnlyGatewayStore:
@@ -226,6 +235,7 @@ def create_gateway_app(
     # The gateway is a second process. Constructing SupervisorStore here would
     # run restart recovery and pause work owned by the still-running API on 8000.
     app.state.supervisor_store = supervisor_store or ReadOnlyGatewayStore(get_config_dir() / "supervisor.db")
+    app.state.task_event_ws_slots = asyncio.Semaphore(_TASK_EVENTS_MAX_CONNECTIONS)
     configured_origin = expected_identity_origin if expected_identity_origin is not None else os.environ.get("JARVIS_TAILSCALE_ORIGIN", "")
     if configured_origin:
         try:
@@ -385,6 +395,282 @@ def create_gateway_app(
             backend_path=f"/v1/jarvis/link/tasks/{idempotency_key}/events",
             params={"after_seq": str(after_seq), "limit": str(limit)},
         )
+
+    @app.websocket("/v1/jarvis/link/tasks/{idempotency_key}/events/ws")
+    async def stream_link_task_events(websocket: WebSocket, idempotency_key: str):
+        """Stream only owner-authorized, persisted task events over pinned TLS.
+
+        The TLS frontend is a byte-for-byte proxy to this loopback-only ASGI
+        app, so WebSocket Upgrade does not create a second listener or raw API
+        path. The paired-device bearer remains an Authorization header and is
+        revalidated against the read-only device table every ten seconds.
+        """
+        query = websocket.query_params
+        if (
+            not _IDEMPOTENCY_RE.fullmatch(idempotency_key)
+            or set(query.keys()) - {"after_seq"}
+            or len(query.getlist("after_seq")) > 1
+        ):
+            await websocket.close(code=1008)
+            return
+        raw_cursor = query.get("after_seq", "0")
+        if not re.fullmatch(r"0|[1-9][0-9]{0,18}", raw_cursor):
+            await websocket.close(code=1008)
+            return
+        cursor = int(raw_cursor)
+        if cursor > 9_223_372_036_854_775_807:
+            await websocket.close(code=1008)
+            return
+        if _TASK_EVENTS_SUBPROTOCOL not in websocket.scope.get("subprotocols", []):
+            await websocket.close(code=1008)
+            return
+        try:
+            device_id, _ = _device_id_for_request(websocket, websocket.app.state.supervisor_store)
+        except HTTPException:
+            await websocket.close(code=1008)
+            return
+
+        slots: asyncio.Semaphore = websocket.app.state.task_event_ws_slots
+        try:
+            await asyncio.wait_for(slots.acquire(), timeout=0.05)
+        except TimeoutError:
+            await websocket.close(code=1013)
+            return
+
+        authorization = websocket.headers.get("authorization", "")
+        try:
+            async with httpx.AsyncClient(
+                base_url=websocket.app.state.backend_url,
+                transport=websocket.app.state.backend_transport,
+                timeout=3.0,
+                follow_redirects=False,
+                trust_env=False,
+            ) as preflight:
+                initial_response = await preflight.get(
+                    f"/v1/jarvis/link/tasks/{idempotency_key}/events",
+                    params={"after_seq": str(cursor), "limit": "100"},
+                    headers={"Authorization": authorization, "Accept": "application/json"},
+                )
+        except httpx.HTTPError:
+            slots.release()
+            await websocket.close(code=1011)
+            return
+        if initial_response.status_code in {401, 403, 404}:
+            slots.release()
+            await websocket.close(code=1008)
+            return
+        if initial_response.status_code != 200:
+            slots.release()
+            await websocket.close(code=1011)
+            return
+        try:
+            initial_page = initial_response.json()
+        except ValueError:
+            slots.release()
+            await websocket.close(code=1011)
+            return
+        if (
+            not isinstance(initial_page, dict)
+            or not isinstance(initial_page.get("events"), list)
+            or not isinstance(initial_page.get("task_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", initial_page["task_id"])
+            or isinstance(initial_page.get("next_seq"), bool)
+            or not isinstance(initial_page.get("next_seq"), int)
+            or initial_page["next_seq"] < cursor
+        ):
+            slots.release()
+            await websocket.close(code=1011)
+            return
+
+        last_scanned = cursor
+        highest_sent = cursor
+        last_acked = cursor
+        unacked: list[int] = []
+        last_ack_at = time.monotonic()
+        next_poll = 0.0
+        pending_page: dict[str, Any] | None = initial_page
+        resolved_task_id = initial_page["task_id"]
+        next_reauth = time.monotonic() + _TASK_EVENTS_REAUTH_SECONDS
+        next_heartbeat = time.monotonic() + _TASK_EVENTS_HEARTBEAT_SECONDS
+        try:
+            await websocket.accept(subprotocol=_TASK_EVENTS_SUBPROTOCOL)
+            await websocket.send_json({
+                "type": "ready",
+                "protocol": 1,
+                "after_seq": cursor,
+                "latest_seq": initial_page["next_seq"],
+            })
+            async with httpx.AsyncClient(
+                base_url=websocket.app.state.backend_url,
+                transport=websocket.app.state.backend_transport,
+                timeout=3.0,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                while True:
+                    now = time.monotonic()
+                    if now >= next_reauth:
+                        try:
+                            current_id, _ = _device_id_for_request(
+                                websocket, websocket.app.state.supervisor_store,
+                            )
+                        except HTTPException:
+                            await websocket.close(code=1008)
+                            return
+                        if current_id != device_id:
+                            await websocket.close(code=1008)
+                            return
+                        next_reauth = now + _TASK_EVENTS_REAUTH_SECONDS
+
+                    if unacked and now - last_ack_at > _TASK_EVENTS_ACK_TIMEOUT_SECONDS:
+                        await websocket.close(code=1013)
+                        return
+
+                    # Process one small ACK/control frame at a time. The cursor
+                    # is cumulative so a persisted high-water mark can cover
+                    # event-sequence gaps caused by intentionally filtered rows.
+                    try:
+                        incoming = await asyncio.wait_for(websocket.receive(), timeout=0.025)
+                    except TimeoutError:
+                        incoming = None
+                    except WebSocketDisconnect:
+                        return
+                    if incoming is not None:
+                        if incoming.get("type") == "websocket.disconnect":
+                            return
+                        raw = incoming.get("text")
+                        if incoming.get("type") != "websocket.receive" or not isinstance(raw, str):
+                            await websocket.close(code=1008)
+                            return
+                        if len(raw.encode("utf-8")) > 256:
+                            await websocket.close(code=1008)
+                            return
+                        try:
+                            control = json.loads(raw)
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            await websocket.close(code=1008)
+                            return
+                        if (
+                            not isinstance(control, dict)
+                            or set(control) != {"type", "protocol", "task_id", "seq"}
+                            or control.get("type") != "ack"
+                            or control.get("protocol") != 1
+                            or control.get("task_id") != resolved_task_id
+                        ):
+                            await websocket.close(code=1008)
+                            return
+                        acknowledged = control.get("seq")
+                        if (
+                            isinstance(acknowledged, bool)
+                            or not isinstance(acknowledged, int)
+                            or acknowledged < last_acked
+                            or acknowledged > highest_sent
+                            or (acknowledged > last_acked and acknowledged not in unacked)
+                        ):
+                            await websocket.close(code=1008)
+                            return
+                        if acknowledged > last_acked:
+                            last_acked = acknowledged
+                            unacked = [seq for seq in unacked if seq > acknowledged]
+                            last_ack_at = now
+
+                    if now >= next_heartbeat:
+                        await websocket.send_json({"type": "heartbeat", "protocol": 1})
+                        next_heartbeat = now + _TASK_EVENTS_HEARTBEAT_SECONDS
+
+                    if now < next_poll or len(unacked) >= _TASK_EVENTS_MAX_UNACKED:
+                        await asyncio.sleep(0.025)
+                        continue
+
+                    if pending_page is not None:
+                        page = pending_page
+                        pending_page = None
+                    else:
+                        try:
+                            upstream = await client.get(
+                                f"/v1/jarvis/link/tasks/{idempotency_key}/events",
+                                params={"after_seq": str(last_scanned), "limit": "100"},
+                                headers={"Authorization": authorization, "Accept": "application/json"},
+                            )
+                        except httpx.HTTPError:
+                            await websocket.close(code=1011)
+                            return
+                        if upstream.status_code in {401, 403, 404}:
+                            await websocket.close(code=1008)
+                            return
+                        if upstream.status_code != 200:
+                            await websocket.close(code=1011)
+                            return
+                        try:
+                            page = upstream.json()
+                        except ValueError:
+                            await websocket.close(code=1011)
+                            return
+                    if (
+                        not isinstance(page, dict)
+                        or not isinstance(page.get("events"), list)
+                        or page.get("task_id") != resolved_task_id
+                        or isinstance(page.get("next_seq"), bool)
+                        or not isinstance(page.get("next_seq"), int)
+                        or page["next_seq"] < last_scanned
+                    ):
+                        await websocket.close(code=1011)
+                        return
+                    events = page["events"]
+                    for event in events:
+                        if len(unacked) >= _TASK_EVENTS_MAX_UNACKED:
+                            break
+                        if not isinstance(event, dict):
+                            await websocket.close(code=1011)
+                            return
+                        sequence = event.get("seq")
+                        if (
+                            isinstance(sequence, bool)
+                            or not isinstance(sequence, int)
+                            or sequence <= last_scanned
+                            or sequence > page["next_seq"]
+                            or not isinstance(event.get("event_type"), str)
+                            or not isinstance(event.get("created_at"), str)
+                            or not isinstance(event.get("payload"), dict)
+                        ):
+                            await websocket.close(code=1011)
+                            return
+                        await websocket.send_json({
+                            "type": "event",
+                            "protocol": 1,
+                            "task_id": resolved_task_id,
+                            "event": {
+                                "seq": sequence,
+                                "event_type": event["event_type"],
+                                "created_at": event["created_at"],
+                                "payload": event["payload"],
+                            },
+                        })
+                        if not unacked:
+                            last_ack_at = time.monotonic()
+                        last_scanned = sequence
+                        highest_sent = sequence
+                        unacked.append(sequence)
+
+                    # GET /events intentionally filters private event types. A
+                    # checkpoint advances over those persisted rows without
+                    # exposing them or replaying them forever.
+                    scanned = page["next_seq"]
+                    if scanned > last_scanned and len(unacked) < _TASK_EVENTS_MAX_UNACKED:
+                        if not unacked:
+                            last_ack_at = time.monotonic()
+                        await websocket.send_json({
+                            "type": "checkpoint",
+                            "protocol": 1,
+                            "task_id": resolved_task_id,
+                            "seq": scanned,
+                        })
+                        last_scanned = scanned
+                        highest_sent = scanned
+                        unacked.append(scanned)
+                    next_poll = time.monotonic() + _TASK_EVENTS_POLL_SECONDS
+        finally:
+            slots.release()
 
     @app.post("/v1/jarvis/link/tasks/{idempotency_key}/cancel")
     async def cancel_link_task(idempotency_key: str, request: Request):

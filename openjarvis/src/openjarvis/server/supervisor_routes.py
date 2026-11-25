@@ -448,9 +448,11 @@ def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:
     from openjarvis.server.companion_wifi import (
         ensure_local_gateway_tls_identity,
         local_gateway_hostname,
+        read_wifi_ssid,
         validate_wifi_bind_host,
         wifi_gateway_enabled,
         wifi_interface_ipv4_address,
+        verify_local_gateway_tls_listener,
     )
 
     if not wifi_gateway_enabled():
@@ -471,23 +473,11 @@ def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:
     if actual_address != configured_address or ":" in actual_address:
         raise HTTPException(status_code=409, detail="The configured Wi-Fi address is not assigned to this interface")
 
-    try:
-        ssid_result = subprocess.run(
-            ["/usr/sbin/networksetup", "-getairportnetwork", interface],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except subprocess.SubprocessError as exc:
-        raise HTTPException(status_code=409, detail="The configured Wi-Fi network could not be verified") from exc
-    prefix = "Current Wi-Fi Network:"
-    current_ssid = ""
-    if ssid_result.returncode == 0:
-        for line in ssid_result.stdout.splitlines():
-            if line.startswith(prefix):
-                current_ssid = line[len(prefix):].strip()
-                break
+    current_ssid = read_wifi_ssid(
+        interface,
+        runner=subprocess.run,
+        environment=os.environ,
+    )
     if current_ssid != allowed_ssid:
         raise HTTPException(status_code=409, detail="The current Wi-Fi network is not the configured network")
 
@@ -513,12 +503,16 @@ def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", tls_identity.certificate_sha256)
         ):
             raise ValueError("Wi-Fi TLS identity does not match the configured endpoint")
-        import socket
-        with socket.create_connection((actual_address, port), timeout=0.5):
-            pass
+        if not verify_local_gateway_tls_listener(
+            actual_address,
+            hostname,
+            port,
+            tls_identity.certificate_sha256,
+        ):
+            raise ValueError("Wi-Fi gateway listener certificate does not match the stored identity")
     except (OSError, RuntimeError, ValueError) as exc:
         logger.info("Local Wi-Fi gateway not ready (%s)", type(exc).__name__)
-        raise HTTPException(status_code=409, detail="The local Wi-Fi gateway is not accepting connections") from exc
+        raise HTTPException(status_code=409, detail="The local Wi-Fi gateway is not accepting the stored TLS identity") from exc
 
     return {
         "server_url": f"https://{hostname}:{port}",

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:-$ROOT/../staging-out}"
 APP_NAME="Thozha Setup.app"
+APP_BUNDLE_ID="com.thozha.setup.staging"
 VERSION="0.1.0"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -59,7 +60,22 @@ cat > "$STAGE/root/Applications/$APP_NAME/Contents/Info.plist" <<'PLIST'
 PLIST
 printf 'APPL????' > "$STAGE/root/Applications/$APP_NAME/Contents/PkgInfo"
 chmod 0755 "$STAGE/root/Applications/$APP_NAME/Contents/MacOS/ThozhaSetup"
-codesign --force --deep --sign - "$STAGE/root/Applications/$APP_NAME"
+HELPER="$STAGE/root/Applications/$APP_NAME/Contents/Helpers/ThozhaGatewaySupervisor"
+codesign --force --sign - --identifier "$APP_BUNDLE_ID" "$HELPER"
+# TCC identifies Location Services clients by signed code identity. Give the
+# bundled helper the same stable bundle identifier as the visible setup app,
+# then sign only the outer bundle so `--deep` cannot replace that identifier.
+codesign --force --sign - "$STAGE/root/Applications/$APP_NAME"
+# Packaging assertions: the macOS usage-description key is the correct key
+# (NSLocationWhenInUseUsageDescription is an iOS key), and the LaunchAgent
+# helper must share the app's TCC identifier before any permission request.
+[[ "$(/usr/bin/plutil -extract CFBundleIdentifier raw "$STAGE/root/Applications/$APP_NAME/Contents/Info.plist")" == "$APP_BUNDLE_ID" ]]
+HELPER_IDENTIFIER="$(/usr/bin/codesign -d -vvv "$HELPER" 2>&1 | sed -n 's/^Identifier=//p')"
+[[ "$HELPER_IDENTIFIER" == "$APP_BUNDLE_ID" ]] || { echo "The SSID helper does not share the app's TCC identifier; refusing to package." >&2; exit 6; }
+if ! /usr/bin/plutil -extract NSLocationUsageDescription raw "$STAGE/root/Applications/$APP_NAME/Contents/Info.plist" >/dev/null; then
+  echo "The macOS Location Services usage description is missing; refusing to package." >&2
+  exit 6
+fi
 # Keep only ordinary bundle files; AppleDouble metadata is not part of the app.
 find "$STAGE/root" -name '._*' -delete
 APP_TMP="$OUT/.Thozha Setup.app.tmp-$$"

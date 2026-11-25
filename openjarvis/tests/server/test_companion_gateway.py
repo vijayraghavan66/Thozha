@@ -15,8 +15,14 @@ from fastapi import FastAPI
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
-from openjarvis.server.companion_gateway import ReadOnlyGatewayStore, create_gateway_app, validate_bind_host
+from openjarvis.server.companion_gateway import (
+    ReadOnlyGatewayStore,
+    _TASK_EVENTS_SUBPROTOCOL,
+    create_gateway_app,
+    validate_bind_host,
+)
 from openjarvis.server.supervisor_routes import _canonical_pairing_payload
 from openjarvis.tasks.supervisor import SupervisorStore
 import openjarvis.tasks.supervisor as supervisor_module
@@ -50,6 +56,33 @@ def gateway(tmp_path):
 
     async def upstream_handler(request: httpx.Request) -> httpx.Response:
         upstream_requests.append(request)
+        if request.url.path.endswith("/events"):
+            if "deviceowner-denied0001" in request.url.path:
+                return httpx.Response(403, json={"detail": "Task belongs to another paired device"})
+            after_seq = int(request.url.params.get("after_seq", "0"))
+            if "checkpoint-only" in request.url.path:
+                events = []
+                next_seq = 3
+            elif after_seq == 0:
+                events = [{
+                    "seq": 1,
+                    "event_type": "link_task.queued",
+                    "created_at": "2026-11-25T00:00:00Z",
+                    "payload": {"state": "CREATED"},
+                }]
+                next_seq = 3
+            elif after_seq in {1, 3}:
+                events = [{
+                    "seq": 5,
+                    "event_type": "link_task.completed",
+                    "created_at": "2026-11-25T00:00:01Z",
+                    "payload": {"success": True},
+                }]
+                next_seq = 5
+            else:
+                events = []
+                next_seq = after_seq
+            return httpx.Response(200, json={"task_id": "f" * 32, "events": events, "next_seq": next_seq})
         if request.url.path.endswith("/download"):
             digest = "a" * 64
             return httpx.Response(
@@ -351,6 +384,170 @@ def test_gateway_requires_device_auth_for_companion_data(gateway):
     assert client.get("/v1/jarvis/system/info").status_code == 401
     assert client.get("/v1/jarvis/approvals/pending", headers={"Authorization": "Bearer wrong"}).status_code == 401
     assert len(upstream) == before
+
+
+def test_gateway_wss_task_events_replay_ack_and_reconnect_catchup(gateway):
+    client, _, token, _, _, upstream = gateway
+    key = "wss-catchup-request-0001"
+    headers = {"Authorization": f"Bearer {token}"}
+    endpoint = f"/v1/jarvis/link/tasks/{key}/events/ws?after_seq=0"
+
+    with client.websocket_connect(
+        endpoint, headers=headers, subprotocols=[_TASK_EVENTS_SUBPROTOCOL],
+    ) as websocket:
+        ready = websocket.receive_json()
+        assert ready == {"type": "ready", "protocol": 1, "after_seq": 0, "latest_seq": 3}
+        frame = websocket.receive_json()
+        assert frame == {
+            "type": "event",
+            "protocol": 1,
+            "task_id": "f" * 32,
+            "event": {
+                "seq": 1,
+                "event_type": "link_task.queued",
+                "created_at": "2026-11-25T00:00:00Z",
+                "payload": {"state": "CREATED"},
+            },
+        }
+        checkpoint = websocket.receive_json()
+        assert checkpoint == {"type": "checkpoint", "protocol": 1, "task_id": "f" * 32, "seq": 3}
+        # The caller sends a cumulative ACK only after persisting the cursor.
+        ack = {"type": "ack", "protocol": 1, "task_id": "f" * 32, "seq": 3}
+        websocket.send_json(ack)
+        websocket.send_json(ack)  # duplicate ACK is idempotent
+        websocket.close()
+
+    with client.websocket_connect(
+        f"/v1/jarvis/link/tasks/{key}/events/ws?after_seq=3",
+        headers=headers,
+        subprotocols=[_TASK_EVENTS_SUBPROTOCOL],
+    ) as websocket:
+        assert websocket.receive_json() == {"type": "ready", "protocol": 1, "after_seq": 3, "latest_seq": 5}
+        replay = websocket.receive_json()
+        assert replay["type"] == "event" and replay["task_id"] == "f" * 32
+        assert replay["event"]["seq"] == 5
+        assert replay["event"]["event_type"] == "link_task.completed"
+        websocket.send_json({"type": "ack", "protocol": 1, "task_id": "f" * 32, "seq": 5})
+        websocket.close()
+
+    requests = [item for item in upstream if item.url.path.endswith("/events")]
+    assert [dict(item.url.params)["after_seq"] for item in requests[:2]] == ["0", "3"]
+    assert all(item.headers["authorization"] == f"Bearer {token}" for item in requests[:2])
+
+
+def test_gateway_wss_resume_before_checkpoint_ack_catches_up_without_loss(gateway):
+    client, _, token, _, _, upstream = gateway
+    key = "wss-checkpoint-reconnect-0001"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    with client.websocket_connect(
+        f"/v1/jarvis/link/tasks/{key}/events/ws?after_seq=0",
+        headers=headers,
+        subprotocols=[_TASK_EVENTS_SUBPROTOCOL],
+    ) as websocket:
+        websocket.receive_json()  # ready
+        assert websocket.receive_json()["event"]["seq"] == 1
+        assert websocket.receive_json()["seq"] == 3  # checkpoint was not ACKed
+        websocket.close()
+
+    with client.websocket_connect(
+        f"/v1/jarvis/link/tasks/{key}/events/ws?after_seq=1",
+        headers=headers,
+        subprotocols=[_TASK_EVENTS_SUBPROTOCOL],
+    ) as websocket:
+        ready = websocket.receive_json()
+        assert ready["after_seq"] == 1
+        assert ready["latest_seq"] == 5
+        event = websocket.receive_json()
+        assert event["type"] == "event" and event["event"]["seq"] == 5
+        websocket.send_json({"type": "ack", "protocol": 1, "task_id": "f" * 32, "seq": 5})
+        websocket.close()
+
+    requests = [item for item in upstream if item.url.path.endswith("/events")]
+    assert [dict(item.url.params)["after_seq"] for item in requests[-2:]] == ["0", "1"]
+
+
+def test_gateway_wss_checkpoint_covers_filtered_rows_and_rejects_backwards_ack(gateway):
+    client, _, token, _, _, _ = gateway
+    key = "wss-checkpoint-only-request-0001"
+    headers = {"Authorization": f"Bearer {token}"}
+    with client.websocket_connect(
+        f"/v1/jarvis/link/tasks/{key}/events/ws?after_seq=0",
+        headers=headers,
+        subprotocols=[_TASK_EVENTS_SUBPROTOCOL],
+    ) as websocket:
+        ready = websocket.receive_json()
+        assert ready["latest_seq"] == 3
+        checkpoint = websocket.receive_json()
+        assert checkpoint == {"type": "checkpoint", "protocol": 1, "task_id": "f" * 32, "seq": 3}
+        ack = {"type": "ack", "protocol": 1, "task_id": "f" * 32, "seq": 3}
+        websocket.send_json(ack)
+        websocket.send_json(ack)
+        websocket.send_json({"type": "ack", "protocol": 1, "task_id": "f" * 32, "seq": 2})
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            websocket.receive_json()
+    assert rejected.value.code == 1008
+
+
+def test_gateway_wss_rejects_bad_auth_query_subprotocol_and_ack(gateway):
+    client, _, token, _, _, _ = gateway
+    key = "wss-protocol-request-0002"
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/v1/jarvis/link/tasks/{key}/events/ws?after_seq=0",
+            subprotocols=[_TASK_EVENTS_SUBPROTOCOL],
+        ) as websocket:
+            websocket.receive_json()
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/v1/jarvis/link/tasks/{key}/events/ws?after_seq=0&token={token}",
+            headers={"Authorization": f"Bearer {token}"},
+            subprotocols=[_TASK_EVENTS_SUBPROTOCOL],
+        ) as websocket:
+            websocket.receive_json()
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/v1/jarvis/link/tasks/{key}/events/ws?after_seq=0",
+            headers={"Authorization": f"Bearer {token}"},
+            subprotocols=["unsupported.v1"],
+        ) as websocket:
+            websocket.receive_json()
+
+    with client.websocket_connect(
+        f"/v1/jarvis/link/tasks/{key}/events/ws?after_seq=0",
+        headers={"Authorization": f"Bearer {token}"},
+        subprotocols=[_TASK_EVENTS_SUBPROTOCOL],
+    ) as websocket:
+        websocket.receive_json()  # ready
+        websocket.send_json({"type": "ack", "protocol": 1, "task_id": "f" * 32, "seq": 999})
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_json()
+
+    with client.websocket_connect(
+        f"/v1/jarvis/link/tasks/{key}/events/ws?after_seq=0",
+        headers={"Authorization": f"Bearer {token}"},
+        subprotocols=[_TASK_EVENTS_SUBPROTOCOL],
+    ) as websocket:
+        websocket.receive_json()  # ready
+        websocket.send_bytes(b"not-an-ack-frame")
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            websocket.receive_json()
+    assert rejected.value.code == 1008
+
+
+def test_gateway_wss_preserves_backend_owner_binding(gateway):
+    client, _, token, _, _, _ = gateway
+    with pytest.raises(WebSocketDisconnect) as denied:
+        with client.websocket_connect(
+            "/v1/jarvis/link/tasks/deviceowner-denied0001/events/ws?after_seq=0",
+            headers={"Authorization": f"Bearer {token}"},
+            subprotocols=[_TASK_EVENTS_SUBPROTOCOL],
+        ) as websocket:
+            websocket.receive_json()
+    assert denied.value.code == 1008
 
 
 def test_decision_body_is_bounded_and_allowlisted(gateway):
