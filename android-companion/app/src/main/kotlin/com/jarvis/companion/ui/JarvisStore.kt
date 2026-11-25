@@ -303,10 +303,7 @@ class JarvisStore(private val app: Context) {
 
     fun hasPendingTelegramWork(): Boolean = runCatching {
         val runtime = LinkService.runtime(app)
-        runtime.conversation().any { row ->
-            row["transport"] in setOf("telegram", "link") &&
-                (row["state"] as? String)?.uppercase() in LinkSyncPolicy.activeStates
-        } || runtime.status().outboxSize > 0
+        LinkSyncPolicy.hasPendingTelegramWork(runtime.conversation(), System.currentTimeMillis()) || runtime.status().outboxSize > 0
     }.getOrDefault(false)
 
     fun shouldRunLinkSync(): Boolean {
@@ -315,10 +312,7 @@ class JarvisStore(private val app: Context) {
         val lanHealthy = macApiPaired && lastMacApiTransport == "wifi" && macApiSyncError.isBlank()
         val pendingAndOutbox = runCatching {
             val runtime = LinkService.runtime(app)
-            runtime.conversation().any { row ->
-                row["transport"] in setOf("telegram", "link") &&
-                    (row["state"] as? String)?.uppercase() in LinkSyncPolicy.activeStates
-            } to runtime.status().outboxSize
+            LinkSyncPolicy.hasPendingTelegramWork(runtime.conversation(), System.currentTimeMillis()) to runtime.status().outboxSize
         }.getOrElse { true to 1 }
         return LinkSyncPolicy.shouldRunLinkSync(lanHealthy, pendingAndOutbox.first, pendingAndOutbox.second)
     }

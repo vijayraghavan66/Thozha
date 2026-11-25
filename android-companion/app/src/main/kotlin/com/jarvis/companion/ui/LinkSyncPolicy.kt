@@ -13,6 +13,16 @@ internal object LinkSyncPolicy {
     const val ACTIVE_INTERVAL_MS = 10_000L
     const val TELEGRAM_ACTIVE_INTERVAL_MS = 30_000L
     const val IDLE_INTERVAL_MS = 30_000L
+    const val UNCONFIRMED_TELEGRAM_POLL_WINDOW_MS = 30 * 60 * 1000L
+
+    fun hasPendingTelegramWork(conversation: List<Map<String, Any>>, nowMs: Long): Boolean = conversation.any { row ->
+        if (row["transport"] !in setOf("telegram", "link") || (row["state"] as? String)?.uppercase() !in activeStates) return@any false
+        if ((row["state"] as? String)?.uppercase() != "UNCONFIRMED") return@any true
+        val createdAt = (row["created_at_unix_ms"] as? Number)?.toLong()
+            ?: (row["updated_at_unix_ms"] as? Number)?.toLong()
+            ?: return@any false
+        nowMs - createdAt in 0..UNCONFIRMED_TELEGRAM_POLL_WINDOW_MS
+    }
 
     /** LAN WSS is authorized by the paired API identity; Telegram/Link identities stay on their own transport. */
     fun taskEventWatchCandidates(

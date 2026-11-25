@@ -50,6 +50,11 @@ object LinkSyncPolicyChecks {
             LinkSyncPolicy.shouldRunLinkSync(lanHealthy = false, pendingTelegramWork = false, queuedOutboxMessages = 0),
             "Telegram fallback resumes when the last confirmed LAN route fails",
         )
+        val recentUnconfirmed = mapOf<String, Any>(
+            "transport" to "telegram", "state" to "UNCONFIRMED", "created_at_unix_ms" to 100_000L,
+        )
+        checkPolicy(LinkSyncPolicy.hasPendingTelegramWork(listOf(recentUnconfirmed), 200_000L), "recent uncertain Telegram delivery is polled for a delayed result")
+        checkPolicy(!LinkSyncPolicy.hasPendingTelegramWork(listOf(recentUnconfirmed), 100_000L + LinkSyncPolicy.UNCONFIRMED_TELEGRAM_POLL_WINDOW_MS + 1L), "stale unconfirmed rows stop driving permanent foreground polls")
 
         // Durable terminal state wins over an old Compose snapshot. Completed/cancelled work falls
         // back to the existing idle cadence rather than keeping an aggressive poll loop alive.
@@ -106,7 +111,7 @@ object LinkSyncPolicyChecks {
             ),
             "duplicate request IDs are reconciled by durable state without resurrecting cancelled work",
         )
-        checkPolicy(assertions == 28, "all expected policy assertions executed")
+        checkPolicy(assertions == 30, "all expected policy assertions executed")
         println("Link sync delivery policy passed: $assertions assertions.")
     }
 }
