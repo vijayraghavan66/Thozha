@@ -21,15 +21,12 @@ import java.net.InetAddress
 import java.net.URI
 import java.security.MessageDigest
 import java.security.cert.CertificateException
-import java.security.cert.X509Certificate
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLSession
 import javax.net.ssl.X509TrustManager
 
 /**
@@ -130,7 +127,10 @@ class AndroidLocalGatewayTaskEventWssChannel(
                 terminalFailure("LOCAL_NETWORK_PERMISSION_REQUIRED")
                 return
             }
-            val gateway = candidate
+            val gateway = candidate ?: signedAddressGateway(pin, SystemClock.elapsedRealtime())?.also {
+                candidate = it
+                diagnostic("wss_signed_address_fallback")
+            }
             if (gateway == null) {
                 transition(TaskEventChannelState.DISCONNECTED, "GATEWAY_DISCOVERY_REQUIRED")
                 return
@@ -155,8 +155,8 @@ class AndroidLocalGatewayTaskEventWssChannel(
                 requestedCursor = cursor
             }
             transition(if (reconnectAttempt == 0) TaskEventChannelState.CONNECTING else TaskEventChannelState.RECONNECTING, null)
-            val tls = try {
-                PinnedGatewayWssTls.create(pin.certificateSha256, pin.hostname)
+            val trustManager = try {
+                LocalGatewayTls.trustManager(pin.certificateSha256)
             } catch (_: Exception) {
                 terminalFailure("GATEWAY_TLS_PIN_INVALID")
                 return
@@ -167,8 +167,8 @@ class AndroidLocalGatewayTaskEventWssChannel(
                         validateGatewayAgainstPin(candidate ?: gateway, pin).ifEmpty { addressList }
                     } else Dns.SYSTEM.lookup(hostname)
                 })
-                .sslSocketFactory(tls.sslContext.socketFactory, tls.trustManager)
-                .hostnameVerifier(tls.hostnameVerifier)
+                .sslSocketFactory(SSLContext.getInstance("TLS").apply { init(null, arrayOf(trustManager), null) }.socketFactory, trustManager)
+                .hostnameVerifier(LocalGatewayTls.hostnameVerifier(pin.hostname))
                 .connectTimeout(4, TimeUnit.SECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
                 .writeTimeout(5, TimeUnit.SECONDS)
@@ -354,6 +354,23 @@ class AndroidLocalGatewayTaskEventWssChannel(
 
         override fun updateDiscoveredGateway(candidate: DiscoveredMacGateway?): Boolean {
             if (candidate == null) {
+                val signedFallback = signedAddressGateway(pin, SystemClock.elapsedRealtime())
+                if (signedFallback != null) {
+                    val current = this.candidate
+                    if (current?.serviceId == signedFallback.serviceId && current.privateAddresses == signedFallback.privateAddresses) {
+                        return true
+                    }
+                    this.candidate = signedFallback
+                    reconnectAttempt = 0
+                    reconnectFuture?.cancel(false)
+                    val previous = socket
+                    socket = null
+                    previous?.close(1000, "using signed paired gateway endpoint")
+                    reconnectFuture = null
+                    if (!closed.get()) scheduler.execute { connect() }
+                    diagnostic("wss_signed_address_fallback")
+                    return true
+                }
                 val previous = socket
                 socket = null
                 this.candidate = null
@@ -366,7 +383,7 @@ class AndroidLocalGatewayTaskEventWssChannel(
             val newAddresses = validateGatewayAgainstPin(candidate, pin)
             if (newAddresses.isEmpty()) return false
             val current = this.candidate
-            if (current != null && current.serviceId != candidate.serviceId) return false
+            if (!canReplaceGatewayCandidate(current, candidate)) return false
             if (current != null && current.advertisedTlsHostname == candidate.advertisedTlsHostname &&
                 current.port == candidate.port && current.privateAddresses == candidate.privateAddresses
             ) return true
@@ -439,6 +456,9 @@ class AndroidLocalGatewayTaskEventWssChannel(
             httpClient?.connectionPool?.evictAll()
             httpClient = null
             scheduler.shutdownNow()
+            // Stop accepting new persistence work and let an in-flight durable write finish.
+            // The next session resumes from the persisted cursor; closure never ACKs new work.
+            persistenceExecutor.shutdown()
             currentState = TaskEventChannelState.CLOSED
             callbackExecutor.execute { runCatching { listener.onState(TaskEventChannelState.CLOSED, null) } }
         }
@@ -462,6 +482,9 @@ internal fun validateGatewayAgainstPin(candidate: DiscoveredMacGateway, pin: Loc
             ?.takeIf(ThozhaDnsSdContract::isRoutablePrivateLanAddress)
     }.distinctBy { it.hostAddress }
 }
+
+internal fun canReplaceGatewayCandidate(current: DiscoveredMacGateway?, candidate: DiscoveredMacGateway): Boolean =
+    current == null || current.serviceId.startsWith("signed-endpoint:") || current.serviceId == candidate.serviceId
 
 internal fun buildTaskEventsWssUrl(hostname: String, port: Int, idempotencyKey: String, afterSeq: Long): String {
     require(hostname.matches(Regex("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.local", RegexOption.IGNORE_CASE)))
@@ -585,41 +608,3 @@ private val SAFE_TASK_EVENT_TYPES = setOf(
     "approval.execution_completed", "approval.execution_failed", "approval.mac_mcp_dispatched",
     "tool.mcp_approval_dispatch_claimed", "development.tool_performance",
 )
-
-private data class PinnedGatewayWssTls(
-    val sslContext: SSLContext,
-    val trustManager: X509TrustManager,
-    val hostnameVerifier: HostnameVerifier,
-) {
-    companion object {
-        fun create(expectedFingerprint: String, expectedHostname: String): PinnedGatewayWssTls {
-            require(expectedFingerprint.matches(Regex("sha256:[0-9a-f]{64}")))
-            require(expectedHostname.matches(Regex("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.local", RegexOption.IGNORE_CASE)))
-            val trustManager = object : X509TrustManager {
-                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-                    throw CertificateException("Client certificates are not used by this gateway")
-                }
-                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-                    val leaf = chain?.firstOrNull() ?: throw CertificateException("Gateway certificate is missing")
-                    try {
-                        leaf.checkValidity()
-                    } catch (_: Exception) {
-                        throw CertificateException("Gateway certificate is outside its validity period")
-                    }
-                    if (!matchesPinnedGatewayCertificate(leaf.encoded, expectedFingerprint)) throw CertificateException("Gateway certificate pin mismatch")
-                }
-            }
-            val verifier = HostnameVerifier { _, session ->
-                val leaf = runCatching { session.peerCertificates.firstOrNull() as? X509Certificate }.getOrNull() ?: return@HostnameVerifier false
-                val names = runCatching { leaf.subjectAlternativeNames }.getOrNull() ?: return@HostnameVerifier false
-                matchesExactGatewayDnsSan(names, expectedHostname)
-            }
-            return PinnedGatewayWssTls(
-                SSLContext.getInstance("TLS").apply { init(null, arrayOf(trustManager), null) },
-                trustManager,
-                verifier,
-            )
-        }
-    }
-}

@@ -887,16 +887,26 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             throw e
         } catch (e: Exception) {
             if (BuildConfig.DEBUG && wifiEndpoint != null) {
-                val causes = generateSequence(e as Throwable?) { it.cause }
+                val chain = generateSequence(e as Throwable?) { it.cause }.take(5).toList()
+                val causes = chain
                     .take(5)
                     .joinToString(">") { it.javaClass.simpleName.take(40) }
-                Log.w("JarvisWifi", "request_failed route=signed_private_ip phase=$wifiPhase causes=$causes")
+                val failureStage = classifyGatewayFailure(chain)
+                Log.w("JarvisWifi", "request_failed route=signed_private_ip phase=$wifiPhase failure_stage=$failureStage causes=$causes")
             }
             throw ApiException(e.message ?: "Could not reach Jarvis on the private network")
         } finally {
             connection.disconnect()
         }
     }
+}
+
+internal fun classifyGatewayFailure(causes: List<Throwable>): String = when {
+    causes.any { it is java.net.UnknownHostException } -> "dns_resolution"
+    causes.any { it is java.net.ConnectException } -> "tcp_connect"
+    causes.any { it is javax.net.ssl.SSLException || it is java.security.cert.CertificateException } -> "tls_validation_or_handshake"
+    causes.any { it is java.net.SocketTimeoutException } -> "network_timeout"
+    else -> "http_or_transport_io"
 }
 
 private fun JSONObject.toKotlinMap(): Map<String, Any?> = buildMap {

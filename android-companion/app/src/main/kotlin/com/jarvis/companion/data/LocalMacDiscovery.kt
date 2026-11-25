@@ -26,6 +26,21 @@ data class DiscoveredMacGateway(
     val reachability: LocalMacReachability = LocalMacReachability.NOT_CHECKED,
 )
 
+/** A signed address is only a network hint; the normal pinned TLS checks authenticate it. */
+internal fun signedAddressGateway(pin: LocalGatewayPin, observedAtElapsedMs: Long): DiscoveredMacGateway? {
+    val endpoint = endpointFromSignedAddress(pin) ?: return null
+    val address = endpoint.address.hostAddress?.substringBefore('%') ?: return null
+    return DiscoveredMacGateway(
+        serviceId = "signed-endpoint:${pin.hostname.lowercase(Locale.ROOT)}:${pin.port}",
+        instanceName = "Signed paired endpoint",
+        advertisedTlsHostname = pin.hostname,
+        port = pin.port,
+        privateAddresses = listOf(address),
+        protocolVersion = ThozhaDnsSdContract.PROTOCOL_VERSION,
+        lastObservedElapsedMs = observedAtElapsedMs,
+    )
+}
+
 data class LocalMacDiscoverySnapshot(
     val status: LocalMacDiscoveryStatus,
     val gateways: List<DiscoveredMacGateway> = emptyList(),

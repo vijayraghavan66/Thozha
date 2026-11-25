@@ -38,12 +38,24 @@ object LocalGatewayRoutingChecks {
             LocalGatewayPin("thozha-mac.local", 8443, "sha256:" + "a".repeat(64), "192.168.1.8"),
         )
         check(signedFallback?.httpsBaseUrl() == "https://192.168.1.8:8443", "Signed loopback-provided IP should be usable when mDNS is blocked")
+        val signedCandidate = signedAddressGateway(
+            LocalGatewayPin("thozha-mac.local", 8443, "sha256:" + "a".repeat(64), "192.168.1.8"),
+            1234L,
+        )
+        check(signedCandidate?.serviceId?.startsWith("signed-endpoint:") == true, "WSS should have a signed endpoint fallback when DNS-SD is unavailable")
+        check(validateGatewayAgainstPin(signedCandidate!!, LocalGatewayPin("thozha-mac.local", 8443, "sha256:" + "a".repeat(64), "192.168.1.8")).isNotEmpty(), "Signed WSS fallback must still match the pinned host, port, protocol and private address")
+        val dnsCandidate = signedCandidate.copy(serviceId = "_jarvis-companion._tcp.|Jarvis Companion")
+        check(canReplaceGatewayCandidate(signedCandidate, dnsCandidate), "A DNS-SD candidate may replace the signed address hint")
+        check(!canReplaceGatewayCandidate(dnsCandidate, dnsCandidate.copy(serviceId = "_jarvis-companion._tcp.|attacker")), "A different DNS-SD service must not replace the selected service")
         check(
             endpointFromSignedAddress(LocalGatewayPin("thozha-mac.local", 8443, "sha256:" + "a".repeat(64), "8.8.8.8")) == null,
             "A public address must never be used as the local gateway fallback",
         )
         check(isAllowedPrivateGatewayAddress(InetAddress.getByName("192.168.1.8")), "RFC1918 gateway address should be accepted")
         check(isAllowedPrivateGatewayAddress(InetAddress.getByName("fd12::1")), "ULA gateway address should be accepted")
+        check(classifyGatewayFailure(listOf(java.net.ConnectException("redacted"))) == "tcp_connect", "Connection refusal must be diagnosed before TLS")
+        check(classifyGatewayFailure(listOf(javax.net.ssl.SSLHandshakeException("redacted"))) == "tls_validation_or_handshake", "TLS failures must be distinguished from TCP failures")
+        check(classifyGatewayFailure(listOf(java.net.UnknownHostException("redacted"))) == "dns_resolution", "DNS failures must be distinguished from TCP failures")
         listOf("127.0.0.1", "8.8.8.8", "169.254.1.1", "100.64.0.1", "224.0.0.1", "::1", "fe80::1").forEach { host ->
             check(!isAllowedPrivateGatewayAddress(InetAddress.getByName(host)), "Non-private address $host must be rejected")
         }
