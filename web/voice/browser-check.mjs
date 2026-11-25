@@ -1,0 +1,22 @@
+import { chromium } from '@playwright/test';
+import { readFile, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+const browser = await chromium.launch({ headless: true });
+const page = await browser.newPage();
+const errors = [];
+page.on('pageerror', e => errors.push(e.message));
+await page.goto('http://127.0.0.1:5176');
+await page.getByLabel('Workspace ID').fill('thozha-local');
+await page.getByLabel('Password', {exact: true}).fill((await readFile(`${os.homedir()}/.local/state/thozha-web/owner-password`, 'utf8')).trim());
+await page.getByRole('button', {name: 'Sign in', exact: true}).click();
+await page.locator('.th-workspace.th-v4').waitFor({ timeout: 30000 });
+console.log('Authenticated real workspace');
+console.log(await page.evaluate(async () => {
+ const auth = await fetch('/v1/web/session').then(r=>r.json());
+ const response = await fetch('/v1/web/voice/health', {method:'POST', headers:{'Content-Type':'application/json','X-Thozha-CSRF':auth.csrf_token}, body:'{}'});
+ return {status: response.status, body: await response.json()};
+}));
+await page.screenshot({path:'voice/results/workspace.png'});
+console.log('page errors', errors);
+await writeFile('voice/results/browser-check.json', JSON.stringify({ errors }, null, 2));
+await browser.close();

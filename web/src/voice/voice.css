@@ -1,0 +1,142 @@
+.th-voice-trigger {
+  min-width: 70px;
+  color: #e4e5eb;
+}
+.th-voice-shade {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: #08090dd9;
+  backdrop-filter: blur(18px);
+}
+.th-voice-call {
+  width: min(720px, 100%);
+  max-height: 94dvh;
+  overflow: auto;
+  border: 1px solid #ffffff25;
+  border-radius: 28px;
+  padding: clamp(18px, 4vw, 36px);
+  background: radial-gradient(ellipse at 50% 0%, #30343e, #14151c 70%);
+  box-shadow: 0 30px 100px #0009;
+  color: #e6e7ed;
+  font-family: inherit;
+  text-align: center;
+}
+.th-voice-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+}
+.th-voice-call button,
+.th-voice-call select {
+  cursor: pointer;
+  border: 1px solid #ffffff2b;
+  background: #ffffff09;
+  color: #e8e9ef;
+  border-radius: 12px;
+  padding: 10px 14px;
+  font: inherit;
+  letter-spacing: normal;
+}
+.th-voice-call option {
+  background: #171923;
+}
+.th-voice-call button:focus-visible,
+.th-voice-call select:focus-visible {
+  outline: 2px solid #b5c8ea;
+  outline-offset: 4px;
+}
+.th-voice-call button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.th-voice-orb {
+  width: 112px;
+  height: 112px;
+  margin: 36px auto 28px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 32% 24%,
+    #fff,
+    #b5bfd4 18%,
+    #4b5265 43%,
+    #c9d3eb 60%,
+    #151a28 75%
+  );
+  box-shadow:
+    inset 4px 5px 12px #fff5,
+    0 0 75px #99b5f329;
+  transition: transform 90ms linear;
+}
+.th-voice-call[data-state='thinking'] .th-voice-orb {
+  animation: th-voice-breathe 2s ease-in-out infinite;
+}
+.th-voice-call h2 {
+  font-size: 22px;
+  font-weight: 500;
+  text-transform: capitalize;
+  margin: 0 0 10px;
+}
+.th-voice-call p {
+  font-size: 13px;
+  line-height: 1.7;
+}
+.th-voice-privacy {
+  color: #a9c5b5;
+  font-size: 11px !important;
+}
+.th-voice-transcript {
+  margin: 20px 0;
+  max-height: 30dvh;
+  overflow: auto;
+  text-align: left;
+  white-space: pre-wrap;
+}
+.th-voice-transcript b {
+  display: block;
+  color: #abb5ca;
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+.th-voice-controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: end;
+  font-size: 12px;
+}
+.th-voice-controls label {
+  display: grid;
+  text-align: left;
+  gap: 5px;
+  color: #bfc2cf;
+}
+.th-voice-call details {
+  text-align: left;
+  font-size: 11px;
+  margin: 20px 0 12px;
+  color: #a6aab8;
+}
+.th-voice-call small {
+  color: #a6aab8;
+  font-size: 10px;
+}
+@keyframes th-voice-breathe {
+  50% {
+    opacity: 0.6;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .th-voice-orb {
+    animation: none !important;
+    transition: none;
+    transform: none !important;
+  }
+}
