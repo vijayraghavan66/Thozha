@@ -904,14 +904,18 @@ class JarvisStore(private val app: Context) {
     }
 
     /** Sends the composer text through the same signed Link path that Telegram carries when connected. */
-    fun submit() = ui {
+    fun submit(requestIdOverride: String? = null) = ui {
         val text = draft.trim()
         if (submitting || text.isEmpty()) return@ui
         if (text.toByteArray(Charsets.UTF_8).size > 4096) {
             notice = "Requests can be up to 4,096 bytes."
             return@ui
         }
-        val requestId = UUID.randomUUID().toString().replace("-", "")
+        val requestId = requestIdOverride ?: UUID.randomUUID().toString().replace("-", "")
+        if (!requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) {
+            notice = "This voice request could not be assigned a safe task identity."
+            return@ui
+        }
         val localIntent = LocalTaskExecutor.classify(text)
         if (localIntent != null) {
             submitPhoneTask(requestId, text, localIntent)
