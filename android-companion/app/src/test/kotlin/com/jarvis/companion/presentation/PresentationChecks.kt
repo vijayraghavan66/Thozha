@@ -134,6 +134,7 @@ fun main() {
     ).isEmpty(), "a task already represented by a phone request is not duplicated")
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "RUNNING")), "active API tasks continue status reconciliation")
     check(!shouldReconcileApiTask(mapOf("transport" to "api", "lookup_link_status" to false, "state" to "RUNNING")), "typed fast commands do not query the Link task-status endpoint")
+    check(!shouldReconcileApiTask(mapOf("transport" to "api", "lookup_link_status" to false, "state" to "CREATED")), "an outbox row is not reconciled before the POST acceptance response")
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "The exact approved plan is active. Use capability_id=secret")), "plan issuance text is reconciled against the authoritative final result")
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "result_delivery_state" to "PENDING", "result_delivery_retry_after_ms" to 0L)), "WSS execution completion remains eligible until the full answer is delivered")
     check(!shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "result_delivery_state" to "PENDING", "result_delivery_retry_after_ms" to 20_000L), nowMs = 10_000L), "failed final-result retrieval observes a bounded retry delay")

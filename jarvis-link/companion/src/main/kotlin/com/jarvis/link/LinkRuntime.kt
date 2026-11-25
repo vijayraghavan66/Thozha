@@ -764,6 +764,12 @@ class LinkRuntime(
                     "Execution completed; waiting for the complete answer."
                 } else summary)
                 put("task_id", taskId)
+                if (
+                    entry["transport"] == "api" && state in setOf("CREATED", "QUEUED", "RUNNING", "PLANNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED") &&
+                    taskId.matches(Regex("[0-9a-f]{32}"))
+                ) {
+                    put("lookup_link_status", true)
+                }
                 put("updated_at_unix_ms", now())
                 if (state == "COMPLETED" && finalResultAvailable != null) {
                     put("result_delivery_state", if (finalResultAvailable) "DELIVERED" else "PENDING")

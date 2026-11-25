@@ -52,6 +52,16 @@ object LinkSyncPolicyChecks {
             "visible state remains a fallback if the durable snapshot is temporarily unreadable",
         )
 
+        val oldApiTask = mapOf<String, Any>("message_id" to "request-old-api-0001", "task_id" to "a".repeat(32), "transport" to "api", "state" to "RUNNING", "updated_at_unix_ms" to 1L)
+        val telegramTask = mapOf<String, Any>("message_id" to "request-telegram-01", "task_id" to "b".repeat(32), "transport" to "telegram", "state" to "RUNNING", "updated_at_unix_ms" to 3L)
+        val newApiTask = mapOf<String, Any>("message_id" to "request-new-api-0001", "task_id" to "c".repeat(32), "transport" to "api", "state" to "CREATED", "updated_at_unix_ms" to 5L)
+        val candidates = LinkSyncPolicy.taskEventWatchCandidates(listOf(oldApiTask, telegramTask, newApiTask), 1)
+        checkPolicy(candidates == listOf("request-new-api-0001" to "c".repeat(32)), "WSS selects the newest valid API-owned task and excludes Telegram identities")
+        checkPolicy(
+            LinkSyncPolicy.taskEventWatchCandidates(listOf(oldApiTask + ("task_id" to "")), 1).isEmpty(),
+            "local outbox rows without a confirmed supervisor task do not consume WSS capacity",
+        )
+
         // Reconnect/onResume while a relay exchange is in flight must not start a competing
         // consumer. Duplicate triggers coalesce to one immediate catch-up after the exchange.
         val gate = CoalescingSyncGate()
@@ -72,7 +82,7 @@ object LinkSyncPolicyChecks {
             ),
             "duplicate request IDs are reconciled by durable state without resurrecting cancelled work",
         )
-        checkPolicy(assertions == 20, "all expected policy assertions executed")
+        checkPolicy(assertions == 22, "all expected policy assertions executed")
         println("Link sync delivery policy passed: $assertions assertions.")
     }
 }

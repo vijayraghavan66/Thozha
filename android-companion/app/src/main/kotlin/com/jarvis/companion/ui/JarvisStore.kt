@@ -613,14 +613,7 @@ class JarvisStore(private val app: Context) {
     }
 
     private fun ensureLocalTaskEventWatches(conversation: List<Map<String, Any>>) {
-        conversation.asSequence()
-            .filter { it["transport"] != "local" && (it["state"] as? String)?.uppercase() in ActiveStates }
-            .mapNotNull { row ->
-                val requestId = row["message_id"] as? String ?: return@mapNotNull null
-                val taskId = row["task_id"] as? String ?: return@mapNotNull null
-                requestId to taskId
-            }
-            .take(MAX_LOCAL_TASK_EVENT_SESSIONS)
+        LinkSyncPolicy.taskEventWatchCandidates(conversation, MAX_LOCAL_TASK_EVENT_SESSIONS)
             .forEach { (requestId, taskId) -> startLocalTaskEventWatch(requestId, taskId) }
     }
 
@@ -1078,7 +1071,9 @@ class JarvisStore(private val app: Context) {
                         text,
                         transport = transport,
                         capabilityScope = capabilityScope,
-                        lookupLinkStatus = !directReadOnlyCommand,
+                        // The outbox row is local until POST acceptance returns. Polling this
+                        // request ID before then can turn a fast 404 into a false terminal failure.
+                        lookupLinkStatus = false,
                     )
                 }.isFailure
             ) {

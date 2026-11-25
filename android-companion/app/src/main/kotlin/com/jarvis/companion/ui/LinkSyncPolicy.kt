@@ -13,6 +13,29 @@ internal object LinkSyncPolicy {
     const val ACTIVE_INTERVAL_MS = 10_000L
     const val IDLE_INTERVAL_MS = 30_000L
 
+    /** LAN WSS is authorized by the paired API identity; Telegram/Link identities stay on their own transport. */
+    fun taskEventWatchCandidates(
+        conversation: List<Map<String, Any>>,
+        limit: Int,
+    ): List<Pair<String, String>> {
+        require(limit >= 0)
+        return conversation.asSequence()
+            .filter { it["transport"] == "api" && (it["state"] as? String)?.uppercase() in activeStates }
+            .mapNotNull { row ->
+                val requestId = row["message_id"] as? String ?: return@mapNotNull null
+                val taskId = row["task_id"] as? String ?: return@mapNotNull null
+                if (!requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}")) || !taskId.matches(Regex("[0-9a-f]{32}"))) {
+                    return@mapNotNull null
+                }
+                val updatedAt = (row["updated_at_unix_ms"] as? Number)?.toLong() ?: 0L
+                Triple(requestId, taskId, updatedAt)
+            }
+            .sortedByDescending { it.third }
+            .take(limit)
+            .map { it.first to it.second }
+            .toList()
+    }
+
     fun isTerminalDeliveryState(state: String?): Boolean = state?.uppercase() in setOf(
         "COMPLETED", "FAILED", "CANCELLED", "REJECTED", "EXPIRED", "INDETERMINATE",
     )

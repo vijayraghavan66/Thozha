@@ -42,6 +42,7 @@ object CompanionProtocolTest {
         localTaskHistoryIsRestartSafe()
         taskEventStreamPersistsEventAndCursorAtomically()
         completedWssEventSeparatesExecutionFromResultDelivery()
+        apiTaskStatusLookupWaitsForAdmission()
         authenticatedTaskStatusCorrectsOnlyTheLocalMissingRecordMarker()
         fastReadOnlyApiRequestPersistsItsNoLinkReconciliationPolicy()
         progressSequenceDeduplicatesOutOfOrderEvents()
@@ -714,6 +715,22 @@ object CompanionProtocolTest {
         check(delivered["state"] == "COMPLETED")
         check(delivered["result_delivery_state"] == "DELIVERED")
         check(delivered["summary"] == "Java is a high-level programming language.")
+        directory.deleteRecursively()
+    }
+
+    private fun apiTaskStatusLookupWaitsForAdmission() {
+        val directory = java.nio.file.Files.createTempDirectory("jarvis-api-admission-race").toFile()
+        val runtime = LinkRuntime(
+            keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+            state = FileLinkStateStore(File(directory, "state.json")),
+            storeDir = directory,
+        )
+        val requestId = "admission-race-20261125"
+        val taskId = "c7bdffa7" + "0".repeat(24)
+        runtime.recordLocalTaskRequest(requestId, "Explain a simple concept", transport = "api", lookupLinkStatus = false)
+        check(runtime.conversation().single()["lookup_link_status"] == false) { "a local outbox row must not be reconciled before submission" }
+        runtime.recordLocalTaskResult(requestId, taskId, "CREATED", "Task accepted")
+        check(runtime.conversation().single()["lookup_link_status"] == true) { "a confirmed supervisor task enables status/result reconciliation" }
         directory.deleteRecursively()
     }
 
