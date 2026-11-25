@@ -197,6 +197,17 @@ tasks.register<JavaExec>("verifyLocalMacDiscovery") {
     mainClass.set("com.jarvis.companion.data.LocalMacDiscoveryChecks")
 }
 
+tasks.register<JavaExec>("verifyTaskEventWssProtocol") {
+    group = "verification"
+    description = "Checks paired WSS route construction, TLS identity rejection, event filtering, resume cursors, and persisted-only cumulative ACK behavior."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.data.TaskEventWssProtocolChecks")
+}
+
 tasks.register<JavaExec>("verifyAssistantFormatting") {
     group = "verification"
     description = "Runs dependency-free assistant-text formatting and escaping regression vectors."
