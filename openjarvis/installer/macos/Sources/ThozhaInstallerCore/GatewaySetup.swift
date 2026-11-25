@@ -281,45 +281,91 @@ public enum GatewayRuntimeError: Error, Equatable, LocalizedError {
 public struct GatewayRuntimeDetector: Sendable {
     private let home: URL
     private let path: String
+    private let pythonVerifier: @Sendable (URL, [String]) -> Bool
 
     public init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
                 path: String = ProcessInfo.processInfo.environment["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin") {
         self.home = home
         self.path = path
+        self.pythonVerifier = { executable, arguments in Self.run(executable, arguments: arguments) }
+    }
+
+    init(home: URL, path: String, pythonVerifier: @escaping @Sendable (URL, [String]) -> Bool) {
+        self.home = home
+        self.path = path
+        self.pythonVerifier = pythonVerifier
     }
 
     public func detect(shutdownSupervisor: URL) throws -> GatewayRuntime {
         guard shutdownSupervisor.isFileURL, FileManager.default.isExecutableFile(atPath: shutdownSupervisor.path) else {
             throw GatewayRuntimeError.shutdownSupervisorUnavailable
         }
-        guard let python = locateOpenJarvisPython(), Self.run(python, arguments: ["-B", "-I", "-c", "import openjarvis.server.companion_wifi_gateway"]) else {
+        let importCheck = ["-B", "-I", "-c", "import openjarvis.server.companion_wifi_gateway"]
+        guard let python = locateOpenJarvisPython(), pythonVerifier(python, importCheck) else {
             throw GatewayRuntimeError.openJarvisRuntimeUnavailable
         }
         let tlsCandidates = Self.executableCandidates("python3.14", path: path, home: home)
             + [URL(fileURLWithPath: "/opt/homebrew/bin/python3.14"), URL(fileURLWithPath: "/usr/local/bin/python3.14")]
         guard let tlsPython = tlsCandidates.first(where: {
             FileManager.default.isExecutableFile(atPath: $0.path)
-            && Self.run($0, arguments: ["-B", "-I", "-c", "import ssl,sys; sys.exit(0 if sys.version_info >= (3,14) and ssl.OPENSSL_VERSION_INFO >= (3,6) else 1)"])
+            && pythonVerifier($0, ["-B", "-I", "-c", "import ssl,sys; sys.exit(0 if sys.version_info >= (3,14) and ssl.OPENSSL_VERSION_INFO >= (3,6) else 1)"])
         }) else { throw GatewayRuntimeError.tlsRuntimeUnavailable }
         return GatewayRuntime(openJarvisPython: python, tlsPython: tlsPython, shutdownSupervisor: shutdownSupervisor,
                               launchdPath: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     }
 
     private func locateOpenJarvisPython() -> URL? {
+        // The approved OpenJarvis LaunchAgent is the source of truth for its interpreter.
+        // Do not infer a runtime from system PATH: use only an executable inside the existing
+        // OpenJarvis project venv, then verify the actual gateway module with isolated Python.
+        let launchAgentCandidate = openJarvisLaunchAgentPython()
+        let venvBin = home.appendingPathComponent(".openjarvis/src/.venv/bin", isDirectory: true)
+        let explicitVenvCandidates = ["python3", "python"].map { venvBin.appendingPathComponent($0) }
         let launchers = Self.executableCandidates("jarvis", path: path, home: home)
             + [home.appendingPathComponent(".local/bin/jarvis"), URL(fileURLWithPath: "/opt/homebrew/bin/jarvis"), URL(fileURLWithPath: "/usr/local/bin/jarvis")]
-        for launcher in launchers where FileManager.default.isExecutableFile(atPath: launcher.path) {
-            guard let firstLine = try? String(contentsOf: launcher, encoding: .utf8).components(separatedBy: .newlines).first,
-                  firstLine.hasPrefix("#!") else { continue }
-            let words = firstLine.dropFirst(2).split(whereSeparator: \.isWhitespace).map(String.init)
-            guard let executableText = words.first else { continue }
-            if executableText == "/usr/bin/env", words.count == 2, words[1].hasPrefix("python"),
-               let candidate = Self.executableCandidates(words[1], path: path, home: home).first,
-               FileManager.default.isExecutableFile(atPath: candidate.path) { return candidate }
-            let candidate = URL(fileURLWithPath: executableText)
-            if candidate.lastPathComponent.hasPrefix("python"), FileManager.default.isExecutableFile(atPath: candidate.path) { return candidate }
+        let discovered = launchers.compactMap(pythonFromLauncher)
+        return ([launchAgentCandidate].compactMap { $0 } + explicitVenvCandidates + discovered)
+            .first(where: isApprovedOpenJarvisPython)
+    }
+
+    private func openJarvisLaunchAgentPython() -> URL? {
+        let url = home.appendingPathComponent("Library/LaunchAgents/com.openjarvis.jarvis.plist")
+        guard let data = try? Data(contentsOf: url),
+              let value = try? PropertyListSerialization.propertyList(from: data, format: nil),
+              let plist = value as? [String: Any],
+              plist["Label"] as? String == "com.openjarvis.jarvis",
+              let arguments = plist["ProgramArguments"] as? [String],
+              let first = arguments.first else { return nil }
+        if first == "/usr/bin/env", arguments.count > 1, arguments[1].hasPrefix("python") {
+            return Self.executableCandidates(arguments[1], path: path, home: home).first(where: isApprovedOpenJarvisPython)
         }
+        let candidate = URL(fileURLWithPath: first)
+        if candidate.lastPathComponent.hasPrefix("python"), isApprovedOpenJarvisPython(candidate) { return candidate }
+        return pythonFromLauncher(candidate)
+    }
+
+    private func pythonFromLauncher(_ launcher: URL) -> URL? {
+        guard FileManager.default.isExecutableFile(atPath: launcher.path) else { return nil }
+        guard let firstLine = try? String(contentsOf: launcher, encoding: .utf8).components(separatedBy: .newlines).first,
+              firstLine.hasPrefix("#!") else { return nil }
+        let words = firstLine.dropFirst(2).split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let executableText = words.first else { return nil }
+        if executableText == "/usr/bin/env", words.count == 2, words[1].hasPrefix("python"),
+           let candidate = Self.executableCandidates(words[1], path: path, home: home).first,
+           isApprovedOpenJarvisPython(candidate) { return candidate }
+        let candidate = URL(fileURLWithPath: executableText)
+        if candidate.lastPathComponent.hasPrefix("python"), isApprovedOpenJarvisPython(candidate) { return candidate }
         return nil
+    }
+
+    private func isApprovedOpenJarvisPython(_ candidate: URL) -> Bool {
+        let venv = home.appendingPathComponent(".openjarvis/src/.venv", isDirectory: true).standardizedFileURL
+        let bin = venv.appendingPathComponent("bin", isDirectory: true).standardizedFileURL
+        let path = candidate.standardizedFileURL.path
+        guard path.hasPrefix(bin.path + "/"),
+              FileManager.default.isExecutableFile(atPath: candidate.path),
+              FileManager.default.fileExists(atPath: venv.appendingPathComponent("pyvenv.cfg").path) else { return false }
+        return true
     }
 
     private static func executableCandidates(_ name: String, path: String, home: URL) -> [URL] {

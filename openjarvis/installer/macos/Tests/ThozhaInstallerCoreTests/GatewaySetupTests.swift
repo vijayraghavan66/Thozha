@@ -285,6 +285,72 @@ final class GatewaySetupTests: XCTestCase {
         ])
     }
 
+    func testRuntimeDetectorUsesVerifiedOpenJarvisLaunchAgentVenv() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("thozha-runtime-detector-\(UUID().uuidString)", isDirectory: true)
+        let venv = root.appendingPathComponent(".openjarvis/src/.venv", isDirectory: true)
+        let python = venv.appendingPathComponent("bin/python3")
+        let tlsPython = root.appendingPathComponent("bin/python3.14")
+        let helper = root.appendingPathComponent("ThozhaGatewaySupervisor")
+        let launchAgent = root.appendingPathComponent("Library/LaunchAgents/com.openjarvis.jarvis.plist")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tlsPython.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: launchAgent.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: helper.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: python)
+        try Data().write(to: tlsPython)
+        try Data().write(to: helper)
+        try Data("home = /fake/python".utf8).write(to: venv.appendingPathComponent("pyvenv.cfg"))
+        for executable in [python, tlsPython, helper] {
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        }
+        let plist: [String: Any] = [
+            "Label": "com.openjarvis.jarvis",
+            "ProgramArguments": [python.path, "serve", "--host", "127.0.0.1"],
+        ]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: launchAgent)
+
+        let importArguments = ["-B", "-I", "-c", "import openjarvis.server.companion_wifi_gateway"]
+        let tlsArguments = ["-B", "-I", "-c", "import ssl,sys; sys.exit(0 if sys.version_info >= (3,14) and ssl.OPENSSL_VERSION_INFO >= (3,6) else 1)"]
+        let detector = GatewayRuntimeDetector(home: root, path: root.appendingPathComponent("bin").path) { executable, arguments in
+            if executable.path == python.path { return arguments == importArguments }
+            if executable.path == tlsPython.path { return arguments == tlsArguments }
+            return false
+        }
+
+        let runtime = try detector.detect(shutdownSupervisor: helper)
+        XCTAssertEqual(runtime.openJarvisPython.path, python.path)
+        XCTAssertEqual(runtime.tlsPython.path, tlsPython.path)
+    }
+
+    func testRuntimeDetectorDoesNotAcceptSystemPythonAsOpenJarvisRuntime() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("thozha-runtime-reject-\(UUID().uuidString)", isDirectory: true)
+        let launchAgent = root.appendingPathComponent("Library/LaunchAgents/com.openjarvis.jarvis.plist")
+        let helper = root.appendingPathComponent("ThozhaGatewaySupervisor")
+        try FileManager.default.createDirectory(at: launchAgent.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: helper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
+        let plist: [String: Any] = ["Label": "com.openjarvis.jarvis", "ProgramArguments": ["/usr/bin/python3", "-m", "jarvis"]]
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: launchAgent)
+        let detector = GatewayRuntimeDetector(home: root, path: "/missing") { _, _ in true }
+        XCTAssertThrowsError(try detector.detect(shutdownSupervisor: helper)) {
+            XCTAssertEqual($0 as? GatewayRuntimeError, .openJarvisRuntimeUnavailable)
+        }
+    }
+
+    func testInstalledOpenJarvisRuntimeIsDiscoverableWhenLaunchAgentExists() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let launchAgent = home.appendingPathComponent("Library/LaunchAgents/com.openjarvis.jarvis.plist")
+        let helper = URL(fileURLWithPath: "/Applications/Thozha Setup.app/Contents/Helpers/ThozhaGatewaySupervisor")
+        guard FileManager.default.fileExists(atPath: launchAgent.path),
+              FileManager.default.isExecutableFile(atPath: helper.path) else {
+            throw XCTSkip("The approved OpenJarvis LaunchAgent or installed Thozha helper is not present on this test machine.")
+        }
+
+        let runtime = try GatewayRuntimeDetector().detect(shutdownSupervisor: helper)
+        XCTAssertTrue(runtime.openJarvisPython.path.hasPrefix(home.appendingPathComponent(".openjarvis/src/.venv/bin").path + "/"))
+        XCTAssertTrue(runtime.tlsPython.lastPathComponent.hasPrefix("python3.14"))
+    }
+
     private func tryResult(_ result: Result<GatewayNetworkConfiguration, GatewayPreflightError>) -> GatewayNetworkConfiguration? {
         try? result.get()
     }
