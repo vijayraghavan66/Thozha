@@ -3,7 +3,11 @@ import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import type { WorkspaceApi } from '../api/client';
 import { conversationListKey, detailKey } from '../chat/updates';
-import { TurnDetector, splitSpeech, wav16, type CallState } from './turns';
+import { splitSpeech, wav16, type CallState } from './turns';
+import type { MicVAD } from '@ricky0123/vad-web';
+import { BargeProbe, SpeechGate, normalizeSpeech } from './acoustics';
+import { orderedInference } from './inference';
+import { PlaybackReference, ResumablePlayback } from './playback';
 import './voice.css';
 
 type SinkContext = AudioContext & { setSinkId?: (id: string) => Promise<void> };
@@ -48,8 +52,33 @@ export class CallSession {
   private source?: MediaStreamAudioSourceNode;
   private worklet?: AudioWorkletNode;
   private zero?: GainNode;
-  private output?: AudioBufferSourceNode;
-  private detector = new TurnDetector();
+  private output?: { stop(): void };
+  private playback?: ResumablePlayback;
+  private reference?: PlaybackReference;
+  private semanticReady = false;
+  private endpointBusy = false;
+  private endpointRetryAt = 0;
+  private speechRevision = 0;
+  private candidate = false;
+  private candidateText = '';
+  private playbackText = '';
+  private confirmingInterruption = false;
+  private confirmation = new AbortController();
+  private detector = new SpeechGate();
+  private vad?: MicVAD;
+  private inference?: ReturnType<typeof orderedInference>;
+  private captureMetrics: Record<string, number> = {};
+  private captureStarted = 0;
+  private capturedSamples = 0;
+  private segmentMetrics: Record<string, number> = {};
+  private lastMeterAt = 0;
+  private barging = false;
+  private verifyingBarge = false;
+  private lastSpeechAt = 0;
+  private playbackUntil = 0;
+  private confirmingAt = 0;
+  private playbackGain?: GainNode;
+  private probe = new BargeProbe();
   private frames: Float32Array[] = [];
   private preroll: Float32Array[] = [];
   private life = new AbortController();
@@ -111,6 +140,8 @@ export class CallSession {
       // Called directly from a click so capture and audio playback have user activation.
       this.context = new AudioContext({ latencyHint: 'interactive' });
       await this.context.resume();
+      this.playbackGain = this.context.createGain();
+      this.playbackGain.connect(this.context.destination);
       this.media = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
@@ -142,16 +173,78 @@ export class CallSession {
       }
       if (!health.ready)
         throw new Error('Local Kokoro model could not warm up. Text chat remains available.');
-      await this.context.audioWorklet.addModule('/voice-capture.js');
+      this.semanticReady = !!health.semantic_turn;
+      this.detector.endpointMs = this.semanticReady ? 320 : 800;
+      this.reference = new PlaybackReference(this.context, this.playbackGain!, ready => {
+        this.captureMetrics.playback_reference_rtc = Number(ready);
+      });
+      await this.reference.start();
       if (this.closed) return;
-      this.source = this.context.createMediaStreamSource(this.media);
-      this.worklet = new AudioWorkletNode(this.context, 'thozha-capture');
-      this.zero = this.context.createGain();
-      this.zero.gain.value = 0;
-      this.source.connect(this.worklet);
-      this.worklet.connect(this.zero);
-      this.zero.connect(this.context.destination);
-      this.worklet.port.onmessage = event => this.frame(event.data);
+      const { MicVAD } = await import('@ricky0123/vad-web');
+      const vad = await MicVAD.new({
+        model: 'v5',
+        baseAssetPath: '/voice-assets/',
+        onnxWASMBasePath: '/voice-assets/',
+        audioContext: this.context,
+        startOnLoad: false,
+        processorType: 'AudioWorklet',
+        getStream: async () => this.media!,
+        pauseStream: async () => {},
+        resumeStream: async () => this.media!,
+        ortConfig: ort => {
+          ort.env.wasm.numThreads = 1;
+          ort.env.logLevel = 'error';
+        },
+        onFrameProcessed: (probabilities, frame) => this.frame(frame, probabilities.isSpeech),
+        submitUserSpeechOnPause: false,
+      });
+      // The library's async MessagePort callback does not serialize recurrent
+      // Silero state. Preserve sample order and surface overload, never drop audio.
+      const process = vad.processFrame.bind(vad);
+      this.inference = orderedInference(
+        process,
+        (depth, ms, wait) => {
+          this.captureMetrics.vad_queue_peak = Math.max(
+            this.captureMetrics.vad_queue_peak || 0,
+            depth
+          );
+          this.captureMetrics.vad_inference_ms = Math.round(ms);
+          this.captureMetrics.vad_queue_wait_ms = Math.round(wait);
+        },
+        () => {
+          this.end();
+          this.notify({
+            ...this.snapshot,
+            message: 'Audio processing overloaded. Microphone stopped; close and retry.',
+          });
+        }
+      );
+      vad.processFrame = frame => this.inference!.feed(frame);
+      this.vad = vad;
+      this.captureStarted = performance.now();
+      this.captureMetrics = {
+        ...this.captureMetrics, // Preserve the playback-reference startup result.
+        capture_started_ms: Math.round(this.captureStarted),
+        context_sample_rate: this.context.sampleRate,
+        track_sample_rate: this.media.getAudioTracks()[0]?.getSettings().sampleRate || 0,
+        asr_sample_rate: 16000,
+        // Browser/driver drops are not exposed by MicVAD; never assert zero.
+        dropped_frames: -1,
+        echo_cancellation: Number(
+          this.media.getAudioTracks()[0]?.getSettings().echoCancellation === true
+        ),
+        noise_suppression: Number(
+          this.media.getAudioTracks()[0]?.getSettings().noiseSuppression === true
+        ),
+        automatic_gain_control: Number(
+          this.media.getAudioTracks()[0]?.getSettings().autoGainControl === true
+        ),
+      };
+      await vad.start();
+      if (this.closed) {
+        await vad.destroy();
+        return;
+      }
       window.addEventListener('online', this.online);
       let saved: Pending | undefined;
       try {
@@ -170,12 +263,14 @@ export class CallSession {
         void this.recover(saved, this.epoch).catch(error => this.problem(error));
       } else this.state('listening', 'Microphone active · speak naturally');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Microphone unavailable';
+      const message =
+        error instanceof Error ? `${error.name}: ${error.message}` : 'Microphone unavailable';
       this.end();
-      this.notify({ ...this.snapshot, state: 'ended', message });
+      this.snapshot = { ...this.snapshot, state: 'ended', message };
+      this.notify(this.snapshot);
     }
   }
-  private frame(data: Float32Array) {
+  private frame(data: Float32Array, probability: number) {
     if (
       this.closed ||
       !this.context ||
@@ -186,39 +281,228 @@ export class CallSession {
     let sum = 0;
     for (const sample of data) sum += sample * sample;
     const level = Math.sqrt(sum / data.length);
-    this.patch({ level: Math.min(1, level * 12) });
-    const playback = !!this.output;
-    // Do not cancel ASR on energy alone. Room noise is not a new semantic turn.
-    if (this.busy && !playback) return;
+    const now = performance.now();
+    this.capturedSamples += data.length;
+    this.captureMetrics.processed_audio_ms = Math.round(this.capturedSamples / 16);
+    this.captureMetrics.capture_elapsed_ms = Math.round(now - this.captureStarted);
+    if (level > 0.002 && !this.captureMetrics.first_non_silent_ms)
+      this.captureMetrics.first_non_silent_ms = Math.round(now - this.captureStarted);
+    // Do not render React at the 31 Hz inference callback rate.
+    if (now - this.lastMeterAt >= 100) {
+      this.lastMeterAt = now;
+      this.patch({ level: Math.min(1, level * 12) });
+    }
+    const playback = !!this.output || performance.now() < this.playbackUntil;
+    if (this.verifyingBarge) {
+      this.frames.push(data);
+      const decision = this.probe.feed(probability, level, data.length / 16);
+      if (decision) {
+        this.verifyingBarge = false;
+        this.barging = false;
+        if (decision === 'accept') {
+          this.candidate = true;
+          this.candidateText = this.playbackText;
+          this.playback?.pause();
+          this.setPlaybackLevel(1);
+          this.detector.resumeConfirmedSpeech();
+          this.lastSpeechAt = now;
+          this.patch({
+            metrics: {
+              ...this.snapshot.metrics,
+              barge_pause_ms: Math.round(now - this.confirmingAt),
+              barge_pause_wall_ms: Date.now(),
+            },
+          });
+          this.state('interrupted', 'Listening · response paused, not discarded');
+        } else {
+          this.setPlaybackLevel(1);
+          this.detector.reset();
+          this.frames = [];
+          this.preroll = [];
+        }
+      }
+      return;
+    }
+    if (
+      this.reconcilingCancellation ||
+      (this.busy && !playback && !this.barging && !this.candidate)
+    )
+      return;
+    if (probability >= 0.35) {
+      this.lastSpeechAt = performance.now();
+      ++this.speechRevision;
+    }
     const wasSpeaking = this.detector.speaking;
     const event = this.detector.feed(
+      probability,
       level,
-      (data.length * 1000) / this.context.sampleRate,
-      playback
+      data.length / 16,
+      playback && !this.candidate
     );
     this.preroll.push(data);
-    while (this.preroll.length > 12) this.preroll.shift();
-    if (event === 'start') {
-      if (this.busy || playback) this.interrupt();
-      if (this.reconcilingCancellation) {
-        this.detector.reset();
-        return;
-      }
-      this.frames = [...this.preroll];
-      this.state('listening', 'Hearing you…');
-    } else if (wasSpeaking) this.frames.push(data);
-    if (event === 'end' && this.frames.length && !(this.pending && !this.pending.response)) {
-      const frames = this.frames;
+    while (this.preroll.length > 25) this.preroll.shift();
+    if (event === 'discard') {
       this.frames = [];
       this.preroll = [];
-      this.speechEnd = performance.now() - 620;
-      const samples = new Float32Array(frames.reduce((n, frame) => n + frame.length, 0));
-      let offset = 0;
-      for (const frame of frames) {
-        samples.set(frame, offset);
-        offset += frame.length;
+      return;
+    }
+    if (event === 'start') {
+      this.captureMetrics.vad_start_ms = Math.round(performance.now() - this.captureStarted);
+      this.barging = playback;
+      this.confirmingAt = performance.now();
+      this.frames = [...this.preroll];
+      if (!playback) this.state('listening', 'Hearing you · take your time');
+    } else if (wasSpeaking) this.frames.push(data);
+    if (event === 'start' && playback && !this.candidate) {
+      // Attenuate the echo source before classifying residual near-end speech.
+      // This is reversible; no request cancellation or history mutation yet.
+      this.verifyingBarge = true;
+      this.probe.reset();
+      this.patch({
+        metrics: {
+          ...this.snapshot.metrics,
+          barge_probes: (this.snapshot.metrics.barge_probes || 0) + 1,
+          barge_probe_wall_ms: Date.now(),
+        },
+      });
+      this.setPlaybackLevel(0.03);
+      return;
+    }
+    if (
+      event === 'end' &&
+      this.frames.length &&
+      !this.confirmingInterruption &&
+      !(this.pending && !this.pending.response)
+    ) {
+      this.detector.resumeConfirmedSpeech();
+      if (now >= this.endpointRetryAt && !this.endpointBusy) void this.checkEndpoint();
+    }
+  }
+  private samples() {
+    const samples = new Float32Array(this.frames.reduce((n, frame) => n + frame.length, 0));
+    let offset = 0;
+    for (const frame of this.frames) {
+      samples.set(frame, offset);
+      offset += frame.length;
+    }
+    return samples;
+  }
+  private async checkEndpoint() {
+    this.endpointBusy = true;
+    const revision = this.speechRevision;
+    const epoch = this.epoch;
+    try {
+      const silence = performance.now() - this.lastSpeechAt;
+      const segmentSamples = this.frames.reduce((count, frame) => count + frame.length, 0);
+      // Repeated semantic deferrals must not exceed the bounded ASR contract.
+      if (this.semanticReady && silence < 3000 && segmentSamples < 29 * 16000) {
+        const row = await this.speech('endpoint', {
+          audio: wav16(this.samples().slice(-128000), 16000),
+        });
+        if (
+          this.closed ||
+          this.snapshot.muted ||
+          epoch !== this.epoch ||
+          revision !== this.speechRevision
+        )
+          return;
+        this.patch({
+          metrics: {
+            ...this.snapshot.metrics,
+            semantic_ms: row.semantic_ms,
+            turn_complete_probability: row.probability,
+          },
+        });
+        if (!row.complete) {
+          this.endpointRetryAt = performance.now() + 400;
+          return;
+        }
       }
-      void this.respond(wav16(samples, this.context.sampleRate));
+      if (
+        this.closed ||
+        this.snapshot.muted ||
+        epoch !== this.epoch ||
+        revision !== this.speechRevision
+      )
+        return;
+      const samples = this.samples();
+      this.frames = [];
+      this.preroll = [];
+      this.detector.reset();
+      this.speechEnd = this.lastSpeechAt;
+      this.segmentMetrics = {
+        ...this.captureMetrics,
+        endpoint_wait_ms: Math.round(performance.now() - this.speechEnd),
+        segment_samples: samples.length,
+        segment_duration_ms: samples.length / 16,
+      };
+      if (this.candidate) void this.confirmInterruption(wav16(samples, 16000));
+      else void this.respond(wav16(samples, 16000));
+    } catch {
+      // Failed semantics lengthens endpointing; never silently clip a thinking pause.
+      this.semanticReady = false;
+      this.detector.endpointMs = 1200;
+    } finally {
+      this.endpointBusy = false;
+    }
+  }
+  private async confirmInterruption(audio: string) {
+    if (this.confirmingInterruption) return;
+    this.confirmingInterruption = true;
+    const epoch = this.epoch;
+    const started = performance.now();
+    try {
+      const row = await this.speech('transcribe', { audio }, this.confirmation.signal);
+      if (!this.current(epoch) || !this.candidate) return;
+      const text = String(row.text || '').trim();
+      const normalize = (s: string) =>
+        s
+          .toLowerCase()
+          .replace(/[^a-z0-9' ]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      const words = normalize(text);
+      const echo = words.length > 0 && normalize(this.candidateText).includes(words);
+      if (!words || echo) {
+        this.candidate = false;
+        this.playback?.play();
+        this.patch({
+          metrics: {
+            ...this.snapshot.metrics,
+            false_interruptions_resumed:
+              (this.snapshot.metrics.false_interruptions_resumed || 0) + 1,
+          },
+        });
+        this.state('speaking', 'Continuing · no new request');
+        return;
+      }
+      this.candidate = false;
+      this.interrupt(true);
+      this.patch({
+        metrics: {
+          ...this.segmentMetrics,
+          ...row.metrics,
+          transcript_ms: Math.round(performance.now() - this.speechEnd),
+          interruption_asr_ms: Math.round(performance.now() - started),
+          barge_confirmed: (this.snapshot.metrics.barge_confirmed || 0) + 1,
+        },
+      });
+      void this.respond('', text);
+    } catch {
+      if (this.current(epoch) && this.candidate) {
+        this.candidate = false;
+        this.playback?.play();
+        this.state('speaking', 'Recognition unavailable · continuing response');
+      }
+    } finally {
+      this.confirmingInterruption = false;
+    }
+  }
+
+  private setPlaybackLevel(value: number) {
+    if (this.playbackGain && this.context) {
+      this.playbackGain.gain.cancelScheduledValues(this.context.currentTime);
+      this.playbackGain.gain.setTargetAtTime(value, this.context.currentTime, 0.015);
     }
   }
   private persist() {
@@ -228,16 +512,20 @@ export class CallSession {
   private current(epoch: number) {
     return !this.closed && this.epoch === epoch;
   }
-  private async respond(audio: string) {
+  private async respond(audio: string, recognized?: string) {
     const epoch = ++this.epoch;
     this.turn.abort();
     this.turn = new AbortController();
     this.busy = true;
     this.firstAudio = false;
-    this.patch({ metrics: {}, user: '', assistant: '' });
+    const uploadStarted = performance.now();
+    this.patch({ metrics: { ...this.segmentMetrics }, user: '', assistant: '' });
     this.state('thinking', 'Transcribing locally…');
     try {
-      const result = await this.speech('transcribe', { audio }, this.turn.signal);
+      const result =
+        recognized === undefined
+          ? await this.speech('transcribe', { audio }, this.turn.signal)
+          : { text: recognized, metrics: {} };
       if (!this.current(epoch)) return;
       const text = String(result.text || '').trim();
       if (!text) {
@@ -247,7 +535,12 @@ export class CallSession {
       }
       this.patch({
         user: text,
-        metrics: { transcript_ms: Math.round(performance.now() - this.speechEnd) },
+        metrics: {
+          ...this.snapshot.metrics,
+          ...result.metrics,
+          upload_to_transcript_ms: Math.round(performance.now() - uploadStarted),
+          transcript_ms: Math.round(performance.now() - this.speechEnd),
+        },
       });
       if (!this.conversation) {
         // Never automatically retry an uncertain create: it has no idempotency contract.
@@ -264,91 +557,26 @@ export class CallSession {
     }
   }
   private async run(attempt: Pending, epoch: number) {
-    // The deployed Luna conversation stream cancels generation on disconnect.
-    // Use durable submission by default; enable streaming only after the backend
-    // provides a disconnect-independent generation lifetime.
-    if (localStorage.getItem('thozha.voice.experimental-stream') !== '1') {
-      this.state('thinking', 'Waiting for the authorized Thozha conversation…');
-      const accepted = await this.api.submit(
-        attempt.conversation,
-        { content: attempt.content },
-        attempt.key
-      );
-      if (!this.current(epoch)) return;
-      attempt.response = accepted.response_id;
-      this.persist();
-      this.changed(attempt.conversation);
-      this.patch({
-        metrics: {
-          ...this.snapshot.metrics,
-          acceptance_ms: Math.round(performance.now() - this.speechEnd),
-        },
-      });
-      return this.recover(attempt, epoch);
-    }
     this.state('thinking', 'Waiting for the authorized Thozha conversation…');
-    let remainder = '',
-      full = '',
-      spoken = false,
-      mode = 'buffered';
-    try {
-      await this.api.stream(
-        attempt.conversation,
-        { content: attempt.content },
-        attempt.key,
-        this.turn.signal,
-        event => {
-          if (!this.current(epoch)) return;
-          if (event.event === 'accepted') {
-            attempt.response = event.data.response_id;
-            this.persist();
-            this.changed(attempt.conversation);
-            this.patch({
-              metrics: {
-                ...this.snapshot.metrics,
-                acceptance_ms: Math.round(performance.now() - this.speechEnd),
-              },
-            });
-          } else if (event.event === 'stream_mode') mode = event.data.mode;
-          else if (event.event === 'delta' && mode === 'engine_stream') {
-            full += event.data.content;
-            remainder += event.data.content;
-            this.patch({ assistant: full });
-            const split = splitSpeech(remainder);
-            remainder = split.rest;
-            for (const sentence of split.sentences) {
-              spoken = true;
-              this.enqueue(sentence, epoch);
-            }
-          }
-        }
-      );
-    } catch {
-      if (!this.current(epoch)) return;
-      // Same durable key on every retry, including uncertain acceptance.
-      return this.recover(attempt, epoch);
-    }
+    const accepted = await this.api.submit(
+      attempt.conversation,
+      { content: attempt.content },
+      attempt.key
+    );
     if (!this.current(epoch)) return;
-    const detail = await this.api.get(attempt.conversation, this.turn.signal);
-    const answer = detail.messages.find(row => row.id === attempt.response);
+    attempt.response = accepted.response_id;
+    this.persist();
     this.changed(attempt.conversation);
-    if (!answer || answer.status === 'running' || answer.status === 'queued')
-      return this.recover(attempt, epoch);
-    if (answer.status !== 'completed')
-      throw new Error(`Response ${answer.status}. Speak again or use text chat.`);
     this.patch({
-      assistant: answer.content,
       metrics: {
         ...this.snapshot.metrics,
-        response_ms: Math.round(performance.now() - this.speechEnd),
+        acceptance_ms: Math.round(performance.now() - this.speechEnd),
       },
     });
-    const split = splitSpeech(spoken ? remainder : answer.content, true);
-    for (const sentence of split.sentences) this.enqueue(sentence, epoch);
-    await this.complete(epoch);
+    return this.recover(attempt, epoch);
   }
   private async recover(attempt: Pending, epoch: number) {
-    let delay = 600;
+    let delay = 250;
     while (this.current(epoch)) {
       try {
         if (!attempt.response) {
@@ -372,7 +600,7 @@ export class CallSession {
               response_ms: Math.round(performance.now() - this.speechEnd),
             },
           });
-          for (const sentence of splitSpeech(row.content, true).sentences)
+          for (const sentence of splitSpeech(row.content, true, 120).sentences)
             this.enqueue(sentence, epoch);
           await this.complete(epoch);
           return;
@@ -380,7 +608,7 @@ export class CallSession {
         if (row && !['running', 'queued'].includes(row.status))
           throw new Error(`Response ${row.status}`);
         this.state('thinking', 'Reconciling saved answer · no duplicate submission');
-        delay = 600;
+        delay = 250;
       } catch (error) {
         if (!this.current(epoch)) return;
         // Authentication and semantic errors must not loop forever.
@@ -403,9 +631,10 @@ export class CallSession {
     this.synthTail = this.synthTail
       .then(async () => {
         if (!this.current(epoch) || signal.aborted) return;
+        const synthesisStarted = performance.now();
         const row = await this.speech(
           'synthesize',
-          { text: sentence.slice(0, 400), voice },
+          { text: normalizeSpeech(sentence).slice(0, 400), voice },
           signal
         );
         if (!this.current(epoch) || signal.aborted || !this.context) return;
@@ -416,29 +645,43 @@ export class CallSession {
         if (!this.current(epoch) || signal.aborted) return;
         this.outputTail = this.outputTail.then(async () => {
           if (!this.current(epoch) || signal.aborted || !this.context) return;
+          // A suspected interruption may arrive on a chunk boundary. Never start
+          // another voice while confirmation is retaining the current position.
+          while ((this.candidate || this.verifyingBarge) && this.current(epoch) && !signal.aborted)
+            await sleep(25, signal);
+          if (!this.current(epoch) || signal.aborted || !this.context) return;
           this.state('speaking', 'Thozha speaking · you can interrupt');
-          await new Promise<void>(resolve => {
-            const source = this.context!.createBufferSource();
-            source.buffer = buffer;
-            source.connect(this.context!.destination);
-            source.onended = () => {
-              if (this.output === source) this.output = undefined;
-              source.disconnect();
-              resolve();
-            };
-            this.output = source;
-            if (!this.firstAudio) {
-              this.firstAudio = true;
-              this.patch({
-                metrics: {
-                  ...this.snapshot.metrics,
-                  first_audio_scheduled_ms: Math.round(performance.now() - this.speechEnd),
-                  audio_output_latency_ms: Math.round(1000 * (this.context!.baseLatency || 0)),
-                },
-              });
-            }
-            source.start();
-          });
+          const player = new ResumablePlayback(
+            this.context!,
+            buffer,
+            this.playbackGain || this.context!.destination
+          );
+          this.playback = player;
+          this.playbackText = sentence;
+          this.output = player;
+          if (!this.firstAudio) {
+            this.firstAudio = true;
+            this.patch({
+              metrics: {
+                ...this.snapshot.metrics,
+                first_audio_scheduled_ms: Math.round(performance.now() - this.speechEnd),
+                first_audio_wall_ms: Date.now(),
+                first_tts_pipeline_ms: Math.round(performance.now() - synthesisStarted),
+                first_tts_generation_ms: Number(row.synthesis_ms || 0),
+                supervisor_wait_ms:
+                  (this.snapshot.metrics.response_ms || 0) -
+                  (this.snapshot.metrics.acceptance_ms || 0),
+                audio_output_latency_ms: Math.round(1000 * (this.context!.baseLatency || 0)),
+              },
+            });
+          }
+          player.play();
+          await player.done;
+          if (this.playback === player) {
+            this.playback = undefined;
+            this.output = undefined;
+            this.playbackUntil = performance.now() + 350;
+          }
         });
         // Next sentence may synthesize while this sentence plays.
       })
@@ -452,6 +695,11 @@ export class CallSession {
   private async complete(epoch: number) {
     await this.synthTail;
     await this.outputTail;
+    // A chunk can finish while residual speech is being checked. Retain the
+    // response and playback ownership until confirmation either resumes or
+    // supersedes it; otherwise a late confirmation can submit a duplicate turn.
+    while ((this.candidate || this.verifyingBarge) && this.current(epoch))
+      await sleep(25, this.turn.signal);
     if (!this.current(epoch)) return;
     this.pending = undefined;
     this.persist();
@@ -467,12 +715,26 @@ export class CallSession {
       /* already ended */
     }
     this.output = undefined;
+    this.playback = undefined;
+    this.playbackUntil = 0;
+    this.probe.reset();
+    this.setPlaybackLevel(1);
     this.outputTail = Promise.resolve();
     this.synthTail = Promise.resolve();
   }
-  interrupt() {
+  interrupt(preserveCapture = false) {
     if (this.closed) return;
+    this.confirmation.abort();
+    this.confirmation = new AbortController();
+    this.candidate = false;
+    if (!preserveCapture) {
+      this.detector.reset();
+      this.frames = [];
+      this.preroll = [];
+    }
+    ++this.speechRevision; // Invalidate semantic work from before interruption.
     this.interruptedAt = performance.now();
+    this.verifyingBarge = this.barging = false;
     ++this.epoch;
     this.turn.abort();
     this.turn = new AbortController();
@@ -529,9 +791,17 @@ export class CallSession {
     this.media?.getAudioTracks().forEach(track => {
       track.enabled = !muted;
     });
+    ++this.speechRevision; // Invalidate an in-flight semantic endpoint.
     this.detector.reset();
     this.frames = [];
     this.preroll = [];
+    this.barging = this.verifyingBarge = false;
+    this.probe.reset();
+    this.confirmation.abort();
+    this.confirmation = new AbortController();
+    this.candidate = false;
+    this.playback?.play();
+    this.setPlaybackLevel(1);
     this.patch({ muted });
     this.state(
       this.output ? 'speaking' : this.busy ? 'thinking' : 'listening',
@@ -539,10 +809,11 @@ export class CallSession {
     );
   }
   selectVoice(voice: string) {
-    if (['af_bella', 'am_adam'].includes(voice)) this.voice = voice;
+    if (['af_bella', 'am_adam', 'qwen_ryan'].includes(voice)) this.voice = voice;
   }
   async sink(id: string) {
-    if (this.context?.setSinkId) await this.context.setSinkId(id);
+    if (this.reference && this.captureMetrics.playback_reference_rtc) await this.reference.sink(id);
+    else if (this.context?.setSinkId) await this.context.setSinkId(id);
   }
   get supportsSink() {
     return !!this.context?.setSinkId;
@@ -561,7 +832,14 @@ export class CallSession {
     this.closed = true;
     ++this.epoch;
     this.life.abort();
+    this.confirmation.abort();
+    this.reference?.close();
     this.turn.abort();
+    this.inference?.stop();
+    this.frames = [];
+    this.preroll = [];
+    this.detector.reset();
+    void this.vad?.destroy().catch(() => {});
     this.stopOutput();
     // Closing media must not cancel durable history: refresh resumes this request.
     this.media?.getTracks().forEach(track => {
@@ -574,6 +852,7 @@ export class CallSession {
     }
     this.source?.disconnect();
     this.zero?.disconnect();
+    this.playbackGain?.disconnect();
     void this.context?.close();
     window.removeEventListener('online', this.online);
     this.snapshot = {
@@ -770,6 +1049,7 @@ export function VoiceCall({
                   >
                     <option value="af_bella">Bella · English</option>
                     <option value="am_adam">Adam · English</option>
+                    <option value="qwen_ryan">Ryan · expressive Qwen · slower first use</option>
                   </select>
                 </label>
                 {session.current?.supportsSink && (

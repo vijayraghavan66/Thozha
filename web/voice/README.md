@@ -1,5 +1,10 @@
 # Thozha continuous Web voice — isolated development integration
 
+> **Current status:** read [LATEST_STATUS.md](LATEST_STATUS.md) and
+> [FINAL_HANDOFF.md](FINAL_HANDOFF.md). The implementation and measurements below
+> are historical. Natural spoken barge-in is NOT accepted; production integration
+> and durable incremental Luna output remain blocked.
+
 Branch: `sahaa/web-conversational-voice`, based on `copilot/web@16c03db1`.
 No active backend, gateway, Android, certificate, pairing or LaunchAgent changes.
 

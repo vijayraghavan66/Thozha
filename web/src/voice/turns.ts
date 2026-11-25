@@ -45,7 +45,11 @@ export class TurnDetector {
     }
   }
 }
-export function splitSpeech(text: string, final = false): { sentences: string[]; rest: string } {
+export function splitSpeech(
+  text: string,
+  final = false,
+  firstLimit = 300
+): { sentences: string[]; rest: string } {
   // Never read code fences. Complete sentences can be synthesized before the full reply.
   const cleaned = text.replace(/```[\s\S]*?(?:```|$)/g, ' Code omitted. ').replace(/[#*_`]/g, '');
   const sentences: string[] = [];
@@ -53,9 +57,11 @@ export function splitSpeech(text: string, final = false): { sentences: string[];
   for (;;) {
     const match = /[.!?](?:\s|$)/.exec(rest);
     let end = match ? match.index + 1 : -1;
-    if ((end < 0 || end > 300) && rest.length > 300) {
-      const space = rest.lastIndexOf(' ', 300);
-      end = space > 0 ? space : 300;
+    const limit = sentences.length ? 300 : firstLimit;
+    if ((end < 0 || end > limit) && rest.length > limit) {
+      const phrase = Math.max(rest.lastIndexOf(', ', limit), rest.lastIndexOf('; ', limit));
+      const space = phrase >= 40 ? phrase + 1 : rest.lastIndexOf(' ', limit);
+      end = space > 0 ? space : limit;
     }
     if (end <= 0) break;
     const sentence = rest.slice(0, end).trim();
