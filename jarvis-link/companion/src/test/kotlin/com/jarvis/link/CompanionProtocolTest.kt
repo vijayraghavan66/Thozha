@@ -40,6 +40,7 @@ object CompanionProtocolTest {
         approvalDecisionRequiresAuthoritativeCorrelatedResult()
         developmentPlanApprovalRequiresCompleteDigestBoundDetails()
         localTaskHistoryIsRestartSafe()
+        taskEventStreamPersistsEventAndCursorAtomically()
         authenticatedTaskStatusCorrectsOnlyTheLocalMissingRecordMarker()
         fastReadOnlyApiRequestPersistsItsNoLinkReconciliationPolicy()
         progressSequenceDeduplicatesOutOfOrderEvents()
@@ -607,6 +608,74 @@ object CompanionProtocolTest {
         check(runCatching {
             recovered.recordLocalTaskRequest("local-usb-task-20261116-000000000002", "bad scope", capabilityScope = "mac_root")
         }.isFailure)
+        directory.deleteRecursively()
+    }
+
+    private fun taskEventStreamPersistsEventAndCursorAtomically() {
+        val directory = java.nio.file.Files.createTempDirectory("jarvis-wss-cursor").toFile()
+        val stateFile = File(directory, "state.json")
+        val backing = FileLinkStateStore(stateFile)
+        var failNextWrite = false
+        val state = object : LinkStateStore {
+            override fun read(): String? = backing.read()
+            override fun write(json: String) {
+                if (failNextWrite) {
+                    failNextWrite = false
+                    throw java.io.IOException("test-only state write failure")
+                }
+                backing.write(json)
+            }
+        }
+        val now = 1_800_000_000_000L
+        fun runtime() = LinkRuntime(SoftwareTestKeyProvider(File(directory, "keys.json")), state, directory, now = { now })
+        val first = runtime()
+        val requestId = "a1".repeat(16)
+        val supervisorTaskId = "b2".repeat(16)
+        first.recordLocalTaskRequest(requestId, "read-only status", transport = "link", lookupLinkStatus = false)
+
+        check(first.taskEventStreamCursor(requestId) == 0L)
+        check(first.persistTaskEventStreamEvent(
+            requestId, supervisorTaskId, 12L, "link_task.started", "2026-11-25T10:00:00Z",
+            "RUNNING", "Mac started the task", "", null,
+        ) == TaskEventStreamPersistResult.PERSISTED)
+        check(first.taskEventStreamCursor(requestId) == 12L)
+        check(first.conversation().single()["state"] == "RUNNING")
+        check(first.conversation().single()["task_id"] == supervisorTaskId)
+        check(first.taskRegistry().single()["status"] == "RUNNING")
+        val savedEvent = first.taskEventHistory().single { it["event_id"] == "wss:$requestId:12" }
+        check(savedEvent["sequence"] == 12L && savedEvent["event_type"] == "link_task.started")
+
+        check(first.persistTaskEventStreamEvent(
+            requestId, supervisorTaskId, 12L, "link_task.started", "2026-11-25T10:00:00Z",
+            "RUNNING", "duplicate delivery", "", null,
+        ) == TaskEventStreamPersistResult.ALREADY_PERSISTED)
+        check(first.taskEventHistory().count { it["event_id"] == "wss:$requestId:12" } == 1)
+        check(first.conversation().single()["summary"] == "Mac started the task")
+
+        check(runCatching {
+            first.persistTaskEventStreamEvent(
+                requestId, "c3".repeat(16), 13L, "link_task.completed", "2026-11-25T10:00:01Z",
+                "COMPLETED", "wrong task",
+            )
+        }.isFailure)
+        check(first.taskEventStreamCursor(requestId) == 12L)
+
+        check(first.persistTaskEventStreamCheckpoint(requestId, 20L) == TaskEventStreamPersistResult.PERSISTED)
+        val recovered = runtime()
+        check(recovered.taskEventStreamCursor(requestId) == 20L)
+        check(recovered.taskEventHistory().count { it["event_id"] == "wss:$requestId:12" } == 1)
+        check(recovered.persistTaskEventStreamCheckpoint(requestId, 19L) == TaskEventStreamPersistResult.ALREADY_PERSISTED)
+
+        failNextWrite = true
+        check(runCatching {
+            recovered.persistTaskEventStreamEvent(
+                requestId, supervisorTaskId, 21L, "link_task.completed", "2026-11-25T10:00:02Z",
+                "COMPLETED", "test result",
+            )
+        }.isFailure)
+        val afterFailedWrite = runtime()
+        check(afterFailedWrite.taskEventStreamCursor(requestId) == 20L)
+        check(afterFailedWrite.taskEventHistory().none { it["event_id"] == "wss:$requestId:21" })
         directory.deleteRecursively()
     }
 
