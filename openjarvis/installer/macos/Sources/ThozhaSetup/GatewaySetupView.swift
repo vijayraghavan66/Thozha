@@ -14,7 +14,6 @@ struct GatewaySetupView: View {
     @State private var showEnableConfirmation = false
     @State private var showDisableConfirmation = false
     @State private var ownerOptIn = false
-    @State private var proposedInstallationID = UUID()
     @State private var isChecking = false
     @State private var isRequestingLocation = false
     @State private var errorMessage: String?
@@ -42,6 +41,7 @@ struct GatewaySetupView: View {
                         LabeledContent("Current SSID", value: configuration.allowedSSID)
                         LabeledContent("Private IPv4", value: configuration.bindIPv4)
                         LabeledContent("TLS hostname", value: "https://\(configuration.hostname):8443")
+                        LabeledContent("TLS certificate SHA-256", value: configuration.tlsCertificateSHA256)
                     } else if let snapshot, snapshot.ssid == nil {
                         Label("macOS is withholding the SSID. Gateway setup remains blocked.", systemImage: "lock.fill")
                             .font(.callout).foregroundStyle(.orange)
@@ -159,28 +159,27 @@ struct GatewaySetupView: View {
         configuration = nil
         let detectedSnapshot = wifiProvider.snapshot()
         snapshot = detectedSnapshot
-        switch GatewayPreflight.evaluate(snapshot: detectedSnapshot, installationID: proposedInstallationID) {
-        case .failure(let failure):
-            errorMessage = failure.localizedDescription
-        case .success(let detectedConfiguration):
-            do {
-                let requiredBundle = URL(fileURLWithPath: "/Applications/Thozha Setup.app", isDirectory: true).standardizedFileURL
-                guard Bundle.main.bundleURL.standardizedFileURL == requiredBundle else {
-                    throw GatewayRuntimeError.setupAppMustBeInstalled
-                }
-                let shutdownSupervisor = Bundle.main.bundleURL
-                    .appendingPathComponent("Contents/Helpers/ThozhaGatewaySupervisor")
-                let detectedRuntime = try await Task.detached(priority: .utility) {
-                    try GatewayRuntimeDetector().detect(shutdownSupervisor: shutdownSupervisor)
-                }.value
-                configuration = detectedConfiguration
-                runtime = detectedRuntime
-                statusMessage = "Wi-Fi, exact SSID and isolated gateway runtime checks passed. No gateway was started."
-            } catch let error as LocalizedError {
-                errorMessage = error.errorDescription ?? "The OpenJarvis runtime could not be verified."
-            } catch {
-                errorMessage = "The OpenJarvis runtime could not be verified."
+        do {
+            let requiredBundle = URL(fileURLWithPath: "/Applications/Thozha Setup.app", isDirectory: true).standardizedFileURL
+            guard Bundle.main.bundleURL.standardizedFileURL == requiredBundle else {
+                throw GatewayRuntimeError.setupAppMustBeInstalled
             }
+            let shutdownSupervisor = Bundle.main.bundleURL
+                .appendingPathComponent("Contents/Helpers/ThozhaGatewaySupervisor")
+            let detectedRuntime = try await Task.detached(priority: .utility) {
+                try GatewayRuntimeDetector().detect(shutdownSupervisor: shutdownSupervisor)
+            }.value
+            let detectedConfiguration = try GatewayPreflight.evaluate(
+                snapshot: detectedSnapshot,
+                tlsIdentity: detectedRuntime.tlsIdentity,
+            ).get()
+            configuration = detectedConfiguration
+            runtime = detectedRuntime
+            statusMessage = "Wi-Fi, exact SSID, existing TLS identity and isolated gateway runtime checks passed. No gateway was started."
+        } catch let error as LocalizedError {
+            errorMessage = error.errorDescription ?? "The OpenJarvis runtime or existing TLS identity could not be verified."
+        } catch {
+            errorMessage = "The OpenJarvis runtime or existing TLS identity could not be verified."
         }
         isChecking = false
     }
@@ -197,25 +196,13 @@ struct GatewaySetupView: View {
         guard ownerOptIn else { return }
         do {
             let freshSnapshot = wifiProvider.snapshot()
-            let freshConfiguration = try GatewayPreflight.evaluate(snapshot: freshSnapshot, installationID: proposedInstallationID).get()
-            guard freshConfiguration.interfaceName == configuration.interfaceName,
-                  freshConfiguration.allowedSSID == configuration.allowedSSID,
-                  freshConfiguration.bindIPv4 == configuration.bindIPv4 else {
+            let freshConfiguration = try GatewayPreflight.evaluate(snapshot: freshSnapshot, tlsIdentity: runtime.tlsIdentity).get()
+            guard freshConfiguration == configuration else {
                 throw GatewayPreflightError.networkChanged
             }
-            // Stable host naming uses the separate staging ID; it is not a credential.
-            let directory = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/Thozha/Installer-Staging", isDirectory: true)
-            let identity = try StagingIdentityStore.createOrLoad(in: directory)
-            let finalConfiguration = GatewayNetworkConfiguration(
-                interfaceName: freshConfiguration.interfaceName,
-                allowedSSID: freshConfiguration.allowedSSID,
-                bindIPv4: freshConfiguration.bindIPv4,
-                hostname: "thozha-\(identity.id.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(8)).local"
-            )
-            self.configuration = finalConfiguration
+            self.configuration = freshConfiguration
             enablePlan = try GatewayLaunchAgentPlanner.enablePlan(
-                configuration: finalConfiguration, runtime: runtime,
+                configuration: freshConfiguration, runtime: runtime,
                 homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
                 userID: getuid(), ownerOptIn: true
             )
@@ -237,16 +224,27 @@ struct GatewaySetupView: View {
     }
 
     @MainActor private func applyEnable(_ plan: GatewayEnablePlan) async {
-        guard ownerOptIn, let original = configuration else { return }
+        guard ownerOptIn, let original = configuration, let reviewedRuntime = runtime else { return }
         errorMessage = nil
         statusMessage = nil
         isChecking = true
         let freshSnapshot = wifiProvider.snapshot()
-        let freshConfiguration = try? GatewayPreflight.evaluate(snapshot: freshSnapshot, installationID: proposedInstallationID).get()
+        let shutdownSupervisor = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/ThozhaGatewaySupervisor")
+        let latestRuntime = try? await Task.detached(priority: .utility) {
+            try GatewayRuntimeDetector().detect(shutdownSupervisor: shutdownSupervisor)
+        }.value
+        guard let latestRuntime,
+              latestRuntime.tlsIdentity == reviewedRuntime.tlsIdentity,
+              latestRuntime.tlsIdentity == plan.tlsIdentity else {
+            errorMessage = GatewayRuntimeError.tlsIdentityChanged.localizedDescription
+            isChecking = false
+            activeEnablePlan = nil
+            return
+        }
+        let freshConfiguration = try? GatewayPreflight.evaluate(snapshot: freshSnapshot, tlsIdentity: latestRuntime.tlsIdentity).get()
         guard let freshConfiguration,
-              freshConfiguration.interfaceName == original.interfaceName,
-              freshConfiguration.allowedSSID == original.allowedSSID,
-              freshConfiguration.bindIPv4 == original.bindIPv4 else {
+              freshConfiguration == original,
+              plan.tlsIdentity == latestRuntime.tlsIdentity else {
             errorMessage = GatewayPreflightError.networkChanged.localizedDescription
             isChecking = false
             activeEnablePlan = nil

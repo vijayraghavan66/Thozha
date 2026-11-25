@@ -33,14 +33,28 @@ public struct GatewayNetworkConfiguration: Equatable, Sendable {
     public let allowedSSID: String
     public let bindIPv4: String
     public let hostname: String
+    public let tlsCertificateSHA256: String
     public let port: Int
 
-    public init(interfaceName: String, allowedSSID: String, bindIPv4: String, hostname: String, port: Int = 8443) {
+    public init(interfaceName: String, allowedSSID: String, bindIPv4: String, hostname: String,
+                tlsCertificateSHA256: String, port: Int = 8443) {
         self.interfaceName = interfaceName
         self.allowedSSID = allowedSSID
         self.bindIPv4 = bindIPv4
         self.hostname = hostname
+        self.tlsCertificateSHA256 = tlsCertificateSHA256
         self.port = port
+    }
+}
+
+/** The existing TLS identity already provisioned for the paired Mac. */
+public struct GatewayTLSIdentity: Equatable, Sendable {
+    public let hostname: String
+    public let certificateSHA256: String
+
+    public init(hostname: String, certificateSHA256: String) {
+        self.hostname = hostname
+        self.certificateSHA256 = certificateSHA256
     }
 }
 
@@ -55,6 +69,7 @@ public enum GatewayPreflightError: Error, Equatable, LocalizedError {
     case privateAddressUnavailable
     case addressNotPrivate
     case networkChanged
+    case tlsIdentityUnavailable
 
     public var errorDescription: String? {
         switch self {
@@ -68,12 +83,13 @@ public enum GatewayPreflightError: Error, Equatable, LocalizedError {
         case .privateAddressUnavailable: "No private IPv4 address was found on the active Wi-Fi interface."
         case .addressNotPrivate: "The detected Wi-Fi address is not an RFC1918 private IPv4 address. The gateway will not bind."
         case .networkChanged: "The Wi-Fi interface, exact SSID or private address changed after preflight. Recheck before continuing."
+        case .tlsIdentityUnavailable: "The existing paired-Mac TLS certificate identity could not be verified. No new certificate or hostname will be created."
         }
     }
 }
 
 public enum GatewayPreflight {
-    public static func evaluate(snapshot: GatewayWiFiSnapshot, installationID: UUID) -> Result<GatewayNetworkConfiguration, GatewayPreflightError> {
+    public static func evaluate(snapshot: GatewayWiFiSnapshot, tlsIdentity: GatewayTLSIdentity) -> Result<GatewayNetworkConfiguration, GatewayPreflightError> {
         guard !snapshot.hasAmbiguousInterfaces else { return .failure(.multipleActiveInterfaces) }
         guard let interface = snapshot.interfaceName, !interface.isEmpty else { return .failure(.noWifiInterface) }
         guard let ssid = snapshot.ssid else {
@@ -90,10 +106,13 @@ public enum GatewayPreflight {
         else { return .failure(.invalidSSID) }
         guard let address = snapshot.privateIPv4 else { return .failure(.privateAddressUnavailable) }
         guard isRFC1918IPv4(address) else { return .failure(.addressNotPrivate) }
-        let suffix = installationID.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(8)
-        let hostname = "thozha-\(suffix).local"
+        guard tlsIdentity.hostname.range(of: #"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local$"#, options: .regularExpression) != nil,
+              tlsIdentity.certificateSHA256.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            return .failure(.tlsIdentityUnavailable)
+        }
         return .success(GatewayNetworkConfiguration(interfaceName: interface, allowedSSID: ssid,
-                                                     bindIPv4: address, hostname: hostname))
+                                                     bindIPv4: address, hostname: tlsIdentity.hostname,
+                                                     tlsCertificateSHA256: tlsIdentity.certificateSHA256))
     }
 
     public static func isRFC1918IPv4(_ address: String) -> Bool {
@@ -251,12 +270,15 @@ public enum GatewaySSIDHelper {
 public struct GatewayRuntime: Equatable, Sendable {
     public let openJarvisPython: URL
     public let tlsPython: URL
+    public let tlsIdentity: GatewayTLSIdentity
     public let shutdownSupervisor: URL
     public let launchdPath: String
 
-    public init(openJarvisPython: URL, tlsPython: URL, shutdownSupervisor: URL, launchdPath: String) {
+    public init(openJarvisPython: URL, tlsPython: URL, tlsIdentity: GatewayTLSIdentity,
+                shutdownSupervisor: URL, launchdPath: String) {
         self.openJarvisPython = openJarvisPython
         self.tlsPython = tlsPython
+        self.tlsIdentity = tlsIdentity
         self.shutdownSupervisor = shutdownSupervisor
         self.launchdPath = launchdPath
     }
@@ -265,6 +287,8 @@ public struct GatewayRuntime: Equatable, Sendable {
 public enum GatewayRuntimeError: Error, Equatable, LocalizedError {
     case openJarvisRuntimeUnavailable
     case tlsRuntimeUnavailable
+    case tlsIdentityUnavailable
+    case tlsIdentityChanged
     case shutdownSupervisorUnavailable
     case setupAppMustBeInstalled
 
@@ -272,6 +296,8 @@ public enum GatewayRuntimeError: Error, Equatable, LocalizedError {
         switch self {
         case .openJarvisRuntimeUnavailable: "A verified Python environment containing the OpenJarvis Wi-Fi gateway was not found. The installer will not guess or use system Python."
         case .tlsRuntimeUnavailable: "The required Python 3.14 / OpenSSL 3.6 TLS frontend was not found. No download or package-manager install was started."
+        case .tlsIdentityUnavailable: "The existing paired-Mac TLS certificate/key identity could not be verified. No new identity was generated."
+        case .tlsIdentityChanged: "The existing paired-Mac TLS identity changed after review. The gateway plan was not applied."
         case .shutdownSupervisorUnavailable: "The signed Thozha gateway shutdown supervisor is missing. It is required to stop the gateway and clean up its TLS and DNS-SD children safely."
         case .setupAppMustBeInstalled: "Install Thozha Setup in /Applications before enabling a login-time gateway. A LaunchAgent must not reference a movable app bundle."
         }
@@ -282,18 +308,24 @@ public struct GatewayRuntimeDetector: Sendable {
     private let home: URL
     private let path: String
     private let pythonVerifier: @Sendable (URL, [String]) -> Bool
+    private let tlsIdentityReader: @Sendable (URL, URL, URL) -> GatewayTLSIdentity?
 
     public init(home: URL = FileManager.default.homeDirectoryForCurrentUser,
                 path: String = ProcessInfo.processInfo.environment["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin") {
         self.home = home
         self.path = path
         self.pythonVerifier = { executable, arguments in Self.run(executable, arguments: arguments) }
+        self.tlsIdentityReader = { executable, certificate, privateKey in
+            Self.readExistingTLSIdentity(executable: executable, certificate: certificate, privateKey: privateKey, home: home)
+        }
     }
 
-    init(home: URL, path: String, pythonVerifier: @escaping @Sendable (URL, [String]) -> Bool) {
+    init(home: URL, path: String, pythonVerifier: @escaping @Sendable (URL, [String]) -> Bool,
+         tlsIdentityReader: @escaping @Sendable (URL, URL, URL) -> GatewayTLSIdentity?) {
         self.home = home
         self.path = path
         self.pythonVerifier = pythonVerifier
+        self.tlsIdentityReader = tlsIdentityReader
     }
 
     public func detect(shutdownSupervisor: URL) throws -> GatewayRuntime {
@@ -310,8 +342,66 @@ public struct GatewayRuntimeDetector: Sendable {
             FileManager.default.isExecutableFile(atPath: $0.path)
             && pythonVerifier($0, ["-B", "-I", "-c", "import ssl,sys; sys.exit(0 if sys.version_info >= (3,14) and ssl.OPENSSL_VERSION_INFO >= (3,6) else 1)"])
         }) else { throw GatewayRuntimeError.tlsRuntimeUnavailable }
-        return GatewayRuntime(openJarvisPython: python, tlsPython: tlsPython, shutdownSupervisor: shutdownSupervisor,
+        let identityDirectory = home.appendingPathComponent(".openjarvis/companion-wifi", isDirectory: true)
+        guard let identity = tlsIdentityReader(
+            python,
+            identityDirectory.appendingPathComponent("tls-cert.pem"),
+            identityDirectory.appendingPathComponent("tls-key.pem")
+        ),
+        identity.hostname.range(of: #"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local$"#, options: .regularExpression) != nil,
+        identity.certificateSHA256.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            throw GatewayRuntimeError.tlsIdentityUnavailable
+        }
+        return GatewayRuntime(openJarvisPython: python, tlsPython: tlsPython, tlsIdentity: identity, shutdownSupervisor: shutdownSupervisor,
                               launchdPath: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    }
+
+    private static func readExistingTLSIdentity(executable: URL, certificate: URL, privateKey: URL, home: URL) -> GatewayTLSIdentity? {
+        let script = [
+            "import hashlib, hmac, json, re, stat, sys",
+            "from datetime import datetime, timezone",
+            "from pathlib import Path",
+            "from cryptography import x509",
+            "from cryptography.hazmat.primitives import serialization",
+            "cert_path, key_path = Path(sys.argv[1]), Path(sys.argv[2])",
+            "for path in (cert_path, key_path):",
+            "    metadata = path.lstat()",
+            "    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077: raise SystemExit(20)",
+            "certificate = x509.load_pem_x509_certificate(cert_path.read_bytes())",
+            "private_key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)",
+            "names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)",
+            "names = [name.lower() for name in names if re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.local', name, re.I)]",
+            "if len(names) != 1: raise SystemExit(21)",
+            "certificate_public = certificate.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)",
+            "key_public = private_key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)",
+            "if not hmac.compare_digest(certificate_public, key_public): raise SystemExit(22)",
+            "now = datetime.now(timezone.utc)",
+            "if certificate.not_valid_before_utc > now or certificate.not_valid_after_utc <= now: raise SystemExit(23)",
+            "fingerprint = 'sha256:' + hashlib.sha256(certificate.public_bytes(serialization.Encoding.DER)).hexdigest()",
+            "print(json.dumps({'hostname': names[0], 'certificate_sha256': fingerprint}, separators=(',', ':')))"
+        ].joined(separator: "\n")
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["-B", "-I", "-c", script, certificate.path, privateKey.path]
+        process.environment = ["HOME": home.path, "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", "PYTHONNOUSERSITE": "1"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        let completion = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in completion.signal() }
+        do {
+            try process.run()
+            guard completion.wait(timeout: .now() + 10) == .success else {
+                process.terminate()
+                _ = completion.wait(timeout: .now() + 1)
+                return nil
+            }
+            guard process.terminationStatus == 0,
+                  let value = try JSONSerialization.jsonObject(with: output.fileHandleForReading.readDataToEndOfFile()) as? [String: String],
+                  let hostname = value["hostname"],
+                  let fingerprint = value["certificate_sha256"] else { return nil }
+            return GatewayTLSIdentity(hostname: hostname, certificateSHA256: fingerprint)
+        } catch { return nil }
     }
 
     private func locateOpenJarvisPython() -> URL? {
@@ -421,6 +511,7 @@ public struct GatewayEnablePlan: Equatable, Sendable {
     public let bootstrapCommand: [String]
     public let disableCommand: [String]
     public let environmentKeys: Set<String>
+    public let tlsIdentity: GatewayTLSIdentity
 }
 
 public struct GatewayDisablePlan: Equatable, Sendable {
@@ -443,6 +534,8 @@ public enum GatewayLaunchAgentPlanner {
               runtime.tlsPython.isFileURL, runtime.tlsPython.path.hasPrefix("/"),
               runtime.shutdownSupervisor.isFileURL, runtime.shutdownSupervisor.path.hasPrefix("/"),
               configuration.port == 8443,
+              configuration.hostname == runtime.tlsIdentity.hostname,
+              configuration.tlsCertificateSHA256 == runtime.tlsIdentity.certificateSHA256,
               configuration.hostname.range(of: #"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local$"#, options: .regularExpression) != nil,
               !configuration.allowedSSID.isEmpty, configuration.allowedSSID.utf8.count <= 128,
               !configuration.allowedSSID.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }),
@@ -457,6 +550,7 @@ public enum GatewayLaunchAgentPlanner {
             "JARVIS_COMPANION_WIFI_BIND_HOST": configuration.bindIPv4,
             "JARVIS_COMPANION_WIFI_PORT": "8443",
             "JARVIS_COMPANION_WIFI_HOSTNAME": configuration.hostname,
+            "JARVIS_COMPANION_WIFI_TLS_CERT_SHA256": configuration.tlsCertificateSHA256,
             "JARVIS_COMPANION_TLS_PROXY_PYTHON": runtime.tlsPython.path,
             "JARVIS_COMPANION_WIFI_SSID_HELPER": runtime.shutdownSupervisor.path,
             "PATH": runtime.launchdPath,
@@ -479,7 +573,8 @@ public enum GatewayLaunchAgentPlanner {
                                  launchdDomain: domain,
                                  bootstrapCommand: ["launchctl", "bootstrap", domain, plistURL.path],
                                  disableCommand: ["launchctl", "bootout", "\(domain)/\(label)"],
-                                 environmentKeys: Set(environment.keys))
+                                 environmentKeys: Set(environment.keys),
+                                 tlsIdentity: runtime.tlsIdentity)
     }
 
     public static func disablePlan(homeDirectory: URL, userID: UInt32) throws -> GatewayDisablePlan {

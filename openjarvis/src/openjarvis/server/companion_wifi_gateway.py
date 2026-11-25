@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import hmac
 from pathlib import Path
 
 import uvicorn
@@ -110,6 +111,11 @@ def serve() -> None:
     tls_identity = ensure_local_gateway_tls_identity(
         get_config_dir() / "companion-wifi", hostname, port=port,
     )
+    expected_fingerprint = os.environ.get("JARVIS_COMPANION_WIFI_TLS_CERT_SHA256", "").strip().lower()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_fingerprint) or not hmac.compare_digest(
+        tls_identity.certificate_sha256.lower(), expected_fingerprint,
+    ):
+        raise RuntimeError("Existing local gateway TLS identity changed after the reviewed plan")
 
     # Keep the normal gateway and its device authorization on Python 3.13, but
     # terminate LAN TLS with the tested system Python 3.14/OpenSSL 3.6 runtime.

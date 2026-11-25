@@ -276,6 +276,31 @@ def test_no_helper_or_manual_ssid_environment_fails_closed(monkeypatch):
     assert not companion_wifi_gateway._network_matches_allowlist("en0", "HomeNet")
 
 
+@pytest.mark.parametrize("expected", [None, "sha256:" + "b" * 64])
+def test_gateway_start_fails_closed_when_planned_tls_fingerprint_is_missing_or_changed(monkeypatch, expected):
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ENABLED", "1")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_INTERFACE", "en0")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_BIND_HOST", "192.168.1.8")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_PORT", "8443")
+    if expected is None:
+        monkeypatch.delenv("JARVIS_COMPANION_WIFI_TLS_CERT_SHA256", raising=False)
+    else:
+        monkeypatch.setenv("JARVIS_COMPANION_WIFI_TLS_CERT_SHA256", expected)
+    monkeypatch.setattr(companion_wifi_gateway, "_wifi_address", lambda _interface: "192.168.1.8")
+    monkeypatch.setattr(companion_wifi_gateway, "_network_matches_allowlist", lambda _interface, _ssid: True)
+    monkeypatch.setattr(companion_wifi_gateway, "local_gateway_hostname", lambda: "vijay-25589.local")
+    monkeypatch.setattr(
+        companion_wifi_gateway,
+        "ensure_local_gateway_tls_identity",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            hostname="vijay-25589.local", certificate_sha256="sha256:" + "a" * 64,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="identity changed"):
+        companion_wifi_gateway.serve()
+
+
 def test_dns_sd_advertisement_uses_pinned_hostname_and_private_interface_ip():
     args = companion_wifi_gateway._dns_sd_registration_args(
         "/usr/bin/dns-sd", "thozha-mac.local", "192.168.1.8", 8443,

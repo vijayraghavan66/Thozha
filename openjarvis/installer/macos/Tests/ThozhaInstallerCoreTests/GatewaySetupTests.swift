@@ -84,11 +84,12 @@ private final class RecordingGatewayLaunchctl: GatewayLaunchctlOperations, @unch
 }
 
 final class GatewaySetupTests: XCTestCase {
-    private let installID = UUID(uuidString: "12345678-1234-5678-9abc-def012345678")!
+    private let tlsIdentity = GatewayTLSIdentity(hostname: "mac.local", certificateSHA256: "sha256:" + String(repeating: "a", count: 64))
     private let home = URL(fileURLWithPath: "/tmp/thozha-gateway-plan-home", isDirectory: true)
     private let runtime = GatewayRuntime(
         openJarvisPython: URL(fileURLWithPath: "/opt/homebrew/opt/openjarvis/bin/python3.13"),
         tlsPython: URL(fileURLWithPath: "/opt/homebrew/bin/python3.14"),
+        tlsIdentity: GatewayTLSIdentity(hostname: "mac.local", certificateSHA256: "sha256:" + String(repeating: "a", count: 64)),
         shutdownSupervisor: URL(fileURLWithPath: "/Applications/Thozha Setup.app/Contents/Helpers/ThozhaGatewaySupervisor"),
         launchdPath: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     )
@@ -101,27 +102,28 @@ final class GatewaySetupTests: XCTestCase {
     }
 
     func testPreflightAutoConfiguresExactCurrentNetworkWithoutManualValues() throws {
-        let result = GatewayPreflight.evaluate(snapshot: snapshot(), installationID: installID)
+        let result = GatewayPreflight.evaluate(snapshot: snapshot(), tlsIdentity: tlsIdentity)
         guard case .success(let config) = result else { return XCTFail("expected ready config") }
         XCTAssertEqual(config.interfaceName, "en0")
         XCTAssertEqual(config.allowedSSID, "HomeNet")
         XCTAssertEqual(config.bindIPv4, "192.168.1.42")
-        XCTAssertEqual(config.hostname, "thozha-12345678.local")
+        XCTAssertEqual(config.hostname, "mac.local")
+        XCTAssertEqual(config.tlsCertificateSHA256, tlsIdentity.certificateSHA256)
         XCTAssertEqual(config.port, 8443)
     }
 
     func testPreflightFailsClosedForNoInterfaceAmbiguityAndNonPrivateAddress() {
-        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(interface: nil), installationID: installID), .failure(.noWifiInterface))
-        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ambiguous: true), installationID: installID), .failure(.multipleActiveInterfaces))
-        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ip: "8.8.8.8"), installationID: installID), .failure(.addressNotPrivate))
-        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ip: nil), installationID: installID), .failure(.privateAddressUnavailable))
+        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(interface: nil), tlsIdentity: tlsIdentity), .failure(.noWifiInterface))
+        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ambiguous: true), tlsIdentity: tlsIdentity), .failure(.multipleActiveInterfaces))
+        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ip: "8.8.8.8"), tlsIdentity: tlsIdentity), .failure(.addressNotPrivate))
+        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ip: nil), tlsIdentity: tlsIdentity), .failure(.privateAddressUnavailable))
     }
 
     func testSSIDPrivacyStatusesNeverFallBackToManualNetworkEntry() {
-        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: nil, auth: .notDetermined), installationID: installID), .failure(.locationPermissionRequired))
-        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: nil, auth: .denied), installationID: installID), .failure(.locationPermissionDenied))
-        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: nil, auth: .restricted), installationID: installID), .failure(.locationPermissionRestricted))
-        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: nil, auth: .authorized), installationID: installID), .failure(.ssidUnavailable))
+        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: nil, auth: .notDetermined), tlsIdentity: tlsIdentity), .failure(.locationPermissionRequired))
+        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: nil, auth: .denied), tlsIdentity: tlsIdentity), .failure(.locationPermissionDenied))
+        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: nil, auth: .restricted), tlsIdentity: tlsIdentity), .failure(.locationPermissionRestricted))
+        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: nil, auth: .authorized), tlsIdentity: tlsIdentity), .failure(.ssidUnavailable))
     }
 
     func testBundledSSIDHelperModeOutputsOnlyCurrentSSIDAndFailsClosed() {
@@ -147,8 +149,8 @@ final class GatewaySetupTests: XCTestCase {
     }
 
     func testPreflightRejectsInvalidSSIDAndPublicOrLoopbackAddresses() {
-        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: ""), installationID: installID), .failure(.invalidSSID))
-        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: "Home\nInjected"), installationID: installID), .failure(.invalidSSID))
+        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: ""), tlsIdentity: tlsIdentity), .failure(.invalidSSID))
+        XCTAssertEqual(GatewayPreflight.evaluate(snapshot: snapshot(ssid: "Home\nInjected"), tlsIdentity: tlsIdentity), .failure(.invalidSSID))
         for address in ["127.0.0.1", "169.254.1.2", "172.15.1.2", "172.32.1.2", "192.0.2.1", "::1", "192.168.001.2"] {
             XCTAssertFalse(GatewayPreflight.isRFC1918IPv4(address), "accepted \(address)")
         }
@@ -158,7 +160,7 @@ final class GatewaySetupTests: XCTestCase {
     }
 
     func testEnablePlanRequiresExplicitOptInAndIsPrivatePerUserXMLWithoutSecrets() throws {
-        let config = try XCTUnwrap(tryResult(GatewayPreflight.evaluate(snapshot: snapshot(), installationID: installID)))
+        let config = try XCTUnwrap(tryResult(GatewayPreflight.evaluate(snapshot: snapshot(), tlsIdentity: tlsIdentity)))
         XCTAssertThrowsError(try GatewayLaunchAgentPlanner.enablePlan(configuration: config, runtime: runtime,
                                                                        homeDirectory: home, userID: 501, ownerOptIn: false)) {
             XCTAssertEqual($0 as? GatewayPlanError, .ownerOptInRequired)
@@ -173,7 +175,7 @@ final class GatewaySetupTests: XCTestCase {
         XCTAssertEqual(plan.environmentKeys, [
             "JARVIS_COMPANION_WIFI_ENABLED", "JARVIS_COMPANION_WIFI_INTERFACE", "JARVIS_COMPANION_WIFI_ALLOWED_SSID",
             "JARVIS_COMPANION_WIFI_BIND_HOST", "JARVIS_COMPANION_WIFI_PORT", "JARVIS_COMPANION_WIFI_HOSTNAME",
-            "JARVIS_COMPANION_TLS_PROXY_PYTHON", "JARVIS_COMPANION_WIFI_SSID_HELPER", "PATH",
+            "JARVIS_COMPANION_WIFI_TLS_CERT_SHA256", "JARVIS_COMPANION_TLS_PROXY_PYTHON", "JARVIS_COMPANION_WIFI_SSID_HELPER", "PATH",
         ])
         XCTAssertTrue(GatewayLaunchAgentPlanner.activationEnabled)
 
@@ -189,7 +191,8 @@ final class GatewaySetupTests: XCTestCase {
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_ALLOWED_SSID"], "HomeNet")
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_BIND_HOST"], "192.168.1.42")
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_PORT"], "8443")
-        XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_HOSTNAME"], "thozha-12345678.local")
+        XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_HOSTNAME"], "mac.local")
+        XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_TLS_CERT_SHA256"], tlsIdentity.certificateSHA256)
         XCTAssertEqual(environment["JARVIS_COMPANION_TLS_PROXY_PYTHON"], runtime.tlsPython.path)
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_SSID_HELPER"], runtime.shutdownSupervisor.path)
         XCTAssertNil(environment["OPENJARVIS_API_KEY"])
@@ -213,7 +216,7 @@ final class GatewaySetupTests: XCTestCase {
     }
 
     func testGatewayManagerDoesNothingWithoutSeparateConfirmation() throws {
-        let config = try XCTUnwrap(tryResult(GatewayPreflight.evaluate(snapshot: snapshot(), installationID: installID)))
+        let config = try XCTUnwrap(tryResult(GatewayPreflight.evaluate(snapshot: snapshot(), tlsIdentity: tlsIdentity)))
         let plan = try GatewayLaunchAgentPlanner.enablePlan(configuration: config, runtime: runtime,
                                                              homeDirectory: home, userID: 501, ownerOptIn: true)
         let files = RecordingGatewayFiles()
@@ -227,7 +230,7 @@ final class GatewaySetupTests: XCTestCase {
     }
 
     func testEnableWritesOwnerOnlyPlistThenBootstrapsOnlyPerUserJob() throws {
-        let config = try XCTUnwrap(tryResult(GatewayPreflight.evaluate(snapshot: snapshot(), installationID: installID)))
+        let config = try XCTUnwrap(tryResult(GatewayPreflight.evaluate(snapshot: snapshot(), tlsIdentity: tlsIdentity)))
         let plan = try GatewayLaunchAgentPlanner.enablePlan(configuration: config, runtime: runtime,
                                                              homeDirectory: home, userID: 501, ownerOptIn: true)
         let files = RecordingGatewayFiles()
@@ -243,7 +246,7 @@ final class GatewaySetupTests: XCTestCase {
     }
 
     func testEnableRefusesExistingFileAndRollsBackAfterFailedBootstrap() throws {
-        let config = try XCTUnwrap(tryResult(GatewayPreflight.evaluate(snapshot: snapshot(), installationID: installID)))
+        let config = try XCTUnwrap(tryResult(GatewayPreflight.evaluate(snapshot: snapshot(), tlsIdentity: tlsIdentity)))
         let plan = try GatewayLaunchAgentPlanner.enablePlan(configuration: config, runtime: runtime,
                                                              homeDirectory: home, userID: 501, ownerOptIn: true)
         let existingFiles = RecordingGatewayFiles()
@@ -264,7 +267,7 @@ final class GatewaySetupTests: XCTestCase {
 
     func testDisableRequiresConfirmationBootsOutAndRemovesOnlyItsPlist() throws {
         let disablePlan = try GatewayLaunchAgentPlanner.disablePlan(homeDirectory: home, userID: 501)
-        let enableConfig = try XCTUnwrap(tryResult(GatewayPreflight.evaluate(snapshot: snapshot(), installationID: installID)))
+        let enableConfig = try XCTUnwrap(tryResult(GatewayPreflight.evaluate(snapshot: snapshot(), tlsIdentity: tlsIdentity)))
         let enablePlan = try GatewayLaunchAgentPlanner.enablePlan(configuration: enableConfig, runtime: runtime,
                                                                    homeDirectory: home, userID: 501, ownerOptIn: true)
         let files = RecordingGatewayFiles()
@@ -311,15 +314,27 @@ final class GatewaySetupTests: XCTestCase {
 
         let importArguments = ["-B", "-I", "-c", "import openjarvis.server.companion_wifi_gateway"]
         let tlsArguments = ["-B", "-I", "-c", "import ssl,sys; sys.exit(0 if sys.version_info >= (3,14) and ssl.OPENSSL_VERSION_INFO >= (3,6) else 1)"]
-        let detector = GatewayRuntimeDetector(home: root, path: root.appendingPathComponent("bin").path) { executable, arguments in
-            if executable.path == python.path { return arguments == importArguments }
-            if executable.path == tlsPython.path { return arguments == tlsArguments }
-            return false
-        }
+        let expectedIdentity = GatewayTLSIdentity(hostname: "mac.local", certificateSHA256: "sha256:" + String(repeating: "b", count: 64))
+        let detector = GatewayRuntimeDetector(
+            home: root,
+            path: root.appendingPathComponent("bin").path,
+            pythonVerifier: { executable, arguments in
+                if executable.path == python.path { return arguments == importArguments }
+                if executable.path == tlsPython.path { return arguments == tlsArguments }
+                return false
+            },
+            tlsIdentityReader: { executable, certificate, privateKey in
+                guard executable.path == python.path,
+              certificate.path == root.appendingPathComponent(".openjarvis/companion-wifi/tls-cert.pem").path,
+              privateKey.path == root.appendingPathComponent(".openjarvis/companion-wifi/tls-key.pem").path else { return nil }
+                return expectedIdentity
+            }
+        )
 
         let runtime = try detector.detect(shutdownSupervisor: helper)
         XCTAssertEqual(runtime.openJarvisPython.path, python.path)
         XCTAssertEqual(runtime.tlsPython.path, tlsPython.path)
+        XCTAssertEqual(runtime.tlsIdentity, expectedIdentity)
     }
 
     func testRuntimeDetectorDoesNotAcceptSystemPythonAsOpenJarvisRuntime() throws {
@@ -331,7 +346,12 @@ final class GatewaySetupTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
         let plist: [String: Any] = ["Label": "com.openjarvis.jarvis", "ProgramArguments": ["/usr/bin/python3", "-m", "jarvis"]]
         try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: launchAgent)
-        let detector = GatewayRuntimeDetector(home: root, path: "/missing") { _, _ in true }
+        let detector = GatewayRuntimeDetector(
+            home: root,
+            path: "/missing",
+            pythonVerifier: { _, _ in true },
+            tlsIdentityReader: { _, _, _ in GatewayTLSIdentity(hostname: "mac.local", certificateSHA256: "sha256:" + String(repeating: "a", count: 64)) }
+        )
         XCTAssertThrowsError(try detector.detect(shutdownSupervisor: helper)) {
             XCTAssertEqual($0 as? GatewayRuntimeError, .openJarvisRuntimeUnavailable)
         }
@@ -349,6 +369,8 @@ final class GatewaySetupTests: XCTestCase {
         let runtime = try GatewayRuntimeDetector().detect(shutdownSupervisor: helper)
         XCTAssertTrue(runtime.openJarvisPython.path.hasPrefix(home.appendingPathComponent(".openjarvis/src/.venv/bin").path + "/"))
         XCTAssertTrue(runtime.tlsPython.lastPathComponent.hasPrefix("python3.14"))
+        XCTAssertEqual(runtime.tlsIdentity.hostname, "vijay-25589.local")
+        XCTAssertEqual(runtime.tlsIdentity.certificateSHA256, "sha256:5140c8e0cae7382d029069c8b78195a651ff5901de4993d6323e0f686f699456")
     }
 
     private func tryResult(_ result: Result<GatewayNetworkConfiguration, GatewayPreflightError>) -> GatewayNetworkConfiguration? {
