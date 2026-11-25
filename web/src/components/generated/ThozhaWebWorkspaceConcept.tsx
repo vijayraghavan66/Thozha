@@ -20,7 +20,7 @@ import { LivingPulseMark } from '../../auth/LivingPulseStartup';
 import { AnchoredSurface, NotificationPanel, TravelingSurface } from '../LiquidSurface';
 import { muted } from '../styles';
 import { WorkspaceIcon } from '../WorkspaceIcon';
-import { motionAllowed, type IdentityState } from '../motion';
+import { motionAllowed, resolveIdentity, type IdentityState } from '../motion';
 import {
   ConversationConfirmation,
   ConversationHistory,
@@ -454,18 +454,20 @@ export function ThozhaWebWorkspaceConcept({
   const tasks = useTasks(api, 'active', !problem && (page === 'AI Workspace' || page === 'Tasks'));
   const approvals = useApprovals(api, !problem && page === 'AI Workspace');
   const devices = useDevices(api, !problem && page === 'Approvals');
-  const identity: IdentityState = problem
+  const supervisorIdentity: IdentityState = problem
     ? 'failed'
-    : page === 'AI Workspace' && chatActivity !== 'idle'
-      ? chatActivity
-      : approvals.data?.approvals.some(item => item.status === 'PENDING') ||
-          tasks.data?.tasks.some(item => item.state === 'WAITING_APPROVAL')
-        ? 'approval'
-        : tasks.data?.tasks.some(item =>
-              ['CREATED', 'PLANNING', 'RUNNING', 'VERIFYING'].includes(item.state)
-            )
-          ? 'executing'
-          : 'idle';
+    : approvals.data?.approvals.some(item => item.status === 'PENDING') ||
+        tasks.data?.tasks.some(item => item.state === 'WAITING_APPROVAL')
+      ? 'approval'
+      : tasks.data?.tasks.some(item =>
+            ['CREATED', 'PLANNING', 'RUNNING', 'VERIFYING'].includes(item.state)
+          )
+        ? 'executing'
+        : 'idle';
+  const identity = resolveIdentity(
+    page === 'AI Workspace' ? chatActivity : 'idle',
+    supervisorIdentity
+  );
   const hasInspector = page === 'AI Workspace' || page === 'Tasks';
   const historyProps = {
     items: conversations.data?.items ?? [],
@@ -1170,6 +1172,7 @@ export function ThozhaWebWorkspaceConcept({
                       connected={!problem}
                       reduced={motion.reduced}
                       onActivityChange={setChatActivity}
+                      workspaceIdentity={supervisorIdentity}
                       onReviewTask={objective => {
                         setTaskDraft(objective);
                         go('Tasks');

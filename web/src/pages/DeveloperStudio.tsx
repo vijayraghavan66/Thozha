@@ -34,12 +34,12 @@ function TaskComposer({
   const submitLock = useRef(false);
   const composer = useRef<HTMLTextAreaElement>(null);
   const alive = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    alive.current = true;
+    return () => {
       alive.current = false;
-    },
-    []
-  );
+    };
+  }, []);
   useEffect(() => {
     setObjective(prefill);
     if (prefill) setReviewing(true);

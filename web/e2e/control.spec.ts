@@ -152,7 +152,10 @@ test('prefills without execution, resumes real supervisor SSE, and reloads the v
       response.headers()['content-type']?.startsWith('text/event-stream')
   );
   const task = await submitTask(page);
-  await expect(page.locator('.th-task-identity [data-identity="executing"]')).toHaveCount(1);
+  await expect(page.locator('.th-task-identity .th-silver')).toHaveAttribute(
+    'data-state',
+    'executing'
+  );
   expect(writes).toEqual([taskPath]);
   expect((await streamed).status()).toBe(200);
   expect(requests.length).toBeGreaterThanOrEqual(2);
@@ -162,7 +165,10 @@ test('prefills without execution, resumes real supervisor SSE, and reloads the v
   const timeline = page.getByRole('list', { name: 'Saved task events' });
   await expect(timeline.getByText('link_task.completed', { exact: true })).toBeVisible();
   await expect(page.getByText('RESULT SHA-256 VERIFIED')).toBeVisible();
-  await expect(page.locator('.th-task-identity [data-identity="completed"]')).toHaveCount(1);
+  await expect(page.locator('.th-task-identity .th-silver')).toHaveAttribute(
+    'data-state',
+    'completed'
+  );
   const seq = await timeline
     .locator('[data-sequence]')
     .evaluateAll(rows => rows.map(row => Number(row.getAttribute('data-sequence'))));

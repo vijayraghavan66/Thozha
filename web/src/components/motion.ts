@@ -18,6 +18,12 @@ export type IdentityState =
   | 'failed'
   | 'cancelled';
 
+export function resolveIdentity(chat: IdentityState, supervisor: IdentityState): IdentityState {
+  if (supervisor === 'failed') return supervisor;
+  if (chat === 'thinking' || chat === 'failed') return chat;
+  return supervisor === 'idle' ? chat : supervisor;
+}
+
 export function motionAllowed(element: Element | null) {
   return (
     !document.hidden &&
@@ -37,8 +43,8 @@ export function useSceneArrival(
     if (!active || !node?.animate || !motionAllowed(node)) return;
     const animation = node.animate(
       [
-        { opacity: 0.4, translate: '0 7px' },
-        { opacity: 1, translate: '0 0' },
+        { opacity: 0.35, translate: '24px 0', scale: '.98' },
+        { opacity: 1, translate: '0 0', scale: '1' },
       ],
       { duration: motionTiming.page, easing: motionEase }
     );

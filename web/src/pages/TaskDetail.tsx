@@ -8,7 +8,7 @@ import { Chip, Loading, Modal, Notice, Row } from '../components/ui';
 import { approvalsKey, controlError, httpStatus, tasksKey } from './controlState';
 import { isTerminalTask, useTaskProgress } from './useTaskProgress';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
-import { LivingPulseMark } from '../auth/LivingPulseStartup';
+import { SilverIntelligence } from '../components/SilverIntelligence';
 import { taskIdentity } from '../components/motion';
 
 function actualMilestones(events: SupervisorEvent[], state?: string) {
@@ -276,7 +276,7 @@ export function TaskDetail({
         </div>
         {task && (
           <div className="th-task-identity">
-            <LivingPulseMark state={taskIdentity(task.state)} />
+            <SilverIntelligence state={taskIdentity(task.state)} />
             <span key={task.state} className="th-state-arrival">
               <Chip>{task.state.replace(/_/g, ' ')}</Chip>
             </span>

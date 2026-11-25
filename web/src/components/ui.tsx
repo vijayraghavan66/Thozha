@@ -186,7 +186,7 @@ export function Modal({
     exit.current = element.animate(
       [
         { opacity: 1, translate: '0 0', scale: '1' },
-        { opacity: 0, translate: '0 5px', scale: '.985' },
+        { opacity: 0, translate: '0 20px', scale: '.96' },
       ],
       { duration: motionTiming.exit, easing: motionEase, fill: 'forwards' }
     );

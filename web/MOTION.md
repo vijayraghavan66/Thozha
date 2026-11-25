@@ -1,154 +1,173 @@
-# Workspace motion
+# Cinematic workspace motion
 
-The graphite layout, API clients and authorization boundaries are unchanged.
-Motion describes real UI state; it never simulates model tokens, task progress,
-device presence, approvals or signed pairing invitations.
+The graphite information architecture, API contracts and authorization boundaries
+are unchanged. Motion reflects real application state, never invented tokens,
+progress percentages, approvals, connectivity or pairing invitations.
 
-## Shared vocabulary
+## Why the first pass was hard to see
 
-[`motion.css`](./src/motion.css) owns the CSS tokens and choreography.
+The owner-authenticated app served the source from `e98ba32d`: its loaded
+stylesheet matched that commit. The page was visible and focused, the operating
+system/browser reported normal motion, the application preference was unset,
+and its breathing animation was running. Accessibility settings were not the
+cause. The faint contours and small welcome SVG simply had insufficient visual
+weight.
+
+The development server's revision header still contained its startup revision.
+That header is not evidence that Vite's HMR source is stale. No backend process,
+origin policy or accessibility preference was changed to obtain this result.
+
+## Shared choreography
+
+[`motion.css`](./src/motion.css) owns the CSS vocabulary.
 [`motion.ts`](./src/components/motion.ts) provides matching Web Animation
-timings, the scene-arrival hook, motion eligibility and task identity mapping.
-Keep the CSS and JavaScript timings aligned when changing this vocabulary.
+timings, eligibility, retained-scene arrival and identity precedence.
 
-| Purpose                                          | Duration |
-| ------------------------------------------------ | -------- |
-| Press feedback                                   | 110 ms   |
-| Controls, input borders and composer resizing    | 180 ms   |
-| Panels, navigation, dialogs and message arrivals | 280 ms   |
-| Page/conversation arrival                        | 320 ms   |
-| Welcome reveal and completion sweep              | 560 ms   |
-| Dismissal                                        | 160 ms   |
+| Purpose                                      | Timing                |
+| -------------------------------------------- | --------------------- |
+| Press feedback                               | 110 ms                |
+| Controls and focus                           | 180 ms                |
+| Panels, navigation, dialogs and new messages | 280 ms                |
+| Route and conversation arrival               | 320 ms                |
+| Dialog dismissal                             | 160 ms                |
+| Welcome typography                           | 600-680 ms, staggered |
+| Identity entrance / hero-to-presence handoff | 680 / 440 ms          |
 
-The common easing is `cubic-bezier(.22,.8,.24,1)`. Panel resizing uses a
-restrained, non-overshooting spring-like curve. No sound or haptic effects exist.
+The common easing is `cubic-bezier(.22,.8,.24,1)`. Resizing uses a restrained,
+non-overshooting spring-like curve. There is no audio or haptic behavior.
 
-### Navigation and surfaces
+- Native route snapshots move directionally with scale and slight perspective.
+  The sidebar remains live outside the snapshot; subsequent navigation interrupts
+  the preceding transition. Unsupported browsers change routes immediately and
+  retain content-arrival effects.
+- Contextual history travels its full width. It remains separate from persistent
+  primary navigation. Chat and its unsent draft are not remounted on route changes.
+- Anchored menus preserve their trigger origins. Dialogs enter with controlled
+  translation/scale and become inert during dismissal. Escape, focus restoration
+  and reduced-motion changes cannot strand an inert top-layer dialog.
+- Only new message IDs receive entrance motion, not every SSE chunk or historical
+  replay. Actual incremental deltas retain requestAnimationFrame batching;
+  buffered output appears whole. Markdown remains selectable DOM.
+- The welcome composition stages the sculpture, eyebrow, heading and suggestions.
+  The composer remains fully opaque with stationary hitboxes: its entrance only
+  changes a bounded shadow. Moving Send targets or fading command-menu text caused
+  real interaction/accessibility failures during development and were removed.
+- Sidebar width and bounded textarea resizing remain deliberate layout-animation
+  exceptions. Task history and execution details still own their independent
+  scrolling; the app shell stays stationary.
 
-- The existing sidebar, contextual history and active-item surface retain their
-  identity. Labels fade as the sidebar resizes; preference persistence is unchanged.
-- Supported browsers use a named native View Transition for the main workspace,
-  with direction derived from navigation order. Navigation remains live outside
-  the snapshot. A newer navigation skips the previous transition.
-- Browsers without View Transitions update the route immediately and retain the
-  content-arrival effects. The chat subtree and unsent drafts are not remounted.
-- Anchored menus use opacity and transform rather than animated clipping.
-  `inert`, `aria-hidden`, Escape and existing focus management remain authoritative.
-- Dialog close buttons, Escape and backdrop dismissal animate before unmount.
-  Dialogs become inert during dismissal. Reduced-motion cancellation still
-  completes dismissal; it cannot strand an inert top-layer dialog.
-  Parent-driven success/cancel unmounts remain immediate.
-- Buttons compress slightly on press, not on generic hover. Input focus and
-  panel focus-within use quiet border changes.
+## Dimensional silver identity
 
-### Welcome, conversation and tasks
+[`SilverIntelligence.tsx`](./src/components/SilverIntelligence.tsx) retains a
+bounded renderer while the welcome sculpture becomes compact response presence.
+Task details use the same material and vocabulary. The existing small Living
+Pulse remains in the startup handoff and compact application marks.
 
-- Two bounded monochrome contours and the small SVG create the welcome
-  atmosphere. There is no new full-screen shader, particle layer or animation library.
-- Heading, subtitle, composer and starter suggestions arrive in sequence.
-  The composer moves without fading its readable input or command palette.
-- Only newly added messages receive message entrance motion. Saved conversation
-  switching animates its container; completed Markdown fades without translating
-  code-copy controls.
-- Actual incremental deltas retain the existing requestAnimationFrame batching.
-  Buffered results appear whole. Following live deltas does not repeatedly restart
-  smooth scrolling. Text remains ordinary selectable DOM.
-- Textarea resizing is interruptible and bounded at 160 px. Sidebar resizing and
-  this small textarea are deliberate layout-animation exceptions; most effects
-  use transform and opacity.
-- Task state chips and newly received event rows transition from server data.
-  Initial replay is not presented as new activity. Queued is marked only when a
-  queue event exists; no authorization milestone or percentage is inferred.
-  Milestone cards adapt to the detail panel's width, including split-pane tablets.
+[`renderer.ts`](./src/silver/renderer.ts) uses raw WebGL without a new dependency:
 
-### Living identity
+- A deforming mesh with 3,625 vertices and 6,912 triangles; no raymarching,
+  particles or full-screen shader.
+- Analytic studio reflections, directional highlights, depth and a bounded
+  grounding shadow. No continuous full-screen blur.
+- A maximum 720x420 drawing buffer and capped device pixel ratio of 1.5.
+- Native RAF scheduling with approximately 60 Hz ambient drawing, not a promise
+  of 120 FPS. GPU frames do not cause React state updates.
+- One-RAF deferred initialization avoids duplicate Strict Mode GPU startup.
+  A static metallic SVG crossfades into the canvas.
+- Explicit warnings and static fallback on initialization/context failure;
+  context restoration recreates resources. Cleanup releases GPU resources,
+  observers, listeners and scheduled frames.
 
-| Actual state                                        | Presentation                |
-| --------------------------------------------------- | --------------------------- |
-| Idle                                                | Low-intensity SVG breathing |
-| Chat request pending                                | Silver contours flow        |
-| Supervisor CREATED / PLANNING / RUNNING / VERIFYING | Controlled ring rotation    |
-| WAITING_APPROVAL / pending approval                 | Gentle ring emphasis        |
-| Completed after a state change                      | One short sweep             |
-| Failed                                              | Muted broken-ring treatment |
-| Cancelled                                           | Quiet, dimmed mark          |
+| Actual state                                        | Visible treatment                                   |
+| --------------------------------------------------- | --------------------------------------------------- |
+| Idle                                                | Calm, continuously deforming liquid-silver loop     |
+| Pending chat request / actual response generation   | Faster flow and stronger deformation                |
+| Supervisor CREATED / PLANNING / RUNNING / VERIFYING | Purposeful directional light and tighter shape      |
+| WAITING_APPROVAL / pending approval                 | More open contour and deliberate attention emphasis |
+| Actual response or task completion                  | Resolution sweep and settling geometry              |
+| Failure                                             | Restrained broken contour                           |
+| Cancellation                                        | Dimmed, settling identity                           |
 
-Historical completed messages do not replay a completion sweep. Pairing status
-continues to mean pairing, not online connectivity. Existing invitation countdown,
-fingerprint review, cancellation and revocation behavior is unchanged.
+Terminal states stop continuous drawing after 1,200 ms. Historical messages do
+not replay completion effects. PAUSED tasks are not presented as executing.
+An active supervisor state takes precedence over terminal chat completion;
+active chat generation remains responsive to the chat operation.
 
-## Accessibility and resource use
+## Accessibility and resource ownership
 
-System reduced motion and **Settings -> Visual preferences** disable decorative
-animations and transitions. Changing the preference also cancels active Web
-Animations and page snapshots. Hidden documents pause CSS ambient effects;
-new JavaScript arrival effects are not started while hidden. Hidden retained chat
-content does not run ambient animation.
+System reduced motion or **Settings -> Visual preferences** disables decorative
+CSS, Web Animations and scene snapshots. The sculpture draws a static state.
+Changing preferences cancels active transitions. Neither operating-system nor
+stored owner preferences are overridden.
 
-Existing keyboard navigation, focus restoration, modal locking and independent
-task/history scrolling remain in place. No per-token shell-state updates were
-added. Prefer bounded elements and avoid continuous blur, filters or layout reads.
+Hidden documents, offscreen canvases and inactive retained chat pause rendering.
+Normal motion resumes only when eligible. Visibility and context-loss recovery
+are covered by browser regression tests. Existing keyboard behavior, focus,
+modal locking, contrast checks and mobile navigation remain authoritative.
 
-## Verification
+## Verification and evidence boundaries
 
-The motion change was checked against the real owner-authenticated application
-on port 5174 and isolated API/model fixtures. These are distinct forms of evidence.
+The rework was checked on the actual owner-authenticated app at port 5174 and
+against isolated backend/model fixtures. These are different kinds of evidence.
 
-- Live walkthroughs: 1440x900, 1280x800, 930x581, 768x1024 and 390x844.
-  Each opens saved history and task details, Device Hub, the genuine private
-  gateway-unavailable pairing dialog, current approvals, profile and notifications.
-- The owner-approved prompt **what is java** returned a real answer over HTTP 200
-  `text/event-stream` and remained after navigation/reload. No artificial token
-  playback was introduced.
-- Live approvals were empty. Exact-operation review and explicit decisions were
-  recorded against the isolated control fixture, not a production Mac operation.
-- Before/after clips use the published frontend at `68be4314` and the new
-  implementation against the same approved backend. The baseline was served
-  temporarily on loopback port 5175 without changing the working tree or backend.
-- TypeScript, ESLint, 28 unit tests and 44 Playwright tests passed. Coverage
-  includes interrupted navigation retaining the composer DOM, reduced motion,
-  preference changes during dialog exit, genuine fixture SSE lifecycle,
-  attachment handling, task scrolling, approval decisions and QR states.
+- Live recordings cover 1440x900, 1280x800, 930x581, 768x1024 and 390x844.
+  Full frames were inspected, including short-height and mobile composition.
+- The authorized harmless Java-interface prompt returned genuine HTTP 200
+  `text/event-stream`, a real answer and persisted conversation history.
+- One explicitly reviewed, read-only task returned HTTP 202 and reached real
+  COMPLETED state. The saved answer acknowledged that it could not verify the
+  macOS version; the frontend does not claim that a system command succeeded.
+- That verification exposed a frontend Strict Mode lifecycle guard which never
+  reset after effect cleanup. Resetting it in effect setup restores task preflight
+  without changing task policy, auth, API or backend behavior.
+- Actual port-5174 pairing returned 409, accurately showing that the private
+  connection is not configured. No QR was fabricated.
+- Production approvals were empty. Exact-operation review and explicit decisions
+  are demonstrated only in the clearly identified isolated control fixture.
+- The 24-second comparison uses exact published `e98ba32d` source and the rework,
+  on the same temporary loopback origin, viewport, owner data and interaction
+  schedule. Port 5175 receives a genuine 403 pairing-origin refusal in both clips;
+  it is not the port-5174 gateway-unconfigured state.
+- Comparison clips precede the authorized new chat/task, preserving identical
+  history data. Later lifecycle/composer fixes are additionally verified in
+  live responsive captures and browser tests.
 
-### Measured frame pacing
+The delivered session evidence includes the side-by-side WebM, continuous
+walkthrough, separate real chat/task recordings, approved-origin pairing,
+reduced motion, responsive clips, inspected frames and producing scripts.
+Captures are not committed private browser data or test fixtures.
 
-Live requestAnimationFrame samples during the first recorded viewport matrix
-(before final focus/composer and tablet milestone refinements):
+### Measurements, not frame-rate guarantees
 
-| Viewport | Samples | Median |    p95 | Frames >50 ms |
-| -------- | ------: | -----: | -----: | ------------: |
-| 1440x900 |    3731 | 8.3 ms | 8.7 ms |             2 |
-| 1280x800 |    3785 | 8.3 ms | 9.1 ms |             2 |
-| 930x581  |    3790 | 8.3 ms | 9.0 ms |             2 |
-| 768x1024 |    3782 | 8.3 ms | 9.3 ms |             2 |
-| 390x844  |    3391 | 8.3 ms | 9.3 ms |             3 |
+On the actual app at 1440x900, an unrecorded nine-second sample contained 1,052
+RAF intervals: median 8.3 ms, p95 9.1 ms, maximum 116.6 ms. Idle had one 25.8 ms
+interval; Tasks and Chats navigation included 116.6 and 58.3 ms intervals.
 
-An unrecorded live 1440x900 navigation/sidebar profile had 1066 samples:
-median 8.3 ms, p95 9.1 ms, maximum 99.9 ms, seven frames above 25 ms and
-three above 50 ms. Target-scoped Chromium metrics measured 338 ms of script,
-45 ms of layout and 212 ms of style recalculation across that interaction sample.
-Used JS heap at its end was approximately 14.3 MB.
-The first recorded matrix included a maximum frame gap of 340.8 ms.
+A separate nine-second mixed sample had median 8.3 ms, p95 9.3 ms and an
+unexplained 1,000.8 ms gap. Observed long tasks were 81, 79 and 63 ms; those do
+not establish the cause of the one-second gap. CPU-side renderer initialization
+measured 30.5 ms. Target-scoped script/layout/style deltas were approximately
+438/29/173 ms; JS heap changed from 32.4 to 37.8 MB.
 
-The final isolated production-build walkthrough measured p95 16.7 ms, with 1/2069
-recorded and 1/144 unrecorded samples above 25 ms. These are observations on
-the test environment, not guaranteed frame rates. Different refresh rates and
-recording overhead make direct FPS comparisons inappropriate.
+The final isolated production-build walkthrough measured p95 16.8 ms, with
+5/2,175 recorded and 3/142 unrecorded intervals above 25 ms. An earlier run had
+56/2,603 recorded intervals above 25 ms. Final desktop/mobile/reduced launch
+checks measured p95 33.3/16.7/16.7 ms and maxima 133.4/99.9/100 ms respectively.
+These workloads are not controlled comparisons.
 
-### Limits and reproduction
+Navigation and initialization hitches remain a limitation, not a claim of
+stutter-free performance. WebM captures run at 25 FPS and cannot prove high
+refresh-rate frame pacing. The 930x581 viewport encodes at 930x580 because the
+codec requires even dimensions. Measured document overflow was zero at the
+verified narrow viewports.
 
-Occasional long main-thread frames remain in the live development profile;
-this is not a claim of stutter-free or guaranteed 120 FPS. WebM captures run
-at 25 FPS, supplementing rather than replacing frame-timing measurements.
-The 930x581 viewport is encoded at 930x580 because the codec requires even
-dimensions. Measured document overflow was zero at every recorded size;
-small nonzero layout-shift scores (0.0025-0.0123) were observed.
+Full QR success and real device-connection changes still require backend-owned
+availability. No production approval was manufactured to demonstrate animation.
+PR #1 remains unmerged for integrated and visual acceptance.
 
-Full QR success still needs the backend-owned private TLS gateway. Actual device
-connection changes and pending production approval motion cannot be certified
-when the corresponding live states are absent.
+## Reproduction
 
-Run the normal checks from this directory:
+Run from this directory:
 
 ```sh
 npm run typecheck
@@ -159,8 +178,13 @@ THOZHA_E2E_PYTHON=/path/to/backend/.venv/bin/python3 \
 THOZHA_E2E_BACKEND=/path/to/backend/worktree npm run test:e2e
 ```
 
-To record the isolated approval review, set `THOZHA_E2E_MOTION_CAPTURE` to an
-absolute evidence directory and select `--grep 'reviews the exact operation'`.
-Recording starts after fixture sign-in and always stops in `finally`.
-Real-session capture scripts and WebM files are delivered as session artifacts,
-not committed private browser data or repository test fixtures.
+TypeScript, ESLint, production build, 30 unit tests and all 44 Playwright cases
+passed. Coverage includes actual
+changing/static sculpture pixels, retained composer identity, hidden rendering,
+context restoration, interrupted navigation, dialog exit, SSE lifecycle,
+attachments, independent scrolling, exact-operation review and genuine QR states.
+Build before browser tests: the preview server reads `dist`, not HMR source.
+
+To record isolated approval review, set `THOZHA_E2E_MOTION_CAPTURE` to an absolute
+evidence directory and select `--grep 'reviews the exact operation'`. Recording
+starts after fixture sign-in and always stops in `finally`.

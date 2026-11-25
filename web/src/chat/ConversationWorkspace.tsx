@@ -25,11 +25,13 @@ import { Chip, Loading, Notice } from '../components/ui';
 import { formatDate, muted, outline } from '../components/styles';
 import { MarkdownMessage } from './MarkdownMessage';
 import { LivingPulseMark } from '../auth/LivingPulseStartup';
+import { SilverIntelligence } from '../components/SilverIntelligence';
 import { WorkspaceIcon } from '../components/WorkspaceIcon';
 import {
   motionAllowed,
   motionEase,
   motionTiming,
+  resolveIdentity,
   useSceneArrival,
   type IdentityState,
 } from '../components/motion';
@@ -265,6 +267,7 @@ export default function ConversationWorkspace({
   onManageConversation,
   changedConversationId,
   onActivityChange,
+  workspaceIdentity,
 }: {
   api: WorkspaceApi;
   active: boolean;
@@ -276,6 +279,7 @@ export default function ConversationWorkspace({
   onManageConversation: (action: ConversationAction) => void;
   changedConversationId?: string;
   onActivityChange: (state: IdentityState) => void;
+  workspaceIdentity: IdentityState;
 }) {
   const cache = useQueryClient();
   const [selection, setSelection] = useState<string | null>(null);
@@ -508,8 +512,12 @@ export default function ConversationWorkspace({
       animations.push(
         node.animate(
           [
-            { opacity: 0, translate: message.role === 'user' ? '0 9px' : '0 6px' },
-            { opacity: 1, translate: '0 0' },
+            {
+              opacity: 0,
+              translate: message.role === 'user' ? '18px 26px' : '0 20px',
+              scale: message.role === 'user' ? '.95' : '.99',
+            },
+            { opacity: 1, translate: '0 0', scale: '1' },
           ],
           { duration: motionTiming.panel, easing: motionEase }
         )
@@ -762,7 +770,13 @@ export default function ConversationWorkspace({
       ? 'thinking'
       : issue || lastAssistant?.status === 'failed'
         ? 'failed'
-        : 'idle';
+        : live?.conversationId === id && live.ended && lastAssistant?.id === live.responseId
+          ? lastAssistant.status === 'cancelled'
+            ? 'cancelled'
+            : 'completed'
+          : 'idle';
+  const identity = resolveIdentity(activity, workspaceIdentity);
+  const identityVisible = welcome || identity !== 'idle';
   useEffect(() => {
     if (active) onActivityChange(activity);
   }, [active, activity, onActivityChange]);
@@ -1000,11 +1014,34 @@ export default function ConversationWorkspace({
             }}
             className="th-v4-message-log flex min-h-[230px] flex-1 flex-col gap-7 overflow-y-auto p-5"
           >
+            <div
+              className="th-intelligence-stage"
+              data-mode={welcome ? 'hero' : identityVisible ? 'presence' : 'hidden'}
+            >
+              <SilverIntelligence
+                state={identity}
+                active={active && identityVisible}
+                mode={welcome ? 'hero' : identityVisible ? 'presence' : 'hidden'}
+              />
+              {!welcome && identityVisible && (
+                <span className="th-presence-label" aria-hidden="true">
+                  {
+                    {
+                      idle: '',
+                      thinking: 'Thinking',
+                      executing: 'Supervisor task in progress',
+                      approval: 'Waiting for your approval',
+                      completed: 'Response complete',
+                      failed: 'Needs attention',
+                      cancelled: 'Cancelled',
+                    }[identity]
+                  }
+                </span>
+              )}
+            </div>
             {welcome && (
               <div className="th-v4-empty th-v4-welcome text-center">
-                <div className="th-v4-welcome-mark" aria-hidden="true">
-                  <LivingPulseMark state="idle" />
-                </div>
+                <span className="th-welcome-eyebrow">THOZHA</span>
                 <h2>What's on your mind?</h2>
                 <p>An idea, a question, or something worth building.</p>
               </div>

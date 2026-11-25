@@ -361,7 +361,10 @@ test('startup waits for real session verification, settles and never replays on 
     ).toEqual([]);
     release();
     await expect(page.locator('[data-pulse-in-flight]')).toHaveCount(1);
-    expect(await startup.evaluate(el => getComputedStyle(el).pointerEvents)).toBe('none');
+    for (const pointerEvents of await startup.evaluateAll(nodes =>
+      nodes.map(node => getComputedStyle(node).pointerEvents)
+    ))
+      expect(pointerEvents).toBe('none');
     await expect(startup).toHaveCount(0);
     await expect(page.locator('[data-pulse-slot]:visible')).toHaveCount(1);
     await expect(page.getByTestId('chat-title')).toHaveText('New chat');
@@ -553,7 +556,11 @@ test('renders the reported SSE mode, persists context, copies code and supports 
     await expect(page.getByLabel('Partial response')).toContainText('Fixture response');
   }
   await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
-  await expect(page.locator('.th-v4-conversation')).toHaveAttribute('data-activity', 'idle');
+  await expect(page.locator('.th-v4-conversation')).toHaveAttribute('data-activity', 'completed');
+  await expect(page.locator('.th-intelligence-stage .th-silver')).toHaveAttribute(
+    'data-state',
+    'completed'
+  );
   await expect(page.locator('.th-message-identity [data-identity="completed"]')).toHaveCount(1);
   const copy = page.locator('.th-code-copy');
   const bounds = await copy.boundingBox();
@@ -612,16 +619,28 @@ test('motion preserves the live chat tree across interrupted navigation and resp
   page,
 }) => {
   await signIn(page, '/#/ai-workspace?new=motion');
+  const sculpture = page.locator('.th-intelligence-stage .th-silver');
+  await expect(sculpture).toHaveAttribute('data-renderer', 'webgl');
+  await expect(sculpture).toHaveAttribute('data-motion', 'running');
+  await page.waitForTimeout(750);
+  const firstFrame = await sculpture.screenshot();
+  await page.waitForTimeout(350);
+  expect((await sculpture.screenshot()).equals(firstFrame)).toBe(false);
   const composer = page.getByRole('textbox', { name: 'Message Jarvis' });
   await composer.fill('Draft survives cinematic navigation');
   const original = await composer.elementHandle();
   await page.getByRole('link', { name: 'Tasks', exact: true }).click();
+  await expect(sculpture).toHaveAttribute('data-motion', 'paused');
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
   await page.getByRole('link', { name: 'AI Workspace', exact: true }).click();
   await expect(composer).toHaveValue('Draft survives cinematic navigation');
   expect(await original!.evaluate(element => element.isConnected)).toBe(true);
   await expect(page.locator('#main-content')).toHaveAttribute('data-workspace', 'AI Workspace');
   await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(sculpture).toHaveAttribute('data-motion', 'static');
+  const still = await sculpture.screenshot();
+  await page.waitForTimeout(200);
+  expect((await sculpture.screenshot()).equals(still)).toBe(true);
   await page.getByRole('button', { name: 'Open profile menu', exact: true }).click();
   await expect(page.getByRole('menu', { name: 'Profile and workspace' })).toBeVisible();
   expect(
@@ -642,11 +661,24 @@ test('motion preserves the live chat tree across interrupted navigation and resp
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect(page.locator('.th-workspace')).toHaveAttribute('data-motion-paused', 'true');
+  await expect(sculpture).toHaveAttribute('data-motion', 'paused');
   await page.evaluate(() => {
     Object.defineProperty(document, 'hidden', { configurable: true, value: false });
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect(page.locator('.th-workspace')).toHaveAttribute('data-motion-paused', 'false');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const graphics = await sculpture
+    .locator('canvas')
+    .evaluateHandle(canvas =>
+      (canvas as HTMLCanvasElement).getContext('webgl')?.getExtension('WEBGL_lose_context')
+    );
+  await graphics.evaluate(extension => extension?.loseContext());
+  await expect(sculpture).toHaveAttribute('data-renderer', 'fallback');
+  await graphics.evaluate(extension => extension?.restoreContext());
+  await expect(sculpture).toHaveAttribute('data-renderer', 'webgl');
+  await expect(sculpture).toHaveAttribute('data-motion', 'running');
+  await graphics.dispose();
   await original!.dispose();
 });
 
@@ -1121,9 +1153,10 @@ for (const variant of ['desktop', 'mobile', 'reduced'] as const) {
       await expect(composer).toBeEditable();
       if (variant === 'reduced') {
         await expect(startup).toHaveCount(0);
-        expect(
-          await page.locator('.th-v4-welcome-mark svg').evaluate(el => el.getAnimations())
-        ).toEqual([]);
+        await expect(page.locator('.th-intelligence-stage .th-silver')).toHaveAttribute(
+          'data-motion',
+          'static'
+        );
       } else {
         await expect(page.locator('[data-pulse-in-flight]')).toHaveCount(1);
         if (assetDir) {
@@ -1131,7 +1164,10 @@ for (const variant of ['desktop', 'mobile', 'reduced'] as const) {
           await page.waitForTimeout(280);
           await page.screenshot({ path: info.outputPath(`${variant}-startup-flight.png`) });
         }
-        expect(await startup.evaluate(el => getComputedStyle(el).pointerEvents)).toBe('none');
+        for (const pointerEvents of await startup.evaluateAll(nodes =>
+          nodes.map(node => getComputedStyle(node).pointerEvents)
+        ))
+          expect(pointerEvents).toBe('none');
         await expect(startup).toHaveCount(0);
       }
       const greeting = page.getByRole('heading', { name: "What's on your mind?" });
@@ -1140,7 +1176,14 @@ for (const variant of ['desktop', 'mobile', 'reduced'] as const) {
       await expect(
         page.getByText(/CONVERSATIONS \/ WEB v1|Host conversation · delivery/)
       ).toHaveCount(0);
-      await expect(page.locator('main canvas')).toHaveCount(0);
+      const sculpture = page.locator('main .th-silver-canvas');
+      await expect(sculpture).toHaveCount(1);
+      const pixels = await sculpture.evaluate(canvas => ({
+        width: (canvas as HTMLCanvasElement).width,
+        height: (canvas as HTMLCanvasElement).height,
+      }));
+      expect(pixels.width).toBeLessThanOrEqual(720);
+      expect(pixels.height).toBeLessThanOrEqual(420);
       await expect(
         page.locator('main').getByRole('button', { name: /New conversation/i })
       ).toHaveCount(0);

@@ -70,7 +70,7 @@
     visibility 280ms;
 }
 .th-v4-history-pane.is-hidden {
-  transform: translateX(-16px);
+  transform: translateX(calc(-100% - 20px));
 }
 .th-workspace dialog[open] {
   animation: th-dialog-in var(--th-duration-surface) var(--th-ease-spring) both;
@@ -139,10 +139,6 @@
   height: 23px;
   flex: none;
 }
-.th-task-identity .th-pulse-mark {
-  width: 32px;
-  height: 32px;
-}
 .th-v4-assistant-message[data-response-state='completed'] > .th-markdown {
   animation: th-response-settle var(--th-duration-surface) var(--th-ease-out) both;
 }
@@ -158,54 +154,131 @@
 .th-task-row > a {
   transition: background-color var(--th-duration-press) var(--th-ease-out);
 }
-.th-v4-welcome {
-  isolation: isolate;
-}
-.th-v4-welcome-mark {
+.th-v4-conversation {
   position: relative;
 }
-.th-v4-welcome-mark::before,
-.th-v4-welcome-mark::after {
+.th-v4-conversation.is-welcome {
+  background:
+    radial-gradient(ellipse at 50% 35%, #30313650, transparent 46%),
+    linear-gradient(160deg, #151619, #0d0e11 70%);
+}
+.th-silver {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  flex: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.th-silver-canvas,
+.th-silver-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.th-silver-canvas {
+  opacity: 0;
+  transition: opacity var(--th-duration-surface) ease;
+}
+.th-silver[data-renderer='webgl'] .th-silver-canvas {
+  opacity: 1;
+}
+.th-silver[data-renderer='webgl'] .th-silver-poster {
+  opacity: 0;
+}
+.th-silver-poster {
+  transition: opacity var(--th-duration-surface) ease;
+}
+.th-intelligence-stage {
+  position: relative;
+  flex: none;
+  margin-inline: auto;
+  pointer-events: none;
+}
+.th-intelligence-stage[data-mode='hero'] {
+  width: min(480px, 100%);
+  height: clamp(150px, 29dvh, 270px);
+  margin-bottom: 6px;
+}
+.th-intelligence-stage[data-mode='hero']::after {
   content: '';
   position: absolute;
-  z-index: -1;
+  inset: auto 12% 4%;
+  height: 16px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, #0009, transparent 70%);
   pointer-events: none;
-  width: min(58vw, 380px);
-  height: 92px;
-  top: 50%;
-  left: 50%;
-  border: 1px solid #d5dce21c;
-  border-radius: 48% 52% 44% 56%;
-  transform: translate(-50%, -40%) rotate(-12deg);
-  animation: th-water-contour 12s ease-in-out infinite alternate;
 }
-.th-v4-welcome-mark::after {
-  width: min(48vw, 290px);
-  height: 112px;
-  opacity: 0.6;
-  animation-direction: alternate-reverse;
-  animation-delay: -5s;
+.th-intelligence-stage[data-mode='hidden'] {
+  height: 0;
+  width: 0;
+  visibility: hidden;
+  margin: 0;
 }
-.th-v4-welcome-mark .th-pulse-mark {
-  animation: none;
+.th-intelligence-stage[data-mode='presence'] {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 72px;
+  margin-block: -18px -8px;
+  gap: 8px;
+}
+.th-intelligence-stage[data-mode='presence'] .th-silver {
+  width: 108px;
+  height: 72px;
+}
+.th-presence-label {
+  color: #c5c8cf;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.th-task-identity .th-silver {
+  width: 108px;
+  height: 72px;
+}
+.is-welcome .th-v4-message-log {
+  gap: 0;
+  padding: 8px 18px 26px;
+  max-width: 860px;
+}
+.th-welcome-eyebrow {
+  display: block;
+  margin-bottom: 13px;
+  color: #b7bbc3;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.34em;
+  animation: th-welcome-type 600ms var(--th-ease-out) both;
 }
 .th-v4-welcome h2 {
-  animation: th-welcome-reveal var(--th-duration-reveal) var(--th-ease-out) both;
+  font-size: clamp(31px, 4.5vw, 51px);
+  font-weight: 400;
+  letter-spacing: -0.055em;
+  animation: th-welcome-type 680ms var(--th-ease-out) 80ms both;
 }
 .th-v4-welcome p {
-  animation: th-welcome-reveal var(--th-duration-reveal) var(--th-ease-out) 70ms both;
+  color: #a7abb4;
+  animation: th-welcome-type 680ms var(--th-ease-out) 160ms both;
+}
+.th-v4-conversation.is-welcome form:has(textarea) {
+  background: linear-gradient(150deg, #25262b, #1a1b20);
+  border-color: #bfc5d13d;
+  box-shadow:
+    0 20px 65px #0005,
+    inset 0 1px #ffffff12;
 }
 .is-welcome form:has(textarea) {
-  animation: th-composer-reveal var(--th-duration-reveal) var(--th-ease-out) 110ms both;
+  animation: th-composer-reveal 620ms var(--th-ease-out) 140ms both;
 }
 .th-v4-starters button {
-  animation: th-arrive var(--th-duration-surface) var(--th-ease-out) 170ms both;
+  animation: th-starter-reveal 460ms var(--th-ease-out) 220ms both;
 }
 .th-v4-starters button:nth-child(2) {
   animation-delay: 210ms;
 }
 .th-v4-starters button:nth-child(3) {
-  animation-delay: 250ms;
+  animation-delay: 300ms;
 }
 .th-pulse-mark :is(path, circle) {
   transform-box: fill-box;
@@ -253,27 +326,16 @@
     translate: 0 0;
   }
 }
-@keyframes th-welcome-reveal {
-  from {
-    opacity: 0;
-    translate: 0 10px;
-  }
-  to {
-    opacity: 1;
-    translate: 0 0;
-  }
-}
 @keyframes th-composer-reveal {
   from {
-    translate: 0 10px;
+    box-shadow:
+      0 24px 64px #0000,
+      inset 0 1px #ffffff00;
   }
   to {
-    translate: 0 0;
-  }
-}
-@keyframes th-water-contour {
-  to {
-    transform: translate(-50%, -40%) rotate(9deg) scale(1.05, 0.88);
+    box-shadow:
+      0 20px 65px #0005,
+      inset 0 1px #ffffff12;
   }
 }
 @keyframes th-identity-breathe {
@@ -342,14 +404,16 @@
 }
 @keyframes th-scene-enter {
   from {
-    opacity: 0;
-    transform: translateY(calc(var(--th-route-direction, 1) * 10px));
+    opacity: 0.15;
+    transform: perspective(1400px) translateX(calc(var(--th-route-direction, 1) * 70px))
+      rotateY(calc(var(--th-route-direction, 1) * -3deg)) scale(0.97);
   }
 }
 @keyframes th-scene-exit {
   to {
     opacity: 0;
-    transform: translateY(calc(var(--th-route-direction, 1) * -6px));
+    transform: perspective(1400px) translateX(calc(var(--th-route-direction, 1) * -35px))
+      scale(0.95);
   }
 }
 
@@ -384,9 +448,74 @@
 }
 @media (max-width: 767px) {
   .th-v4-history-pane.is-hidden {
-    transform: translateX(-12px);
+    transform: translateX(-100%);
   }
   .th-profile-surface {
     transform-origin: top right;
+  }
+}
+@keyframes th-welcome-type {
+  from {
+    opacity: 0;
+    transform: perspective(800px) translateY(28px) rotateX(-12deg);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes th-starter-reveal {
+  from {
+    opacity: 0;
+    translate: 0 16px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+@keyframes th-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(32px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.th-workspace main > .th-enter {
+  animation: none;
+}
+@media (max-height: 680px) {
+  .th-intelligence-stage[data-mode='hero'] {
+    height: 150px;
+  }
+  .is-welcome .th-v4-message-log {
+    padding-block: 4px 16px;
+  }
+  .th-welcome-eyebrow {
+    margin-bottom: 8px;
+  }
+  .th-v4-welcome h2 {
+    font-size: clamp(29px, 4vw, 40px);
+  }
+  .is-welcome.has-attachments .th-intelligence-stage[data-mode='hero'] {
+    height: 88px;
+  }
+}
+@media (max-width: 767px) {
+  .th-intelligence-stage[data-mode='hero'] {
+    height: clamp(160px, 26dvh, 230px);
+  }
+  .th-welcome-eyebrow {
+    margin-bottom: 12px;
+  }
+  .th-v4-welcome h2 {
+    max-width: 330px;
+    margin-inline: auto;
+  }
+  .is-welcome.has-attachments .th-intelligence-stage[data-mode='hero'] {
+    height: 100px;
   }
 }
