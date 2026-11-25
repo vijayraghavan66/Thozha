@@ -11,6 +11,7 @@ internal object LinkSyncPolicy {
     )
 
     const val ACTIVE_INTERVAL_MS = 10_000L
+    const val TELEGRAM_ACTIVE_INTERVAL_MS = 30_000L
     const val IDLE_INTERVAL_MS = 30_000L
 
     /** LAN WSS is authorized by the paired API identity; Telegram/Link identities stay on their own transport. */
@@ -62,8 +63,25 @@ internal object LinkSyncPolicy {
         }
     }
 
-    fun intervalMs(hasActiveWork: Boolean): Long =
-        if (hasActiveWork) ACTIVE_INTERVAL_MS else IDLE_INTERVAL_MS
+    fun shouldRunLinkSync(
+        lanHealthy: Boolean,
+        pendingTelegramWork: Boolean,
+        queuedOutboxMessages: Int,
+    ): Boolean = !lanHealthy || pendingTelegramWork || queuedOutboxMessages > 0
+
+    fun intervalMs(
+        hasActiveWork: Boolean,
+        telegramRetryAfterMs: Long = 0L,
+        telegramTunnelActive: Boolean = false,
+    ): Long {
+        val normalDelay = when {
+            hasActiveWork && telegramTunnelActive -> TELEGRAM_ACTIVE_INTERVAL_MS
+            hasActiveWork -> ACTIVE_INTERVAL_MS
+            else -> IDLE_INTERVAL_MS
+        }
+        return if (telegramRetryAfterMs > 0L) maxOf(normalDelay, telegramRetryAfterMs.coerceAtMost(300_000L) + 250L)
+        else normalDelay
+    }
 }
 
 /**

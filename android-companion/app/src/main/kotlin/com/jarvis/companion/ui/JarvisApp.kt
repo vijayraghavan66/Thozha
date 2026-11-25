@@ -4,6 +4,7 @@ import android.provider.Settings
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import com.jarvis.companion.link.LinkSettings
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -101,8 +102,12 @@ fun JarvisApp(store: JarvisStore) {
     LaunchedEffect(Unit) {
         store.refreshLocal()
         while (true) {
-            store.syncNow()
-            delay(if (store.hasActiveWork()) 10_000L else 30_000L)
+            if (store.shouldRunLinkSync()) store.syncNow() else store.refreshLocal()
+            val telegramTunnelActive = com.jarvis.companion.telegram.TelegramSession.activeTunnel() != null
+            val telegramCooldown = if (LinkSettings(context).mode == com.jarvis.companion.link.LinkMode.TEST_RELAY &&
+                telegramTunnelActive
+            ) com.jarvis.companion.telegram.TelegramSession.retryRemainingMs() else 0L
+            delay(LinkSyncPolicy.intervalMs(store.hasActiveWork(), telegramCooldown, telegramTunnelActive))
         }
     }
     LaunchedEffect(Unit) {

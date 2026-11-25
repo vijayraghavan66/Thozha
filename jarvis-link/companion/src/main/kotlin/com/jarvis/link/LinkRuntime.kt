@@ -72,6 +72,7 @@ data class SyncReport(
     val updates: List<Map<String, Any>>,
     val flushed: Int,
     val error: String,
+    val errorStatus: Int? = null,
 )
 
 class LinkRuntime(
@@ -182,10 +183,12 @@ class LinkRuntime(
     fun syncNow(relayUrl: String): SyncReport = synchronized(syncLock) {
         var flushed = 0
         var error = ""
+        var errorStatus: Int? = null
         try {
             flushed = flush(relayUrl)["delivered"] as Int
         } catch (failure: Exception) {
             error = errorCode(failure)
+            errorStatus = (failure as? RelayHttpException)?.status
         }
         reconcileOrphanedQueuedRequests()
         val newlyPending = mutableListOf<ApprovalReview>()
@@ -196,9 +199,10 @@ class LinkRuntime(
             markAnnounced(newlyPending.map { it.approvalId })
         } catch (failure: Exception) {
             error = errorCode(failure)
+            errorStatus = (failure as? RelayHttpException)?.status
         }
         save(mapOf("last_sync_ms" to now(), "last_sync_error" to error))
-        return SyncReport(newlyPending, recentUpdates(), flushed, error)
+        return SyncReport(newlyPending, recentUpdates(), flushed, error, errorStatus)
     }
 
     private fun errorCode(failure: Exception): String = when (failure) {

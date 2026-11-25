@@ -117,6 +117,13 @@ fun main() {
     controller.onAuthStep(AuthStep.Ready)
     check(controller.snapshot().connection == TelegramConnection.CONNECTED, "error clears once authorization is ready again")
 
+    controller.onRateLimitUntil(now + 210_000L)
+    check(controller.snapshot().retryAfterUntilUnixMs == now + 210_000L, "server Retry-After is exposed as a delivery cooldown")
+    controller.onSendBlocked("AUTH_REQUIRED")
+    check(controller.snapshot().sendBlockedReasonCode == "AUTH_REQUIRED", "permanent send authorization failures are surfaced separately")
+    controller.clearSendBlock()
+    check(controller.snapshot().sendBlockedReasonCode == null, "an explicit manual retry clears only the permanent block")
+
     // --- two-step verification ---------------------------------------------------
     val fake2 = FakeTelegramTransport(requirePassword = true)
     val controller2 = TelegramController(fake2, clock = { 0L }, nonceSource = { "nonce-aaaa-1111" })

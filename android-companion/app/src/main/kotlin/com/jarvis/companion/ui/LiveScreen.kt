@@ -133,7 +133,7 @@ fun LiveScreen(
                         enabled = !store.syncing && !store.macApiSyncing,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            if (connection.paired || connection.pendingEnrollment) store.syncNow()
+                            if (connection.paired || connection.pendingEnrollment) store.syncNow(forcePermanentTelegramRetry = true)
                             else context.startActivity(
                                 Intent(context, AdvancedActivity::class.java).putExtra("open_device_pairing", true),
                             )
@@ -150,6 +150,7 @@ fun LiveScreen(
 
             item { SectionLabel("Transport") }
             item {
+                val telegramRetry = telegramRetryStatus(telegram, store.now)
                 FactCard(
                     listOf(
                         "Route" to ConnectionRoutePresentation.label(store.lastMacApiTransport, modeLabel(settings.mode)),
@@ -159,7 +160,7 @@ fun LiveScreen(
                             "${clockTime(latest)} · ${ageLabel((store.now - latest).coerceAtLeast(0L))}"
                         } else "Not confirmed yet",
                         "Queued on phone" to "${status?.outboxSize ?: 0} messages",
-                    ),
+                    ) + listOfNotNull(telegramRetry?.let { "Telegram delivery" to it }),
                 )
             }
             item {
@@ -199,7 +200,7 @@ fun LiveScreen(
                     filled = false,
                     enabled = !store.syncing && !store.macApiSyncing,
                     modifier = Modifier.fillMaxWidth(),
-                    onClick = { store.syncNow() },
+                        onClick = { store.syncNow(forcePermanentTelegramRetry = true) },
                 )
             }
 

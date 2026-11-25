@@ -301,6 +301,28 @@ class JarvisStore(private val app: Context) {
         it["transport"] != "local" && (it["state"] as? String) in setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING")
     }
 
+    fun hasPendingTelegramWork(): Boolean = runCatching {
+        val runtime = LinkService.runtime(app)
+        runtime.conversation().any { row ->
+            row["transport"] in setOf("telegram", "link") &&
+                (row["state"] as? String)?.uppercase() in LinkSyncPolicy.activeStates
+        } || runtime.status().outboxSize > 0
+    }.getOrDefault(false)
+
+    fun shouldRunLinkSync(): Boolean {
+        val settings = LinkSettings(app)
+        if (settings.mode != com.jarvis.companion.link.LinkMode.TEST_RELAY) return true
+        val lanHealthy = macApiPaired && lastMacApiTransport == "wifi" && macApiSyncError.isBlank()
+        val pendingAndOutbox = runCatching {
+            val runtime = LinkService.runtime(app)
+            runtime.conversation().any { row ->
+                row["transport"] in setOf("telegram", "link") &&
+                    (row["state"] as? String)?.uppercase() in LinkSyncPolicy.activeStates
+            } to runtime.status().outboxSize
+        }.getOrElse { true to 1 }
+        return LinkSyncPolicy.shouldRunLinkSync(lanHealthy, pendingAndOutbox.first, pendingAndOutbox.second)
+    }
+
     fun refreshLocal() = background {
         val currentWifiPin = runCatching { secureStore.localGatewayPin() }.getOrNull()
         val runtime = LinkService.runtime(app)
@@ -774,15 +796,15 @@ class JarvisStore(private val app: Context) {
         }
     }
 
-    fun syncNow() = ui {
+    fun syncNow(forcePermanentTelegramRetry: Boolean = false) = ui {
         // A foreground/resume/manual catch-up that overlaps a slow tunnel exchange is coalesced into
         // exactly one follow-up instead of being silently discarded or starting a competing poller.
         if (!linkSyncGate.request()) return@ui
         syncing = true
-        runLinkSync()
+        runLinkSync(forcePermanentTelegramRetry)
     }
 
-    private fun runLinkSync() {
+    private fun runLinkSync(forcePermanentTelegramRetry: Boolean = false) {
         val startedNs = System.nanoTime()
         val mode = LinkSettings(app).mode
         background(lanes.sync) {
@@ -790,7 +812,7 @@ class JarvisStore(private val app: Context) {
             var failureType: String? = null
             try {
                 if (mode == com.jarvis.companion.link.LinkMode.TEST_RELAY) {
-                    val result = runCatching { LinkBackgroundSync.run(app) }
+                    val result = runCatching { LinkBackgroundSync.run(app, forcePermanentTelegramRetry) }
                     report = result.getOrNull()
                     failureType = result.exceptionOrNull()?.javaClass?.simpleName
                 }
@@ -1170,13 +1192,34 @@ class JarvisStore(private val app: Context) {
                         fallback.onSuccess { delivery ->
                             val fallbackTransport = if (TelegramSession.activeTunnel() != null) "telegram" else "link"
                             runtime.updateLocalTaskTransport(requestId, fallbackTransport)
+                            val telegramRetryMessage = telegramRetryStatus(
+                                TelegramSession.controller?.snapshot(), System.currentTimeMillis(),
+                            )
+                            val queuedSummary = when {
+                                fallbackTransport == "telegram" && telegramRetryMessage != null -> telegramRetryMessage
+                                fallbackTransport == "telegram" && delivery.queuedOffline ->
+                                    "Telegram is unavailable; request remains queued on this phone."
+                                fallbackTransport == "telegram" ->
+                                    "Authenticated Telegram relay accepted the request; waiting for the Mac result."
+                                delivery.queuedOffline ->
+                                    "Authenticated Link request remains queued on this phone."
+                                else -> "Authenticated Link relay accepted the request; waiting for the Mac result."
+                            }
                             if (delivery.messageId != requestId) {
                                 runtime.recordLocalTaskResult(requestId, "", "FAILED", "The Link fallback could not correlate this request safely.")
                             } else {
-                                runtime.recordLocalTaskResult(requestId, requestId, if (delivery.queuedOffline) "QUEUED" else "SENT", "")
+                                runtime.recordLocalTaskResult(
+                                    requestId,
+                                    requestId,
+                                    if (delivery.queuedOffline) "QUEUED" else "SENT",
+                                    queuedSummary,
+                                )
                             }
                             android.util.Log.i("JarvisDelivery", "event=lan_fallback_enqueued trace=$requestTrace transport=$fallbackTransport queued=${delivery.queuedOffline}")
-                            ui { lanTransportStatus = "LAN unavailable; using authenticated ${fallbackTransport.replaceFirstChar(Char::uppercase)} fallback" }
+                            ui {
+                                lanTransportStatus = if (fallbackTransport == "telegram" && telegramRetryMessage != null) queuedSummary
+                                    else "LAN unavailable; using authenticated ${fallbackTransport.replaceFirstChar(Char::uppercase)} fallback"
+                            }
                         }.onFailure { fallbackFailure ->
                             runtime.recordLocalTaskResult(
                                 requestId,

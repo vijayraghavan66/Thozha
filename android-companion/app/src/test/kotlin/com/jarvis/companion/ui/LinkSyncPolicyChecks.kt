@@ -26,6 +26,30 @@ object LinkSyncPolicyChecks {
             LinkSyncPolicy.intervalMs(LinkSyncPolicy.hasActiveWork(emptyList(), listOf(row("request-a", "QUEUED")))) == 10_000L,
             "persisted queued work uses the existing bounded 10-second cadence",
         )
+        checkPolicy(
+            LinkSyncPolicy.intervalMs(true, telegramRetryAfterMs = 210_000L) == 210_250L,
+            "a Telegram Retry-After deadline suppresses redundant foreground sync attempts",
+        )
+        checkPolicy(
+            LinkSyncPolicy.intervalMs(true, telegramTunnelActive = true) == 30_000L,
+            "Telegram task polling uses a slower cadence than direct LAN progress",
+        )
+        checkPolicy(
+            !LinkSyncPolicy.shouldRunLinkSync(lanHealthy = true, pendingTelegramWork = false, queuedOutboxMessages = 0),
+            "healthy LAN suppresses unnecessary Telegram background polling",
+        )
+        checkPolicy(
+            LinkSyncPolicy.shouldRunLinkSync(lanHealthy = true, pendingTelegramWork = true, queuedOutboxMessages = 0),
+            "pending Telegram tasks still receive fallback reconciliation",
+        )
+        checkPolicy(
+            LinkSyncPolicy.shouldRunLinkSync(lanHealthy = true, pendingTelegramWork = false, queuedOutboxMessages = 1),
+            "queued outbox messages remain eligible for safe fallback delivery",
+        )
+        checkPolicy(
+            LinkSyncPolicy.shouldRunLinkSync(lanHealthy = false, pendingTelegramWork = false, queuedOutboxMessages = 0),
+            "Telegram fallback resumes when the last confirmed LAN route fails",
+        )
 
         // Durable terminal state wins over an old Compose snapshot. Completed/cancelled work falls
         // back to the existing idle cadence rather than keeping an aggressive poll loop alive.
@@ -82,7 +106,7 @@ object LinkSyncPolicyChecks {
             ),
             "duplicate request IDs are reconciled by durable state without resurrecting cancelled work",
         )
-        checkPolicy(assertions == 22, "all expected policy assertions executed")
+        checkPolicy(assertions == 28, "all expected policy assertions executed")
         println("Link sync delivery policy passed: $assertions assertions.")
     }
 }

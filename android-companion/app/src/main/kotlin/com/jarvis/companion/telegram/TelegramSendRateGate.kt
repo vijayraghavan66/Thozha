@@ -7,10 +7,11 @@ internal class TelegramSendRateGate(
     private val pauseNanos: (Long) -> Unit = { nanos ->
         if (nanos > 0) java.util.concurrent.TimeUnit.NANOSECONDS.sleep(nanos)
     },
+    initialDeferredNanos: Long = 0L,
 ) {
     private val lock = Any()
     private var nextSlotNanos = 0L
-    private var deferredUntilNanos = 0L
+    private var deferredUntilNanos = nowNanos() + initialDeferredNanos.coerceIn(0L, TelegramRetryStateStore.MAX_SERVER_RETRY_MS * 1_000_000L)
 
     fun awaitSlot() {
         while (!tryAwaitSlot(Long.MAX_VALUE)) { /* A newer flood wait arrived during the wait; reserve again. */ }

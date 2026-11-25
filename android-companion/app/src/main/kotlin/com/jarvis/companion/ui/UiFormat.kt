@@ -2,6 +2,7 @@ package com.jarvis.companion.ui
 
 import com.jarvis.companion.presentation.TransportState
 import com.jarvis.companion.telegram.TelegramConnection
+import com.jarvis.companion.telegram.TelegramSnapshot
 import java.text.DateFormat
 import java.util.Date
 
@@ -42,6 +43,21 @@ fun telegramConnectionLabel(connection: TelegramConnection?): String = when (con
     TelegramConnection.LOGIN_REQUIRED -> "Sign-in needed"
     TelegramConnection.ERROR -> "Error"
     TelegramConnection.NOT_CONFIGURED, null -> "Not set up"
+}
+
+fun telegramRetryStatus(snapshot: TelegramSnapshot?, nowMs: Long): String? {
+    snapshot?.sendBlockedReasonCode?.let { code ->
+        return when (code) {
+            "AUTH_REQUIRED", "RELAY_AUTH_FAILED" -> "Telegram sending paused: authorization needs attention. Queued requests stay on this phone."
+            "DEVICE_REVOKED", "DEVICE_NOT_AUTHORIZED" -> "Telegram sending paused: this device needs owner-authorized recovery."
+            "RETRY_STATE_INVALID" -> "Telegram sending paused because saved retry state could not be verified."
+            else -> "Telegram sending paused after a permanent relay refusal. Queued requests were preserved."
+        }
+    }
+    val until = snapshot?.retryAfterUntilUnixMs ?: return null
+    val seconds = ((until - nowMs).coerceAtLeast(0L) + 999L) / 1_000L
+    if (seconds <= 0L) return null
+    return "Telegram rate limit: retry in ${seconds / 60}m ${seconds % 60}s. Requests remain queued on this phone."
 }
 
 /** Expiry label for an approval's raw timestamp in Unix milliseconds. */

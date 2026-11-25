@@ -35,6 +35,35 @@ fun main(args: Array<String>) {
     check(delayedGate.tryAwaitSlot(30_000_000_000L), "request can reserve a safe slot once the signed freshness budget is met")
     check(delayedWaits == listOf(30_000_000_000L), "remaining safe delay is respected")
 
+    var wallNow = 1_000L
+    val retryFile = File.createTempFile("telegram-retry-state", ".txt").apply { delete() }
+    val retryStore = TelegramRetryStateStore(retryFile, { wallNow }, { 1.0 })
+    val serverRetry = retryStore.deferForServerRetryAfter(210L)
+    check(serverRetry.retryUntilUnixMs == 211_000L, "server Retry-After is stored as the exact absolute deadline")
+    check(retryStore.remainingMs() == 210_000L, "persisted Retry-After remaining time is readable")
+    val restartedStore = TelegramRetryStateStore(retryFile, { wallNow }, { 1.0 })
+    check(restartedStore.remainingMs() == 210_000L, "cooldown survives transport/process recreation")
+    wallNow += 100_000L
+    check(restartedStore.remainingMs() == 110_000L, "cooldown decreases against wall time after restart")
+    check(telegramRetryDisposition(restartedStore.state(), wallNow) == TelegramRetryDisposition.RATE_LIMITED, "sync remains deferred until Retry-After expires")
+    wallNow += 110_000L
+    check(restartedStore.remainingMs() == 0L, "expired server deadline no longer blocks queued messages")
+
+    val transientState = TelegramRetryStateStore(retryFile, { wallNow }, { 1.0 })
+    check(transientState.deferTransientFailure().retryUntilUnixMs == wallNow + 1_000L, "first transient failure uses bounded exponential backoff")
+    wallNow += 1_000L
+    check(transientState.deferTransientFailure().retryUntilUnixMs == wallNow + 2_000L, "next transient failure increases its delay")
+    val blocked = transientState.blockAutomaticRetry("AUTH_REQUIRED")
+    check(telegramRetryDisposition(blocked, wallNow) == TelegramRetryDisposition.PERMANENTLY_BLOCKED, "permanent auth failure stops automatic sync")
+    check(TelegramRetryStateStore(retryFile, { wallNow }, { 1.0 }).state().blockedCode == "AUTH_REQUIRED", "permanent block survives process recreation")
+    check(transientState.clearPermanentBlock().blockedCode == null, "explicit owner retry can clear only the permanent failure block")
+    retryFile.delete()
+
+    check(classifyTdlibSendFailure(429) == TdlibSendFailureKind.RATE_LIMITED, "TDLib 429 is treated as server Retry-After")
+    check(classifyTdlibSendFailure(401) == TdlibSendFailureKind.AUTHORIZATION, "TDLib authentication rejection is not auto-retried")
+    check(classifyTdlibSendFailure(503) == TdlibSendFailureKind.TRANSIENT, "TDLib server errors use bounded backoff")
+    check(classifyTdlibSendFailure(400) == TdlibSendFailureKind.PERMANENT, "TDLib permanent request rejection is blocked")
+
     val fixture = LinkJson.parseObject(File(args[0]).readText(Charsets.UTF_8))
     val requestFrames = (fixture["request_frames"] as List<*>).map { it as String }
     val responseFrames = (fixture["response_frames"] as List<*>).map { it as String }

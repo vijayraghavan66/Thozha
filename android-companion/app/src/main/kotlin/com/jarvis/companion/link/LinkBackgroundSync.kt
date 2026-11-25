@@ -7,6 +7,7 @@ import android.app.job.JobService
 import android.content.ComponentName
 import android.content.Context
 import com.jarvis.link.SyncReport
+import com.jarvis.companion.telegram.TelegramSession
 
 /**
  * One Link sync: retries queued sends, polls for replies and approval requests, and alerts once per new
@@ -28,13 +29,45 @@ object LinkBackgroundSync {
         return runCatching { LinkService.runtime(context).status().certificatesVerified }.getOrDefault(false)
     }
 
-    fun run(context: Context): SyncReport? {
+    fun run(context: Context, forcePermanentRetry: Boolean = false): SyncReport? {
         val settings = LinkSettings(context)
         if (!canRun(context)) return null
         val runtime = LinkService.runtime(context)
+        val usesTelegramTunnel = settings.mode == LinkMode.TEST_RELAY && TelegramSession.activeTunnel() != null
+        if (usesTelegramTunnel) {
+            var retryState = TelegramSession.retryState()
+            if (forcePermanentRetry && retryState.blockedCode != null) {
+                retryState = TelegramSession.clearPermanentSendBlock()
+            }
+            if (retryState.blockedCode != null) {
+                android.util.Log.w(
+                    "JarvisDelivery",
+                    "event=telegram_sync_deferred reason=permanent_failure code=${retryState.blockedCode}",
+                )
+                return SyncReport(emptyList(), runtime.recentUpdates(), 0, "TELEGRAM_AUTH_BLOCKED")
+            }
+            val remaining = TelegramSession.retryRemainingMs()
+            if (remaining > 0L) {
+                android.util.Log.i(
+                    "JarvisDelivery",
+                    "event=telegram_sync_deferred reason=retry_after remaining_s=${(remaining + 999L) / 1_000L}",
+                )
+                return SyncReport(emptyList(), runtime.recentUpdates(), 0, "TELEGRAM_RETRY_AFTER")
+            }
+        }
         val startedAtMs = System.currentTimeMillis()
         val startedNs = android.os.SystemClock.elapsedRealtimeNanos()
         val report = runtime.syncNow(settings.relayUrl)
+        if (usesTelegramTunnel) {
+            when {
+                report.error in PERMANENT_RELAY_FAILURES -> TelegramSession.blockAutomaticRetry(permanentReason(report))
+                report.errorStatus in 400..499 && report.errorStatus != 408 && report.errorStatus != 429 ->
+                    TelegramSession.blockAutomaticRetry(permanentReason(report))
+                report.errorStatus == 408 || report.errorStatus == 429 || report.errorStatus in 500..599 ||
+                    report.error in TRANSIENT_RELAY_FAILURES -> TelegramSession.deferTransientRetry()
+                report.error.isBlank() -> TelegramSession.recordTransportSuccess()
+            }
+        }
         val newlyPersisted = report.updates.filter { row ->
             val receivedAt = (row["received_at_unix_ms"] as? Number)?.toLong() ?: 0L
             receivedAt >= startedAtMs
@@ -54,7 +87,16 @@ object LinkBackgroundSync {
         return report
     }
 
+    private fun permanentReason(report: SyncReport): String = if (report.errorStatus == 401 || report.errorStatus == 403) "AUTH_REQUIRED" else
+        report.error.takeIf { it.matches(Regex("[A-Z0-9_]{1,48}")) } ?: "SEND_REJECTED"
+
+    private val PERMANENT_RELAY_FAILURES = setOf(
+        "AUTH_FAILED", "DEVICE_REVOKED", "DEVICE_NOT_AUTHORIZED", "CERTIFICATE_REVOKED", "CERTIFICATE_INVALID",
+        "RELAY_AUTH_FAILED", "PERMISSION_DENIED",
+    )
+
     private val TERMINAL_TASK_STATES = setOf("COMPLETED", "FAILED", "CANCELLED", "REJECTED", "EXPIRED", "INDETERMINATE")
+    private val TRANSIENT_RELAY_FAILURES = setOf("NETWORK_UNAVAILABLE", "PROTOCOL_ERROR", "REQUEST_STALE_RETRY", "RATE_LIMITED")
 }
 
 /**

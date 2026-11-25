@@ -142,6 +142,25 @@ fun main() {
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "Task completed")), "legacy terminal events without a final answer are reconciled")
     check(!shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "Finished normally")), "ordinary completed API tasks are not polled again")
     check(!shouldReconcileApiTask(mapOf("transport" to "local", "state" to "RUNNING")), "local tasks never call the Mac status endpoint")
+    val rateLimitedTelegram = com.jarvis.companion.telegram.TelegramSnapshot(
+        com.jarvis.companion.telegram.TelegramConnection.CONNECTED,
+        com.jarvis.companion.telegram.AuthStep.Ready,
+        true,
+        null,
+        null,
+        0,
+        null,
+        retryAfterUntilUnixMs = 211_000L,
+    )
+    check(
+        com.jarvis.companion.ui.telegramRetryStatus(rateLimitedTelegram, 1_000L) == "Telegram rate limit: retry in 3m 30s. Requests remain queued on this phone.",
+        "retry-after is shown as a cooldown while preserving the queued request",
+    )
+    check(
+        com.jarvis.companion.ui.telegramRetryStatus(rateLimitedTelegram.copy(sendBlockedReasonCode = "AUTH_REQUIRED"), 1_000L)
+            ?.contains("authorization needs attention") == true,
+        "permanent Telegram authorization failures are shown separately from rate limits",
+    )
     val nowForReconciliation = 10_000_000L
     val earlyNotFound = mapOf<String, Any?>(
         "transport" to "api", "state" to "FAILED", "task_id" to "", "summary" to "The Mac no longer has this task record.",
