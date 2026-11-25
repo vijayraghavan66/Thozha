@@ -9,6 +9,7 @@ import androidx.compose.runtime.setValue
 import com.jarvis.companion.presentation.ApprovalDecisionPhase
 import com.jarvis.companion.presentation.ApprovalDecisionPresentation
 import com.jarvis.companion.presentation.ApprovalDecisionStatus
+import com.jarvis.companion.presentation.MacTransportSelection
 import com.jarvis.companion.presentation.shouldReconcileApiTask
 import com.jarvis.companion.link.LinkBackgroundSync
 import com.jarvis.companion.link.LinkAlerts
@@ -596,8 +597,11 @@ class JarvisStore(private val app: Context) {
         }
         val directReadOnlyCommand = fastCommand is FastCommand.MacStatus ||
             fastCommand is FastCommand.MacBatteryStatus || fastCommand is FastCommand.MacSystemInfo
-        val usePairedMacApi = hasMacApiPairing() && (
-            directReadOnlyCommand || (fastCommand == null && route is RequestRoute.Mac)
+        val usePairedMacApi = MacTransportSelection.usePairedMacApi(
+            hasMacApiPairing = hasMacApiPairing(),
+            testRelaySelected = LinkSettings(app).mode == com.jarvis.companion.link.LinkMode.TEST_RELAY,
+            directReadOnlyCommand = directReadOnlyCommand,
+            routeIsMac = fastCommand == null && route is RequestRoute.Mac,
         )
         val requestTrace = PerformanceTrace.requestId(requestId)
         val submitStartedNs = System.nanoTime()

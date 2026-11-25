@@ -28,6 +28,36 @@ fun main() {
     check(com.jarvis.companion.ui.ThozhaPalette.Light.contrast(com.jarvis.companion.ui.ThozhaPalette.Light.text, com.jarvis.companion.ui.ThozhaPalette.Light.background) >= 7.0, "light theme primary text contrast is at least 7:1")
     check(com.jarvis.companion.ui.ThozhaPalette.Light.contrast(com.jarvis.companion.ui.ThozhaPalette.Light.textMuted, com.jarvis.companion.ui.ThozhaPalette.Light.background) >= 5.0, "light theme secondary text remains readable")
 
+    // --- transport selection -------------------------------------------------------------------------------
+    check(
+        !MacTransportSelection.usePairedMacApi(
+            hasMacApiPairing = true, testRelaySelected = true,
+            directReadOnlyCommand = true, routeIsMac = true,
+        ),
+        "explicit Link test-relay mode routes Home chat through the authenticated relay",
+    )
+    check(
+        MacTransportSelection.usePairedMacApi(
+            hasMacApiPairing = true, testRelaySelected = false,
+            directReadOnlyCommand = true, routeIsMac = false,
+        ),
+        "Local USB mode keeps the existing direct paired Mac status path",
+    )
+    check(
+        MacTransportSelection.usePairedMacApi(
+            hasMacApiPairing = true, testRelaySelected = false,
+            directReadOnlyCommand = false, routeIsMac = true,
+        ),
+        "Local USB mode keeps paired Mac API routing for ordinary Mac requests",
+    )
+    check(
+        !MacTransportSelection.usePairedMacApi(
+            hasMacApiPairing = false, testRelaySelected = false,
+            directReadOnlyCommand = true, routeIsMac = true,
+        ),
+        "a missing direct pairing never becomes an API route",
+    )
+
     // --- states -----------------------------------------------------------------------------------------------
     check(TaskStates.toneFor("completed") == TaskTone.COMPLETED, "state names are case-insensitive")
     check(TaskStates.toneFor("WAITING_APPROVAL") == TaskTone.WAITING, "approval wait is WAITING")
