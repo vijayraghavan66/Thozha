@@ -5,7 +5,6 @@ import base64
 import hashlib
 import json
 import os
-import contextlib
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +37,57 @@ def test_tls_identity_is_stable_private_and_hostname_bound(tmp_path):
     assert first.certificate_sha256 == "sha256:" + hashlib.sha256(certificate.public_bytes(serialization.Encoding.DER)).hexdigest()
     with pytest.raises(ValueError):
         ensure_local_gateway_tls_identity(tmp_path / "wifi", "attacker.local")
+
+
+def test_tls_listener_probe_requires_exact_stored_certificate_and_sends_no_http(tmp_path, monkeypatch):
+    identity = ensure_local_gateway_tls_identity(tmp_path / "wifi", "thozha-test.local")
+    certificate = x509.load_pem_x509_certificate(identity.certificate_path.read_bytes())
+    certificate_der = certificate.public_bytes(serialization.Encoding.DER)
+    captured = {}
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeTLS(FakeConnection):
+        def getpeercert(self, *, binary_form):
+            assert binary_form is True
+            return certificate_der
+
+    class FakeContext:
+        check_hostname = True
+        verify_mode = None
+
+        def wrap_socket(self, connection, *, server_hostname):
+            captured["connection"] = connection
+            captured["server_hostname"] = server_hostname
+            return FakeTLS()
+
+    context = FakeContext()
+    monkeypatch.setattr(wifi.ssl, "SSLContext", lambda _protocol: context)
+
+    def connect(address, *, timeout):
+        captured["address"] = address
+        captured["timeout"] = timeout
+        return FakeConnection()
+
+    monkeypatch.setattr(wifi.socket, "create_connection", connect)
+    assert wifi.verify_local_gateway_tls_listener(
+        "192.168.1.8", "thozha-test.local", 8443, identity.certificate_sha256,
+    )
+    assert captured["address"] == ("192.168.1.8", 8443)
+    assert captured["server_hostname"] == "thozha-test.local"
+    assert captured["timeout"] == 0.75
+    assert context.verify_mode == wifi.ssl.CERT_NONE
+    assert context.check_hostname is False
+    assert not hasattr(captured["connection"], "sendall")
+
+    assert not wifi.verify_local_gateway_tls_listener(
+        "192.168.1.8", "thozha-test.local", 8443, "sha256:" + "0" * 64,
+    )
 
 
 @pytest.mark.parametrize("host", ["10.1.2.3", "172.20.0.4", "192.168.1.10", "fd12::1"])
@@ -101,7 +151,7 @@ def test_helper_is_used_only_for_unavailable_networksetup_and_has_minimal_enviro
         if args[0] == "/usr/sbin/networksetup":
             return SimpleNamespace(returncode=0, stdout="You are not associated with an AirPort network.\n")
         assert args == [str(helper), "--ssid", "en0"]
-        assert kwargs["timeout"] == companion_wifi_gateway._SSID_HELPER_TIMEOUT_SECONDS
+        assert kwargs["timeout"] == wifi._SSID_HELPER_TIMEOUT_SECONDS
         assert kwargs["env"] == {"PATH": "/usr/bin:/bin"}
         assert kwargs["cwd"] == "/"
         assert kwargs["stdout"] == subprocess.PIPE
@@ -691,12 +741,23 @@ def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_BIND_HOST", "192.168.1.8")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_PORT", "8443")
+    helper = _make_ssid_helper(tmp_path)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
     monkeypatch.setattr(wifi, "wifi_interface_ipv4_address", lambda _interface: "192.168.1.8")
     monkeypatch.setattr(wifi, "local_gateway_hostname", lambda: "thozha-mac.local")
-    monkeypatch.setattr(
-        "openjarvis.server.supervisor_routes.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Current Wi-Fi Network: HomeNet\n"),
-    )
+
+    def ssid_commands(args, **kwargs):
+        if args == ["/usr/sbin/networksetup", "-getairportnetwork", "en0"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="You are not associated with an AirPort network.\n",
+            )
+        assert args == [str(helper), "--ssid", "en0"]
+        assert kwargs["cwd"] == "/"
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        return SimpleNamespace(returncode=0, stdout=b"HomeNet\n")
+
+    monkeypatch.setattr("openjarvis.server.supervisor_routes.subprocess.run", ssid_commands)
     monkeypatch.setattr(
         wifi,
         "ensure_local_gateway_tls_identity",
@@ -704,7 +765,7 @@ def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_
             hostname=hostname, port=port, certificate_sha256="sha256:" + "a" * 64,
         ),
     )
-    monkeypatch.setattr("socket.create_connection", lambda *_args, **_kwargs: contextlib.nullcontext())
+    monkeypatch.setattr(wifi, "verify_local_gateway_tls_listener", lambda *_args, **_kwargs: True)
     headers = {"Origin": "http://127.0.0.1:8000"}
     response = client.post(
         "/v1/jarvis/pair/invitations", headers=headers, json={"transport": "wifi"},
@@ -732,6 +793,39 @@ def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_
     monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
 
 
+def test_wifi_qr_fails_closed_when_ssid_helper_cannot_verify_network(tmp_path, monkeypatch):
+    client, store = _pairing_test_client(tmp_path, monkeypatch)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ENABLED", "1")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_INTERFACE", "en0")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_BIND_HOST", "192.168.1.8")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_PORT", "8443")
+    helper = _make_ssid_helper(tmp_path)
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
+    monkeypatch.setattr(wifi, "wifi_interface_ipv4_address", lambda _interface: "192.168.1.8")
+
+    def unavailable(args, **kwargs):
+        if args == ["/usr/sbin/networksetup", "-getairportnetwork", "en0"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="You are not associated with an AirPort network.\n",
+            )
+        return SimpleNamespace(returncode=78, stdout=b"")
+
+    monkeypatch.setattr("openjarvis.server.supervisor_routes.subprocess.run", unavailable)
+    response = client.post(
+        "/v1/jarvis/pair/invitations",
+        headers={"Origin": "http://127.0.0.1:8000"},
+        json={"transport": "wifi"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "The current Wi-Fi network is not the configured network"
+    assert response.json().get("qr_payload") is None
+    assert store._db.execute("SELECT COUNT(*) FROM device_pairings").fetchone()[0] == 0
+    store.close()
+    monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
 @pytest.mark.parametrize("failure", ["hostname", "certificate", "listener"])
 def test_wifi_qr_rejects_unverifiable_tls_endpoint(tmp_path, monkeypatch, failure):
     client, store = _pairing_test_client(tmp_path, monkeypatch)
@@ -753,11 +847,9 @@ def test_wifi_qr_rejects_unverifiable_tls_endpoint(tmp_path, monkeypatch, failur
         lambda directory, hostname, *, port: SimpleNamespace(hostname=hostname, port=port, certificate_sha256=fingerprint),
     )
     if failure == "listener":
-        def unavailable(*_args, **_kwargs):
-            raise OSError("connection refused")
-        monkeypatch.setattr("socket.create_connection", unavailable)
+        monkeypatch.setattr(wifi, "verify_local_gateway_tls_listener", lambda *_args, **_kwargs: False)
     else:
-        monkeypatch.setattr("socket.create_connection", lambda *_args, **_kwargs: contextlib.nullcontext())
+        monkeypatch.setattr(wifi, "verify_local_gateway_tls_listener", lambda *_args, **_kwargs: True)
 
     headers = {"Origin": "http://127.0.0.1:8000"}
     response = client.post(

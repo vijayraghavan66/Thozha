@@ -24,6 +24,7 @@ from openjarvis.server.companion_gateway import create_gateway_app
 from openjarvis.server.companion_wifi import (
     ensure_local_gateway_tls_identity,
     local_gateway_hostname,
+    read_wifi_ssid,
     validate_wifi_bind_host,
     wifi_interface_ipv4_address,
     wifi_gateway_enabled,
@@ -31,108 +32,13 @@ from openjarvis.server.companion_wifi import (
 
 _LOOPBACK_GATEWAY_HOST = "127.0.0.1"
 _LOOPBACK_GATEWAY_PORT = 8001
-_SSID_HELPER_TIMEOUT_SECONDS = 3
-_MAX_SSID_UTF8_BYTES = 32
-_MAX_SSID_HELPER_OUTPUT_BYTES = 64
-_NETWORKSETUP_PREFIX = "Current Wi-Fi Network:"
-_NETWORKSETUP_UNAVAILABLE = re.compile(
-    r"^You are not associated with (?:an )?(?:AirPort|Wi-Fi) network\.?$",
-    re.IGNORECASE,
-)
-
-
 def _wifi_address(interface: str) -> str:
     return wifi_interface_ipv4_address(interface)
 
 
 def _wifi_ssid(interface: str) -> str:
-    """Read the active SSID without logging it; optionally use the signed app helper.
-
-    `networksetup` is authoritative when it returns a valid result. The helper
-    is consulted only when that command reports the expected unassociated
-    state or returns a nonzero status. Unknown/malformed output and timeouts
-    fail closed instead of turning into an implicit manual attestation.
-    """
-    if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", interface):
-        return ""
-    try:
-        result = subprocess.run(
-            ["/usr/sbin/networksetup", "-getairportnetwork", interface],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="strict",
-            timeout=_SSID_HELPER_TIMEOUT_SECONDS,
-            env={"PATH": "/usr/bin:/bin"},
-        )
-    except (OSError, subprocess.SubprocessError, UnicodeError):
-        return ""
-
-    output = result.stdout
-    if result.returncode == 0:
-        if not output.strip():
-            return _wifi_ssid_from_helper(interface)
-        lines = output.splitlines()
-        if len(lines) == 1 and lines[0].startswith(_NETWORKSETUP_PREFIX):
-            value = lines[0][len(_NETWORKSETUP_PREFIX):]
-            if value.startswith(" "):
-                value = value[1:]
-            return _validate_ssid_line(value)
-        if len(lines) != 1 or not _NETWORKSETUP_UNAVAILABLE.fullmatch(lines[0]):
-            return ""
-    return _wifi_ssid_from_helper(interface)
-
-
-def _validate_ssid_line(value: str) -> str:
-    if not value or len(value.encode("utf-8")) > _MAX_SSID_UTF8_BYTES:
-        return ""
-    if any(ord(char) < 0x20 or ord(char) == 0x7f for char in value):
-        return ""
-    return value
-
-
-def _wifi_ssid_from_helper(interface: str) -> str:
-    helper = os.environ.get("JARVIS_COMPANION_WIFI_SSID_HELPER", "").strip()
-    if not helper:
-        return ""
-    executable = Path(helper)
-    if (
-        not executable.is_absolute()
-        or executable.is_symlink()
-        or not executable.is_file()
-        or not os.access(executable, os.X_OK)
-    ):
-        return ""
-    try:
-        result = subprocess.run(
-            [str(executable), "--ssid", interface],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=False,
-            timeout=_SSID_HELPER_TIMEOUT_SECONDS,
-            env={"PATH": "/usr/bin:/bin"},
-            cwd="/",
-            close_fds=True,
-            start_new_session=True,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if result.returncode != 0 or len(result.stdout) > _MAX_SSID_HELPER_OUTPUT_BYTES:
-        return ""
-    try:
-        output = result.stdout.decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
-        return ""
-    if output.endswith("\r\n"):
-        output = output[:-2]
-    elif output.endswith("\n"):
-        output = output[:-1]
-    if "\n" in output or "\r" in output:
-        return ""
-    return _validate_ssid_line(output)
+    """Read the same fail-closed SSID source used by signed QR issuance."""
+    return read_wifi_ssid(interface, runner=subprocess.run, environment=os.environ)
 
 
 def _network_matches_allowlist(interface: str, allowed_ssid: str) -> bool:
