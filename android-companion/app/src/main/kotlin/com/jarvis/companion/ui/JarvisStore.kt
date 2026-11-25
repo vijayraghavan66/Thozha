@@ -26,6 +26,7 @@ import com.jarvis.companion.localai.LocalAiRequestMode
 import com.jarvis.companion.localai.RequestRoute
 import com.jarvis.companion.localai.RequestRoutingPolicy
 import com.jarvis.companion.model.ApiException
+import com.jarvis.companion.model.LinkTaskResult
 import com.jarvis.companion.model.TaskArtifact
 import com.jarvis.companion.model.JarvisTask
 import com.jarvis.companion.model.Approval
@@ -319,8 +320,13 @@ class JarvisStore(private val app: Context) {
                 val id = row["message_id"] as? String ?: return@forEach
                 runCatching { jarvisApi.getLinkTaskStatus(id) }
                     .onSuccess { result ->
-                        if (!runtime.reconcileMissingApiTaskResult(id, result.taskId, result.state, result.summary)) {
-                            runtime.recordLocalTaskResult(id, result.taskId, result.state, result.summary)
+                        if (!runtime.reconcileMissingApiTaskResult(
+                                id, result.taskId, result.state, result.summary, result.finalResultAvailable,
+                            )
+                        ) {
+                            runtime.recordLocalTaskResult(
+                                id, result.taskId, result.state, result.summary, result.finalResultAvailable,
+                            )
                         }
                         if (pollMacEvents && result.taskId.matches(Regex("[0-9a-f]{32}")) && result.state.uppercase() in ActiveStates) {
                             runCatching { jarvisApi.getTaskDetail(result.taskId) }.onSuccess { detail ->
@@ -333,6 +339,9 @@ class JarvisStore(private val app: Context) {
                         }
                     }
                     .onFailure { failure ->
+                        if (row["result_delivery_state"] == "PENDING") {
+                            runCatching { runtime.deferTaskResultDelivery(id) }
+                        }
                         // Preserve an ambiguous in-flight state on transport errors; never report false failure.
                         if (failure is ApiException && failure.statusCode == 404) {
                             runtime.recordLocalTaskResult(id, "", "FAILED", "The Mac no longer has this task record.")
@@ -568,6 +577,9 @@ class JarvisStore(private val app: Context) {
                         refreshPersistedLinkState()
                         if (isTerminalTaskEvent(event.event.state, event.taskState)) {
                             closeLocalTaskEventWatch(event.idempotencyKey)
+                            if (event.event.state == "link_task.completed" || event.taskState == "COMPLETED") {
+                                refreshLocal()
+                            }
                         }
                     }
 
@@ -749,8 +761,13 @@ class JarvisStore(private val app: Context) {
             result.onSuccess { task ->
                 runCatching {
                     val runtime = LinkService.runtime(app)
-                    if (!runtime.reconcileMissingApiTaskResult(requestId, task.taskId, task.state, task.summary)) {
-                        runtime.recordLocalTaskResult(requestId, task.taskId, task.state, task.summary)
+                    if (!runtime.reconcileMissingApiTaskResult(
+                            requestId, task.taskId, task.state, task.summary, task.finalResultAvailable,
+                        )
+                    ) {
+                        runtime.recordLocalTaskResult(
+                            requestId, task.taskId, task.state, task.summary, task.finalResultAvailable,
+                        )
                     }
                 }
             }
@@ -1084,13 +1101,20 @@ class JarvisStore(private val app: Context) {
                 PerformanceTrace.mark(requestTrace, "mac_api_request_start", detail = "transport=$transport")
                 runCatching {
                     if (directReadOnlyCommand) {
-                        Triple(requestId, "COMPLETED", jarvisApi.getMacSystemInfo(requestTrace))
+                        LinkTaskResult(
+                            taskId = requestId,
+                            state = "COMPLETED",
+                            summary = jarvisApi.getMacSystemInfo(requestTrace),
+                            finalResultAvailable = true,
+                        )
                     } else {
-                        val result = jarvisApi.submitLinkTask(text, requestId, capabilityScope, requestTrace)
-                        Triple(result.taskId, result.state, result.summary)
+                        jarvisApi.submitLinkTask(text, requestId, capabilityScope, requestTrace)
                     }
                 }
-                    .onSuccess { (taskId, state, summary) ->
+                    .onSuccess { result ->
+                        val taskId = result.taskId
+                        val state = result.state
+                        val summary = result.summary
                         PerformanceTrace.mark(
                             requestTrace,
                             "mac_api_response",
@@ -1098,7 +1122,7 @@ class JarvisStore(private val app: Context) {
                             "state=$state",
                         )
                         val resultPersistStartedNs = System.nanoTime()
-                        runtime.recordLocalTaskResult(requestId, taskId, state, summary)
+                        runtime.recordLocalTaskResult(requestId, taskId, state, summary, result.finalResultAvailable)
                         PerformanceTrace.mark(
                             requestTrace,
                             "result_persisted",
@@ -1401,7 +1425,7 @@ class JarvisStore(private val app: Context) {
             resolved[previous.approvalId] = updated
             if (taskResult != null && taskResult.summary.isNotBlank()) {
                 LinkService.runtime(app).recordLocalTaskResult(
-                    requestId, taskResult.taskId, taskResult.state, taskResult.summary,
+                    requestId, taskResult.taskId, taskResult.state, taskResult.summary, taskResult.finalResultAvailable,
                 )
             }
         }

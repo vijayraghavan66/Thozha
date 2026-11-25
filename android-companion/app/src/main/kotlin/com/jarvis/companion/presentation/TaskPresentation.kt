@@ -148,6 +148,18 @@ fun shouldReconcileApiTask(record: Map<String, Any?>, nowMs: Long = System.curre
     val state = (record["state"] as? String)?.trim()?.uppercase().orEmpty()
     if (state in setOf("CREATED", "QUEUED", "RUNNING", "PLANNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "SENT", "UNCONFIRMED")) return true
     val summary = (record["summary"] as? String).orEmpty().trim()
+    if (state == "COMPLETED") {
+        if (record["result_delivery_state"] == "PENDING") {
+            val retryAfterMs = (record["result_delivery_retry_after_ms"] as? Number)?.toLong() ?: 0L
+            return nowMs >= retryAfterMs
+        }
+        if (summary in setOf(
+                "Task completed",
+                "Execution completed; retrieving the final answer.",
+                "Task completed, but the Mac returned no result text.",
+            )
+        ) return true
+    }
     if (state == "COMPLETED" && summary.startsWith("The exact approved plan is active. Use capability_id=")) return true
     val createdAt = (record["created_at_unix_ms"] as? Number)?.toLong() ?: return false
     return state == "FAILED" && record["task_id"].let { it == null || it == "" } &&

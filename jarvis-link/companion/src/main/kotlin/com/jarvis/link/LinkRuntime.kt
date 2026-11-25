@@ -460,6 +460,17 @@ class LinkRuntime(
             conversationRow["updated_at_unix_ms"] = eventTime
             conversationRow["task_id"] = supervisorTaskId
             conversationRow["progress_seq"] = sequence
+            conversationRow["execution_state"] = normalizedState
+            if (
+                normalizedState == "COMPLETED" && previousEntry["transport"] == "api" &&
+                previousEntry["lookup_link_status"] != false
+            ) {
+                // WSS events are intentionally sanitized and do not carry model output.
+                // Completion therefore starts a separate result-delivery phase.
+                conversationRow["result_delivery_state"] = "PENDING"
+                conversationRow["result_delivery_retry_after_ms"] = 0L
+                conversationRow["summary"] = "Execution completed; retrieving the final answer."
+            }
         }
         conversations[entryIndex] = conversationRow
 
@@ -636,6 +647,9 @@ class LinkRuntime(
             "transport" to transport,
             "capability_scope" to capabilityScope,
             "lookup_link_status" to (lookupLinkStatus && executionTarget == "MAC"),
+            "execution_state" to "CREATED",
+            "result_delivery_state" to if (transport == "api" && lookupLinkStatus && executionTarget == "MAC") "PENDING" else "NOT_REQUIRED",
+            "result_delivery_retry_after_ms" to 0L,
             "updated_at_unix_ms" to now(),
         ))
         save(mapOf("conversation" to entries.takeLast(100)))
@@ -651,13 +665,37 @@ class LinkRuntime(
     }
 
     /** Records the Mac's actual supervisor result or the last known task state. */
-    fun recordLocalTaskResult(idempotencyKey: String, taskId: String, state: String, summary: String) {
-        applyToConversation(idempotencyKey, taskId, state.uppercase(), summary)
+    fun recordLocalTaskResult(
+        idempotencyKey: String,
+        taskId: String,
+        state: String,
+        summary: String,
+        finalResultAvailable: Boolean? = null,
+    ) {
+        applyToConversation(idempotencyKey, taskId, state.uppercase(), summary, finalResultAvailable)
         recordTaskLifecycle(idempotencyKey, taskId, state, summary)
     }
 
+    /** Back off an unsuccessful final-result fetch without treating execution as failed. */
+    fun deferTaskResultDelivery(idempotencyKey: String, delayMs: Long = 10_000L) = synchronized(stateLock) {
+        require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid request ID" }
+        require(delayMs in 1_000L..300_000L) { "invalid result retry delay" }
+        val entries = conversation().map { entry ->
+            if (entry["message_id"] == idempotencyKey && entry["result_delivery_state"] == "PENDING") {
+                LinkedHashMap(entry).apply { put("result_delivery_retry_after_ms", now() + delayMs) }
+            } else entry
+        }
+        save(mapOf("conversation" to entries))
+    }
+
     /** Corrects only the exact local 404 terminal marker after a fresh authenticated Mac status response. */
-    fun reconcileMissingApiTaskResult(idempotencyKey: String, taskId: String, state: String, summary: String): Boolean {
+    fun reconcileMissingApiTaskResult(
+        idempotencyKey: String,
+        taskId: String,
+        state: String,
+        summary: String,
+        finalResultAvailable: Boolean? = null,
+    ): Boolean {
         require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid task idempotency key" }
         require(taskId.matches(Regex("[0-9a-f]{32}"))) { "invalid supervisor task ID" }
         val normalizedState = state.trim().uppercase()
@@ -674,7 +712,14 @@ class LinkRuntime(
                     LinkedHashMap(entry).apply {
                         put("task_id", taskId)
                         put("state", normalizedState)
-                        put("summary", summary)
+                        put("execution_state", normalizedState)
+                        put("summary", if (normalizedState == "COMPLETED" && finalResultAvailable == false) {
+                            "Execution completed; waiting for the complete answer."
+                        } else summary)
+                        if (normalizedState == "COMPLETED" && finalResultAvailable != null) {
+                            put("result_delivery_state", if (finalResultAvailable) "DELIVERED" else "PENDING")
+                            put("result_delivery_retry_after_ms", if (finalResultAvailable) 0L else now() + 10_000L)
+                        }
                         put("updated_at_unix_ms", now())
                     }
                 } else entry
@@ -704,10 +749,26 @@ class LinkRuntime(
         return linkedMapOf("message_id" to result.messageId, "queued_offline" to result.queuedOffline)
     }
 
-    private fun applyToConversation(messageId: String, taskId: String, state: String, summary: String) = synchronized(stateLock) {
+    private fun applyToConversation(
+        messageId: String,
+        taskId: String,
+        state: String,
+        summary: String,
+        finalResultAvailable: Boolean? = null,
+    ) = synchronized(stateLock) {
         val entries = conversation().map { entry ->
             if (entry["message_id"] == messageId && !isStaleAfterTerminal(entry, state)) LinkedHashMap(entry).apply {
-                put("state", state); put("summary", summary); put("task_id", taskId); put("updated_at_unix_ms", now())
+                put("state", state)
+                put("execution_state", state)
+                put("summary", if (state == "COMPLETED" && finalResultAvailable == false) {
+                    "Execution completed; waiting for the complete answer."
+                } else summary)
+                put("task_id", taskId)
+                put("updated_at_unix_ms", now())
+                if (state == "COMPLETED" && finalResultAvailable != null) {
+                    put("result_delivery_state", if (finalResultAvailable) "DELIVERED" else "PENDING")
+                    put("result_delivery_retry_after_ms", if (finalResultAvailable) 0L else now() + 10_000L)
+                }
             } else entry
         }
         save(mapOf("conversation" to entries))

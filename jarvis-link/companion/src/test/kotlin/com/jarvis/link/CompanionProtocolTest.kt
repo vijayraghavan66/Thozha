@@ -41,6 +41,7 @@ object CompanionProtocolTest {
         developmentPlanApprovalRequiresCompleteDigestBoundDetails()
         localTaskHistoryIsRestartSafe()
         taskEventStreamPersistsEventAndCursorAtomically()
+        completedWssEventSeparatesExecutionFromResultDelivery()
         authenticatedTaskStatusCorrectsOnlyTheLocalMissingRecordMarker()
         fastReadOnlyApiRequestPersistsItsNoLinkReconciliationPolicy()
         progressSequenceDeduplicatesOutOfOrderEvents()
@@ -682,6 +683,37 @@ object CompanionProtocolTest {
         val afterFailedWrite = runtime()
         check(afterFailedWrite.taskEventStreamCursor(requestId) == 20L)
         check(afterFailedWrite.taskEventHistory().none { it["event_id"] == "wss:$requestId:21" })
+        directory.deleteRecursively()
+    }
+
+    private fun completedWssEventSeparatesExecutionFromResultDelivery() {
+        val directory = java.nio.file.Files.createTempDirectory("jarvis-wss-result-delivery").toFile()
+        val runtime = LinkRuntime(
+            keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+            state = FileLinkStateStore(File(directory, "state.json")),
+            storeDir = directory,
+            now = { 1_800_000_000_000L },
+        )
+        val requestId = "a1".repeat(16)
+        val supervisorTaskId = "b2".repeat(16)
+        runtime.recordLocalTaskRequest(requestId, "Explain Java", transport = "api")
+        runtime.persistTaskEventStreamEvent(
+            requestId, supervisorTaskId, 1L, "link_task.completed", "2026-11-25T10:00:00Z",
+            "COMPLETED", "Execution complete; retrieving the final answer.",
+        )
+        val execution = runtime.conversation().single()
+        check(execution["state"] == "COMPLETED")
+        check(execution["execution_state"] == "COMPLETED")
+        check(execution["result_delivery_state"] == "PENDING")
+
+        runtime.recordLocalTaskResult(
+            requestId, supervisorTaskId, "COMPLETED", "Java is a high-level programming language.",
+            finalResultAvailable = true,
+        )
+        val delivered = runtime.conversation().single()
+        check(delivered["state"] == "COMPLETED")
+        check(delivered["result_delivery_state"] == "DELIVERED")
+        check(delivered["summary"] == "Java is a high-level programming language.")
         directory.deleteRecursively()
     }
 

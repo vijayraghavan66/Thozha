@@ -219,6 +219,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             state = state,
             summary = linkTaskSummary(state, resultText, summary),
             resultDigest = json.optString("result_digest").takeUnless { json.isNull("result_digest") || it == "null" }.orEmpty(),
+            finalResultAvailable = !resultText.isNullOrBlank(),
         )
     }
 
