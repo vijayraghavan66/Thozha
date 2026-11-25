@@ -62,7 +62,10 @@ class AndroidNsdLocalMacDiscovery(context: Context) : LocalMacDiscoveryProvider 
         @Volatile private var status = LocalMacDiscoveryStatus.IDLE
 
         private val discoveryListener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(serviceType: String) = updateStatus(LocalMacDiscoveryStatus.DISCOVERING)
+            override fun onDiscoveryStarted(serviceType: String) {
+                diagnostic("discovery_started", "type_matches=${isOurServiceType(serviceType)}")
+                updateStatus(LocalMacDiscoveryStatus.DISCOVERING)
+            }
 
             override fun onDiscoveryStopped(serviceType: String) {
                 if (!closed.get()) updateStatus(LocalMacDiscoveryStatus.IDLE)
@@ -79,7 +82,11 @@ class AndroidNsdLocalMacDiscovery(context: Context) : LocalMacDiscoveryProvider 
             }
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                if (closed.get() || !isOurServiceType(serviceInfo.serviceType)) return
+                if (closed.get()) return
+                if (!isOurServiceType(serviceInfo.serviceType)) {
+                    diagnostic("service_ignored", "type_matches=false")
+                    return
+                }
                 val id = ThozhaDnsSdContract.serviceId(serviceInfo.serviceName, serviceInfo.serviceType)
                 val epoch: Long
                 val shouldAnnounce: Boolean
