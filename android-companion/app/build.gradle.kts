@@ -18,6 +18,18 @@ val jarvisLabRoot = generateSequence(rootProject.projectDir) { it.parentFile }
     ?: error("Could not locate Jarvis-Lab/jarvis-link companion sources.")
 val jarvisLinkRoot = jarvisLabRoot.resolve("jarvis-link")
 
+// The official TDLib Java bindings load libtdjni at runtime. This local, ignored
+// ARM64 build input is not safe to omit: packaging a seemingly successful APK
+// without it makes Telegram crash on first Client.createNativeClient().
+tasks.named("preBuild").configure {
+    doFirst {
+        val tdlibNative = layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/libtdjni.so").asFile
+        check(tdlibNative.isFile && tdlibNative.length() > 0L) {
+            "Missing TDLib ARM64 runtime at app/src/main/jniLibs/arm64-v8a/libtdjni.so. Restore the locally provisioned official TDLib build before assembling; do not ship without it."
+        }
+    }
+}
+
 android {
     namespace = "com.jarvis.companion"
     compileSdk = 37
