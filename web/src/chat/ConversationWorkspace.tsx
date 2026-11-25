@@ -22,6 +22,7 @@ import {
 } from '../api/client';
 import type { WebConversationStreamMode } from '../../../contracts/web-api/v1';
 import { Chip, Loading, Notice } from '../components/ui';
+import { VoiceCall } from '../voice/VoiceCall';
 import { formatDate, muted, outline } from '../components/styles';
 import { MarkdownMessage } from './MarkdownMessage';
 import { LivingPulseMark } from '../auth/LivingPulseStartup';
@@ -1298,6 +1299,12 @@ export default function ConversationWorkspace({
                 className="th-composer-input"
               />
               <div className="th-composer-toolbar">
+                <VoiceCall
+                  api={api}
+                  conversationId={id}
+                  disabled={composerDisabled}
+                  active={active}
+                />
                 <button
                   type="button"
                   className="th-composer-attach"

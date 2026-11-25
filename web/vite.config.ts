@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Plugin, ProxyOptions } from 'vite';
+import { localVoice } from './voice/plugin';
 
 const upstreamValue = process.env.THOZHA_WEB_UPSTREAM;
 const upstream = upstreamValue ? new URL(upstreamValue) : undefined;
@@ -43,7 +44,7 @@ const proxy: Record<string, ProxyOptions> = upstream
   ? {
       [webPaths]: {
         target: upstream.origin,
-        changeOrigin: false,
+        changeOrigin: process.env.THOZHA_VOICE_DEV === '1',
         configure(server) {
           server.on('proxyRes', response => {
             response.headers['cache-control'] = 'no-store';
@@ -82,7 +83,12 @@ const webApiGuard: Plugin = {
 };
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), webApiGuard],
+  plugins: [
+    react(),
+    tailwindcss(),
+    ...(process.env.THOZHA_VOICE_DEV === '1' ? [localVoice()] : []),
+    webApiGuard,
+  ],
   server: {
     host: '127.0.0.1',
     port: 5174,
