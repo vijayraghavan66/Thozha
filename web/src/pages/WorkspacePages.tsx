@@ -419,7 +419,7 @@ export function Settings({
         title="Settings"
         desc="Manage this browser session, your visual preferences and integration visibility."
       />
-      <div className="grid max-w-[1100px] min-w-0 items-start gap-4 xl:grid-cols-2">
+      <div className="grid min-w-0 items-start gap-4 xl:grid-cols-2">
         <div className="min-w-0 space-y-4">
           <Panel cls="p-5">
             <h2 className="font-semibold">Visual preferences</h2>

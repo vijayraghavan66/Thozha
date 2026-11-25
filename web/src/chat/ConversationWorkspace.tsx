@@ -22,9 +22,10 @@ import {
 } from '../api/client';
 import type { WebConversationStreamMode } from '../../../contracts/web-api/v1';
 import { Chip, Loading, Notice } from '../components/ui';
-import { formatDate, muted, outline, solid } from '../components/styles';
+import { formatDate, muted, outline } from '../components/styles';
 import { MarkdownMessage } from './MarkdownMessage';
 import { LivingPulseMark } from '../auth/LivingPulseStartup';
+import { WorkspaceIcon } from '../components/WorkspaceIcon';
 import {
   conversationListKey as listKey,
   detailKey,
@@ -118,11 +119,11 @@ function AttachmentPreview({ file, mediaType }: { file: File; mediaType: WebAtta
     return () => URL.revokeObjectURL(next);
   }, [file, mediaType]);
   if (mediaType !== 'application/pdf' && url)
-    return <img src={url} alt="" className="h-11 w-11 shrink-0 rounded-md object-cover" />;
+    return <img src={url} alt="" className="h-9 w-9 shrink-0 rounded-md object-cover" />;
   return (
     <span
       aria-hidden="true"
-      className="grid h-11 w-11 shrink-0 place-items-center rounded-md border border-white/10 bg-white/[.04] text-[10px] font-medium text-[#c4c5cb]"
+      className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-white/10 bg-white/[.04] text-[10px] font-medium text-[#c4c5cb]"
     >
       {mediaType === 'application/pdf' ? 'PDF' : 'IMG'}
     </span>
@@ -146,14 +147,12 @@ type LiveResponse = {
 function Message({
   message,
   cancellation,
-  cancel,
   reuse,
   live,
   attachments,
 }: {
   message: WebMessage;
   cancellation: boolean;
-  cancel?: () => void;
   reuse?: () => void;
   live?: LiveResponse;
   attachments?: WebAttachmentMetadata[];
@@ -204,18 +203,6 @@ function Message({
                     ? 'Response queued…'
                     : 'Generating response…'}
           </span>
-          {!cancellation && (
-            <button
-              type="button"
-              className="grid size-8 place-items-center rounded-md text-[#c7c8ce] hover:bg-white/10 disabled:opacity-50"
-              onClick={cancel}
-              disabled={!cancel}
-              aria-label="Stop generating"
-              title="Stop generating"
-            >
-              <span aria-hidden="true" className="size-2.5 rounded-[2px] bg-current" />
-            </button>
-          )}
         </div>
       )}
       {isPendingResponse(message.status) && !cancellation && live?.partial && (
@@ -377,6 +364,22 @@ export default function ConversationWorkspace({
   );
   const canWrite = Boolean(
     !archived && connected && (writingNew || (id && snapshot && !detail.isError))
+  );
+  useLayoutEffect(() => {
+    const textarea = composer.current;
+    if (!active || !textarea) return;
+    function resize() {
+      if (!textarea) return;
+      textarea.style.height = 'auto';
+      textarea.style.height = `${Math.min(160, textarea.scrollHeight)}px`;
+    }
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(textarea, { box: 'border-box' });
+    return () => observer.disconnect();
+  }, [active, draft, id, writingNew]);
+  const generatingMessage = messages?.find(
+    message => message.role === 'assistant' && isPendingResponse(message.status)
   );
 
   useLayoutEffect(() => {
@@ -963,11 +966,6 @@ export default function ConversationWorkspace({
                   cancellation={pendingCancellation.has(message.id)}
                   attachments={message.attachments}
                   live={live?.responseId === message.id ? live : undefined}
-                  cancel={
-                    connected && id && !cancel.isPending
-                      ? () => cancel.mutate({ conversationId: id, responseId: message.id })
-                      : undefined
-                  }
                   reuse={
                     firstPrompt && id && canWrite && !composerDisabled
                       ? () => {
@@ -1031,11 +1029,7 @@ export default function ConversationWorkspace({
             </div>
           )}
           {!archived && (id || writingNew) && (
-            <form
-              data-intro-composer
-              onSubmit={submit}
-              className="m-4 rounded-2xl border border-white/20 bg-[#222329] p-2"
-            >
+            <form data-intro-composer onSubmit={submit} className="th-chat-composer">
               {paletteOpen && (
                 <div className="mb-2 rounded-xl border border-white/15 bg-[#1c1d22] px-2 py-1 text-xs">
                   <p className="px-2 py-1 text-[#c4c5cb]">Composer commands</p>
@@ -1091,12 +1085,9 @@ export default function ConversationWorkspace({
                 </div>
               )}
               {selectedAttachments.length > 0 && (
-                <ul aria-label="Attachments to send" className="space-y-2 px-2 pt-2">
+                <ul aria-label="Attachments to send" className="th-composer-attachments">
                   {selectedAttachments.map(attachment => (
-                    <li
-                      key={attachment.key}
-                      className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[.04] px-3 py-2"
-                    >
+                    <li key={attachment.key} className="th-composer-attachment">
                       <AttachmentPreview file={attachment.file} mediaType={attachment.mediaType} />
                       <div className="min-w-0 flex-1">
                         <p
@@ -1134,7 +1125,7 @@ export default function ConversationWorkspace({
                       {attachment.status === 'uploading' ? (
                         <button
                           type="button"
-                          className={outline}
+                          className="th-attachment-remove"
                           onClick={() => activeStream.current?.abort()}
                         >
                           Cancel upload
@@ -1142,11 +1133,11 @@ export default function ConversationWorkspace({
                       ) : (attachment.status === 'ready' || attachment.canRemove) && !sending ? (
                         <button
                           type="button"
-                          className={outline}
+                          className="th-attachment-remove"
                           aria-label={`Remove ${attachment.file.name}`}
                           onClick={() => removeAttachment(attachment.key)}
                         >
-                          Remove
+                          <span aria-hidden="true">×</span>
                         </button>
                       ) : null}
                     </li>
@@ -1155,7 +1146,7 @@ export default function ConversationWorkspace({
               )}
               <textarea
                 ref={composer}
-                rows={2}
+                rows={1}
                 maxLength={maxMessageLength}
                 value={draft}
                 readOnly={!canWrite || command.isPending || sending || Boolean(issue?.uncertain)}
@@ -1201,44 +1192,91 @@ export default function ConversationWorkspace({
                 aria-activedescendant={
                   paletteOpen && highlighted ? `${paletteId}-${highlighted.name}` : undefined
                 }
-                className="min-h-[48px] w-full resize-y rounded-lg bg-transparent px-3 py-2 text-xs leading-6 text-white placeholder:text-[#a4a5af]"
+                className="th-composer-input"
               />
-              <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    className={outline}
-                    disabled={composerDisabled}
-                    onClick={() => attachmentInput.current?.click()}
-                  >
-                    Attach file
-                  </button>
-                  <span id={fieldId} className="text-[10px] text-[#a4a5af]">
-                    PNG, JPEG, or PDF · 8 MiB each · up to 5 per message
-                  </span>
-                </div>
-                <span className="text-[10px] text-[#a4a5af]">
-                  {paletteOpen
-                    ? 'Arrow keys to navigate · Enter or Tab to select · Escape to close'
-                    : 'Enter to send · Shift+Enter for newline · / for commands'}
-                </span>
+              <div className="th-composer-toolbar">
                 <button
-                  disabled={
-                    composerDisabled ||
-                    !draft.trim() ||
-                    (writingNew && createUncertain.current && !slash)
-                  }
-                  className={solid}
-                  type="submit"
+                  type="button"
+                  className="th-composer-attach"
+                  aria-label="Attach file"
+                  title="Attach PNG, JPEG, or PDF · up to 8 MiB each"
+                  disabled={composerDisabled}
+                  onClick={() => attachmentInput.current?.click()}
                 >
-                  {sending || command.isPending
-                    ? 'Sending…'
-                    : slash?.command?.name === 'task'
-                      ? 'Review task'
-                      : slash
-                        ? 'Run command'
-                        : 'Send ↑'}
+                  <WorkspaceIcon name="attach" />
                 </button>
+                <span id={fieldId} className="sr-only">
+                  PNG, JPEG, or PDF · 8 MiB each · up to 5 per message . Enter to send. Shift+Enter
+                  for a new line. Slash for commands.
+                </span>
+                <details className="th-composer-help">
+                  <summary aria-label="Message help" title="Attachments and keyboard shortcuts">
+                    ?
+                  </summary>
+                  <div>
+                    <p>Enter to send · Shift+Enter for a new line · / for commands</p>
+                    <p>PNG, JPEG, or PDF · 8 MiB each · up to 5 per message.</p>
+                    <p>
+                      The host extracts printed text. Diagrams and handwriting may not be readable.
+                    </p>
+                  </div>
+                </details>
+                <span className="th-composer-hint">
+                  {paletteOpen
+                    ? '↑↓ select · Tab complete · Esc close'
+                    : pending
+                      ? 'Generating…'
+                      : sending
+                        ? 'Sending…'
+                        : 'Enter to send'}
+                </span>
+                {generatingMessage && id ? (
+                  <button
+                    className="th-composer-send"
+                    type="button"
+                    disabled={
+                      !connected ||
+                      !connected ||
+                      cancel.isPending ||
+                      pendingCancellation.has(generatingMessage.id)
+                    }
+                    onClick={() =>
+                      cancel.mutate({ conversationId: id, responseId: generatingMessage.id })
+                    }
+                    aria-label="Stop generating"
+                    title="Request cancellation"
+                  >
+                    <WorkspaceIcon name="stop" />
+                  </button>
+                ) : (
+                  <button
+                    disabled={
+                      composerDisabled ||
+                      !draft.trim() ||
+                      (writingNew && createUncertain.current && !slash)
+                    }
+                    className="th-composer-send"
+                    type="submit"
+                    aria-label={
+                      sending || command.isPending
+                        ? 'Sending…'
+                        : slash?.command?.name === 'task'
+                          ? 'Review task'
+                          : slash
+                            ? 'Run command'
+                            : 'Send ↑'
+                    }
+                    title={
+                      slash?.command?.name === 'task'
+                        ? 'Review task'
+                        : slash
+                          ? 'Run command'
+                          : 'Send message'
+                    }
+                  >
+                    <WorkspaceIcon name="send" />
+                  </button>
+                )}
               </div>
             </form>
           )}

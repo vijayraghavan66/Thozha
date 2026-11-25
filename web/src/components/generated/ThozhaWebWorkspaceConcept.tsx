@@ -14,10 +14,11 @@ import { errorText } from '../../api/client';
 import { Settings } from '../../pages/WorkspacePages';
 import { useApprovals, useDevices, useTasks, taskHref, httpStatus } from '../../pages/controlState';
 import { Approvals } from '../../pages/Approvals';
-import { Chip, Loading, Modal, Notice } from '../ui';
+import { Chip, Head, Loading, Modal, Notice } from '../ui';
 import { LivingPulseMark } from '../../auth/LivingPulseStartup';
 import { AnchoredSurface, NotificationPanel, TravelingSurface } from '../LiquidSurface';
 import { muted } from '../styles';
+import { WorkspaceIcon } from '../WorkspaceIcon';
 import {
   ConversationConfirmation,
   ConversationHistory,
@@ -96,9 +97,12 @@ function WorkspaceNavigation({
   return (
     <nav ref={nav} aria-label="Main navigation" className="relative space-y-1">
       <TravelingSurface container={nav} selection={page} />
-      {sections.map(([name, slug, symbol], index) => (
-        <div key={slug} className="relative z-[1]">
-          {(index === 3 || index === 6 || index === 8) && !collapsed && (
+      {sections.map(([name, slug], index) => (
+        <div
+          key={slug}
+          className={`relative z-[1] ${!drawer && [3, 6, 8].includes(index) ? 'th-nav-group-start' : ''}`}
+        >
+          {(index === 3 || index === 6 || index === 8) && drawer && !collapsed && (
             <div className="px-3 pb-2 pt-5 text-[10px] tracking-[.18em] text-[#a4a5af]">
               {index === 3 ? 'ORGANIZE' : index === 6 ? 'LAB & TOOLS' : 'PREFERENCES'}
             </div>
@@ -106,8 +110,8 @@ function WorkspaceNavigation({
           <a
             href={`#/${slug}`}
             data-dialog-focus={drawer && index === 0 ? '' : undefined}
-            title={collapsed ? name : undefined}
-            aria-label={collapsed ? name : undefined}
+            title={name === 'AI Workspace' ? 'Chats' : name}
+            aria-label={name}
             onClick={onNavigate}
             aria-current={page === name ? 'page' : undefined}
             className={`flex w-full items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 text-left text-[12px] transition-colors duration-200 ease-out ${collapsed ? 'justify-center px-1 py-2.5' : ''} ${
@@ -116,10 +120,8 @@ function WorkspaceNavigation({
                 : 'text-[#a0a2a9] hover:bg-white/[.06] hover:text-white'
             }`}
           >
-            <span aria-hidden="true" className="w-5 text-center text-lg font-light">
-              {symbol}
-            </span>
-            {!collapsed && <span>{name}</span>}
+            <WorkspaceIcon name={name} />
+            <span className="th-nav-label">{name === 'AI Workspace' ? 'Chats' : name}</span>
           </a>
         </div>
       ))}
@@ -130,12 +132,14 @@ function WorkspaceNavigation({
 function ProfileMenu({
   placement,
   userId,
+  displayName,
   expiresAt,
   onSettings,
   logout,
 }: {
   placement: 'rail' | 'header';
   userId: string;
+  displayName: string;
   expiresAt: number;
   onSettings: () => void;
   logout: () => void;
@@ -145,7 +149,7 @@ function ProfileMenu({
   const anchor = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
-  const initial = Array.from(userId)[0]?.toUpperCase() ?? 'T';
+  const initial = Array.from(displayName)[0]?.toUpperCase() ?? 'V';
 
   useLayoutEffect(() => {
     if (open) menu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
@@ -208,9 +212,32 @@ function ProfileMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={id}
+        title={`${displayName} — profile and workspace`}
         onClick={() => setOpen(value => !value)}
       >
-        <span aria-hidden="true">{initial}</span>
+        <span className="th-profile-avatar" aria-hidden="true">
+          {initial}
+        </span>
+        {placement === 'rail' && (
+          <>
+            <span className="th-profile-copy">
+              <span>{displayName}</span>
+              <span>Personal workspace</span>
+            </span>
+            <svg
+              className="th-profile-indicator"
+              aria-hidden="true"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+            >
+              <path d="m8 10 4-4 4 4 M8 14l4 4 4-4" />
+            </svg>
+          </>
+        )}
       </button>
       <AnchoredSurface id={id} open={open} className="th-profile-surface">
         <div
@@ -228,11 +255,14 @@ function ProfileMenu({
               {initial}
             </span>
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{userId}</p>
-              <p className="mt-1 text-[10px] text-[#a4a5af]">Verified Web session</p>
+              <p className="truncate text-sm font-medium">{displayName}</p>
+              <p className="mt-1 text-[11px] text-[#a4a5af]">Verified Web owner</p>
             </div>
           </div>
-          <p className="px-2 py-3 text-[10px] leading-5 text-[#a4a5af]">
+          <p className="px-2 pt-3 text-xs leading-5 text-[#a4a5af]">
+            Verified owner: <span className="break-all">{userId}</span>
+          </p>
+          <p className="px-2 py-3 text-[11px] leading-5 text-[#a4a5af]">
             Session expires {new Date(expiresAt * 1000).toLocaleString()}
           </p>
           <button
@@ -245,7 +275,7 @@ function ProfileMenu({
               onSettings();
             }}
           >
-            <span aria-hidden="true">⚙</span>
+            <WorkspaceIcon name="Settings" />
             Preferences
           </button>
           <button
@@ -290,7 +320,7 @@ function MobileNavigation({
           ['Approvals', 'Approvals', '✓'],
           ['Explore', 'Explore', '◇'],
         ] as const
-      ).map(([label, destination, icon]) => {
+      ).map(([label, destination]) => {
         const active = destination === 'Explore' ? explore : page === destination;
         return (
           <button
@@ -304,7 +334,7 @@ function MobileNavigation({
               else onNavigate(destination);
             }}
           >
-            <span aria-hidden="true">{icon}</span>
+            <WorkspaceIcon name={destination} />
             {label}
           </button>
         );
@@ -351,10 +381,18 @@ export function ThozhaWebWorkspaceConcept({
   const [visitedChat, setVisitedChat] = useState(
     () => currentPage(window.location.hash) === 'AI Workspace'
   );
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('thozha-web.navigation.v1') === 'collapsed';
+    } catch {
+      return false;
+    }
+  });
+  const [navigationProblem, setNavigationProblem] = useState('');
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [mobileHistory, setMobileHistory] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 1199px)').matches);
+  const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 767px)').matches);
   const [inspectorSlot, setInspectorSlot] = useState<HTMLDivElement | null>(null);
   const [chatTitleSlot, setChatTitleSlot] = useState<HTMLDivElement | null>(null);
   const [dialog, setDialog] = useState<'navigation' | null>(null);
@@ -381,7 +419,29 @@ export function ThozhaWebWorkspaceConcept({
   const matching = sections.filter(([name]) =>
     name.toLowerCase().includes(query.trim().toLowerCase())
   );
-  const historyVisible = page === 'AI Workspace' && (compact ? mobileHistory : !sidebarCollapsed);
+  const historyVisible = page === 'AI Workspace' && (compact ? mobileHistory : historyOpen);
+  useEffect(() => {
+    if (!historyVisible || compact) return;
+    function dismiss(event: PointerEvent | KeyboardEvent) {
+      if (event instanceof KeyboardEvent) {
+        if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return;
+        if (document.querySelector('.th-history-row[data-actions="true"]')) return;
+        setHistoryOpen(false);
+        document.querySelector<HTMLButtonElement>('.th-v4-history-restore')?.focus();
+      } else if (
+        event.target instanceof Element &&
+        !event.target.closest('.th-v4-history-pane, .th-v4-history-restore, dialog')
+      ) {
+        setHistoryOpen(false);
+      }
+    }
+    document.addEventListener('pointerdown', dismiss);
+    document.addEventListener('keydown', dismiss);
+    return () => {
+      document.removeEventListener('pointerdown', dismiss);
+      document.removeEventListener('keydown', dismiss);
+    };
+  }, [historyVisible, compact]);
   const conversations = useQuery({
     queryKey: conversationListKey,
     queryFn: ({ signal }) => api.list(signal),
@@ -447,7 +507,11 @@ export function ThozhaWebWorkspaceConcept({
     setConversationRename(null);
     requestAnimationFrame(() => {
       const fallback = conversationFallback.current;
-      (fallback?.isConnected ? fallback : main.current)?.focus({ preventScroll: true });
+      const target =
+        fallback?.isConnected && !fallback.closest('[inert], [hidden]')
+          ? fallback
+          : (document.querySelector<HTMLButtonElement>('.th-v4-history-restore') ?? main.current);
+      target?.focus({ preventScroll: true });
     });
   }
 
@@ -476,7 +540,7 @@ export function ThozhaWebWorkspaceConcept({
     main.current?.scrollTo({ top: 0, behavior: 'instant' });
   }, [page]);
   useEffect(() => {
-    const query = window.matchMedia('(max-width: 1199px)');
+    const query = window.matchMedia('(max-width: 767px)');
     function resize() {
       setCompact(query.matches);
       if (query.matches) setInspectorOpen(false);
@@ -602,15 +666,29 @@ export function ThozhaWebWorkspaceConcept({
   }
 
   function closeMobileHistory() {
-    if (compact && mobileHistory) {
+    if (document.activeElement?.closest('.th-v4-history-pane')) {
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       requestAnimationFrame(() =>
         document
-          .querySelector<HTMLButtonElement>('[aria-label="Back to conversations"]')
+          .querySelector<HTMLButtonElement>('.th-v4-history-restore')
           ?.focus({ preventScroll: true })
       );
     }
     setMobileHistory(false);
+    setHistoryOpen(false);
+  }
+
+  function toggleNavigation() {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    try {
+      localStorage.setItem('thozha-web.navigation.v1', next ? 'collapsed' : 'expanded');
+      setNavigationProblem('');
+    } catch {
+      setNavigationProblem(
+        'Navigation preferences could not be saved. This change lasts until reload.'
+      );
+    }
   }
 
   function openMobileChats() {
@@ -664,17 +742,29 @@ export function ThozhaWebWorkspaceConcept({
           aria-label="Primary navigation"
           className="th-v4-nav-rail z-30 hidden shrink-0 flex-col border-r border-white/[.08] bg-[#0d0e11] px-2 py-3 lg:flex"
         >
-          <a
-            href="#/ai-workspace"
-            className="th-v4-brand mb-4 grid h-12 shrink-0 place-items-center rounded-xl"
-            aria-label="Thozha conversations"
-            title="Thozha"
-          >
-            <span data-pulse-slot className="th-pulse-slot">
-              <LivingPulseMark />
-            </span>
-          </a>
-          {(!historyVisible || sidebarCollapsed) && (
+          <div className="th-nav-brand-row">
+            <a
+              href="#/ai-workspace"
+              className="th-v4-brand mb-4 grid h-12 shrink-0 place-items-center rounded-xl"
+              aria-label="Thozha conversations"
+              title="Thozha"
+            >
+              <span data-pulse-slot className="th-pulse-slot">
+                <LivingPulseMark />
+              </span>
+            </a>
+            <button
+              type="button"
+              className="th-nav-collapse"
+              aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+              aria-expanded={!sidebarCollapsed}
+              title={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}
+              onClick={toggleNavigation}
+            >
+              <WorkspaceIcon name="sidebar" />
+            </button>
+          </div>
+          <div className="th-nav-new">
             <button
               type="button"
               className="th-v4-rail-new mb-3"
@@ -682,15 +772,21 @@ export function ThozhaWebWorkspaceConcept({
               aria-label="New conversation"
               title="New conversation"
             >
-              <span aria-hidden="true">＋</span>
+              <WorkspaceIcon name="new" />
+              <span className="th-nav-label">New chat</span>
             </button>
-          )}
+          </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
-            <WorkspaceNavigation page={page} onNavigate={() => setDialog(null)} collapsed />
+            <WorkspaceNavigation
+              page={page}
+              onNavigate={() => setDialog(null)}
+              collapsed={sidebarCollapsed}
+            />
           </div>
           <ProfileMenu
             placement="rail"
             userId={userId}
+            displayName={userId}
             expiresAt={expiresAt}
             onSettings={() => go('Settings')}
             logout={logout}
@@ -709,8 +805,15 @@ export function ThozhaWebWorkspaceConcept({
                 <button
                   type="button"
                   className="th-v4-history-toggle"
-                  onClick={() => setSidebarCollapsed(true)}
-                  aria-label="Collapse sidebar"
+                  onClick={() => {
+                    setHistoryOpen(false);
+                    requestAnimationFrame(() =>
+                      document
+                        .querySelector<HTMLButtonElement>('[aria-label="Open conversations"]')
+                        ?.focus()
+                    );
+                  }}
+                  aria-label="Close conversations"
                   aria-expanded="true"
                 >
                   ‹
@@ -742,33 +845,28 @@ export function ThozhaWebWorkspaceConcept({
                   <LivingPulseMark />
                 </span>
               )}
-              {((compact && page === 'AI Workspace' && !mobileHistory) ||
-                (!compact && (sidebarCollapsed || page !== 'AI Workspace'))) && (
+              {page === 'AI Workspace' && (!compact || !mobileHistory) && (
                 <button
                   type="button"
                   className="th-v4-history-restore"
                   aria-label={
-                    compact && page === 'AI Workspace'
+                    compact
                       ? 'Back to conversations'
-                      : page === 'AI Workspace'
-                        ? 'Expand sidebar'
+                      : historyVisible
+                        ? 'Close conversations'
                         : 'Open conversations'
                   }
+                  aria-expanded={historyVisible}
                   onClick={() => {
                     if (compact) {
                       openMobileChats();
-                    } else if (page !== 'AI Workspace') {
-                      setSidebarCollapsed(false);
-                      window.location.hash = '#/ai-workspace';
                     } else {
-                      setSidebarCollapsed(false);
+                      setHistoryOpen(value => !value);
                     }
                   }}
                 >
-                  ‹
-                  <span className="hidden sm:inline">
-                    {compact && page === 'AI Workspace' ? 'Conversations' : 'History'}
-                  </span>
+                  <WorkspaceIcon name="history" />
+                  <span className="hidden sm:inline">History</span>
                 </button>
               )}
               {page === 'AI Workspace' ? (
@@ -793,7 +891,7 @@ export function ThozhaWebWorkspaceConcept({
                   aria-expanded={inspectorOpen}
                   onClick={() => setInspectorOpen(value => !value)}
                 >
-                  ◫ <span className="hidden sm:inline">Context</span>
+                  <WorkspaceIcon name="context" /> <span className="hidden sm:inline">Context</span>
                 </button>
               )}
               <div
@@ -925,6 +1023,7 @@ export function ThozhaWebWorkspaceConcept({
               <ProfileMenu
                 placement="header"
                 userId={userId}
+                displayName={userId}
                 expiresAt={expiresAt}
                 onSettings={() => go('Settings')}
                 logout={logout}
@@ -937,8 +1036,9 @@ export function ThozhaWebWorkspaceConcept({
               data-workspace={page}
               tabIndex={-1}
               ref={main}
-              className={`relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain outline-none ${page === 'AI Workspace' ? 'th-v4-chat-main' : 'th-v4-page-main'}`}
+              className={`relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain outline-none ${page === 'AI Workspace' ? 'th-v4-chat-main' : 'th-v4-page-main'} ${page === 'Tasks' ? 'th-tasks-main' : ''}`}
             >
+              {navigationProblem && <Notice error>{navigationProblem}</Notice>}
               {problem && (
                 <div className="mb-5">
                   <Notice error retry={checkSession}>
@@ -982,14 +1082,11 @@ export function ThozhaWebWorkspaceConcept({
                   )}
                   {page === 'Approvals' && (
                     <div className="th-v4-approvals-page">
-                      <div className="th-v4-page-heading">
-                        <p className="th-v4-eyebrow">REQUIRES YOUR DECISION</p>
-                        <h1>Approvals</h1>
-                        <p>
-                          Review the exact operation, device, and expiry before deciding. Nothing is
-                          approved implicitly.
-                        </p>
-                      </div>
+                      <Head
+                        label="REQUIRES YOUR DECISION"
+                        title="Approvals"
+                        desc="Review the exact operation, device, and expiry before deciding. Nothing is approved implicitly."
+                      />
                       <Approvals
                         api={api}
                         devices={devices.data?.devices ?? []}

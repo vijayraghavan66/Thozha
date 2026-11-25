@@ -4,7 +4,7 @@ import { muted, outline } from './styles';
 export function Panel({ children, cls = '' }: { children: ReactNode; cls?: string }) {
   return (
     <section
-      className={`rounded-[20px] border border-white/[.09] bg-[#161719]/85 shadow-[0_18px_60px_rgba(0,0,0,.18)] ${cls}`}
+      className={`th-panel rounded-[20px] border border-white/[.09] bg-[#161719]/85 shadow-[0_18px_60px_rgba(0,0,0,.18)] ${cls}`}
     >
       {children}
     </section>
@@ -49,7 +49,7 @@ export function Head({
   action?: ReactNode;
 }) {
   return (
-    <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+    <div className="th-page-heading mb-8 flex flex-wrap items-end justify-between gap-4">
       <div>
         <p className="mb-2 text-[10px] font-semibold tracking-[.23em] text-[#a4a5af]">{label}</p>
         <h1 className="text-[34px] font-semibold tracking-[-.055em] text-[#f5f5f6]">{title}</h1>

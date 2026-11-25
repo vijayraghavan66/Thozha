@@ -7,6 +7,7 @@ import { formatDate, muted, outline, solid } from '../components/styles';
 import { Chip, Loading, Modal, Notice, Row } from '../components/ui';
 import { approvalsKey, controlError, httpStatus, tasksKey } from './controlState';
 import { isTerminalTask, useTaskProgress } from './useTaskProgress';
+import { MarkdownMessage } from '../chat/MarkdownMessage';
 
 function actualMilestones(events: SupervisorEvent[], state?: string) {
   const transitions = events
@@ -86,9 +87,9 @@ function TaskResult({ text, digest }: { text: string; digest?: string | null }) 
         </Notice>
       )}
       {(!digest || verified === true || (truncated && verified === false)) && (
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-white/10 bg-white/[.04] p-3 text-xs leading-6">
-          {text || 'The server returned an empty response.'}
-        </pre>
+        <div className="rounded-xl border border-white/10 bg-white/[.04] p-3 text-[13px] leading-6">
+          <MarkdownMessage content={text || 'The server returned an empty response.'} />
+        </div>
       )}
       {digest && <p className={`break-all ${muted}`}>SHA-256: {digest}</p>}
     </section>
@@ -395,8 +396,7 @@ export function TaskDetail({
           )}
           {timeline.events.length > 0 && (
             <ol
-              className="mt-2 max-h-72 overflow-auto rounded-xl border border-white/10 px-3"
-              tabIndex={0}
+              className="mt-2 rounded-xl border border-white/10 px-3"
               aria-label="Saved task events"
             >
               {timeline.events.map(item => (

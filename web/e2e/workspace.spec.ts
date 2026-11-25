@@ -35,6 +35,12 @@ async function openMobileRoute(page: Page, name: string) {
     .click();
 }
 
+async function openHistory(page: Page) {
+  await page.getByRole('button', { name: 'Open conversations', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Conversation history' })).toBeVisible();
+  await expect(page.locator('.th-v4-history-pane')).toHaveCSS('opacity', '1');
+}
+
 test('sidebar actions survive reload and protect other conversations', async ({
   page,
 }, testInfo) => {
@@ -45,6 +51,7 @@ test('sidebar actions survive reload and protect other conversations', async ({
   await createConversation(page, keep);
   await createConversation(page, target);
   await expect(page.locator('.th-v4-inspector')).not.toHaveClass(/is-open/);
+  await openHistory(page);
   const history = page.getByRole('region', { name: 'Conversation history' });
   const search = history.getByRole('searchbox', { name: 'Search conversations' });
   await search.fill('deliberately long title');
@@ -115,6 +122,7 @@ test('sidebar actions survive reload and protect other conversations', async ({
     await page.reload();
     await expect(page.getByRole('heading', { name: target, exact: true })).toBeVisible();
     await expect(page.getByText('Archived · read-only')).toBeVisible();
+    await openHistory(page);
     await history.getByRole('button', { name: 'Show archived conversations' }).click();
     await trigger.click();
     await expect(history.getByRole('menuitem', { name: 'Restore', exact: true })).toHaveAttribute(
@@ -149,8 +157,9 @@ test('sidebar actions survive reload and protect other conversations', async ({
     await expect(confirmation).toHaveCount(0);
     expect(writes).toBe(2);
     await expect(history.getByRole('link', { name: target })).toHaveCount(0);
-    await expect(history.getByRole('button', { name: 'Show active conversations' })).toBeFocused();
+    await expect(page.getByRole('button', { name: 'Open conversations' })).toBeFocused();
     await page.reload();
+    await openHistory(page);
     await expect(history.getByRole('link', { name: keep })).toBeVisible();
     await history.getByRole('button', { name: 'Show archived conversations' }).click();
     await expect(history.getByRole('link', { name: target })).toHaveCount(0);
@@ -178,6 +187,7 @@ test('conversation rename is validated, persisted by the API and survives reload
   const id = await createConversationRecord(page, original);
   await page.goto(`/#/ai-workspace?conversation=${id}`);
   await page.reload();
+  await openHistory(page);
   const history = page.getByRole('region', { name: 'Conversation history' });
   const trigger = history.getByRole('button', { name: `Actions for ${original}` });
   await trigger.click();
@@ -197,6 +207,7 @@ test('conversation rename is validated, persisted by the API and survives reload
   expect((await response).status()).toBe(200);
   await expect(history.getByRole('link', { name: renamed, exact: true })).toBeVisible();
   await page.reload();
+  await openHistory(page);
   await expect(history.getByRole('link', { name: renamed, exact: true })).toBeVisible();
   await expect(history.getByRole('link', { name: original, exact: true })).toHaveCount(0);
 });
@@ -573,6 +584,7 @@ test('renders the reported SSE mode, persists context, copies code and supports 
   await page.getByRole('button', { name: 'Open context panel' }).click();
   await page.getByText(/Response events \(/).click();
   await expect(page.getByText('Response completed', { exact: true }).last()).toBeVisible();
+  await openHistory(page);
   const history = page.getByRole('complementary', { name: 'Conversation sidebar' });
   await history.getByRole('button', { name: 'Actions for Browser history verification' }).click();
   await history.getByRole('menuitem', { name: 'Archive', exact: true }).click();
@@ -582,12 +594,50 @@ test('renders the reported SSE mode, persists context, copies code and supports 
   await history.getByRole('link', { name: 'Browser history verification' }).click();
   await expect(page.getByRole('heading', { name: 'Browser history verification' })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toHaveCount(0);
+  await openHistory(page);
   await history.getByRole('button', { name: 'Actions for Browser history verification' }).click();
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
   await page.getByRole('button', { name: 'Delete permanently' }).click();
   await expect(page.getByText('Conversation and history deleted.')).toBeVisible();
   await expect(page.getByRole('heading', { name: "What's on your mind?" })).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toBeVisible();
+});
+
+test('composer stays compact, grows to a bound and shrinks without moving the shell', async ({
+  page,
+}, info) => {
+  await signIn(page, '/#/ai-workspace?new=compact-composer');
+  const composer = page.getByRole('textbox', { name: 'Message Jarvis' });
+  const form = page.locator('.th-chat-composer');
+  const capture = process.env.THOZHA_UI_RECOVERY_CAPTURE;
+  for (const [width, height] of [
+    [1440, 900],
+    [1280, 800],
+    [1024, 768],
+    [930, 581],
+    [768, 1024],
+    [390, 844],
+  ]) {
+    await page.setViewportSize({ width, height });
+    await expect(composer).toHaveValue('');
+    expect((await composer.boundingBox())!.height).toBeLessThanOrEqual(44);
+    expect((await form.boundingBox())!.height).toBeLessThanOrEqual(100);
+    if (capture) await page.screenshot({ path: join(capture, `fixture-empty-chat-${width}.png`) });
+    await composer.fill(Array.from({ length: 14 }, (_, index) => `Line ${index + 1}`).join('\n'));
+    await expect.poll(async () => (await composer.boundingBox())!.height).toBe(160);
+    expect(await composer.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+    await composer.clear();
+    await expect.poll(async () => (await composer.boundingBox())!.height).toBeLessThanOrEqual(44);
+    expect(await page.evaluate(() => [scrollY, document.documentElement.scrollHeight])).toEqual([
+      0,
+      height,
+    ]);
+  }
+  await composer.fill('A new line');
+  await composer.press('Shift+Enter');
+  await composer.pressSequentially('without sending');
+  await expect(composer).toHaveValue('A new line\nwithout sending');
+  await form.screenshot({ path: info.outputPath('compact-composer.png') });
 });
 
 test('code copy shows touch-friendly failure and retry without moving the block', async ({
@@ -752,9 +802,11 @@ test('works at mobile width with keyboard navigation and honest server states', 
   await expect(page.getByRole('heading', { name: 'Pair a companion device' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Pair new device' })).toBeVisible();
   await openMobileRoute(page, 'Developer Studio');
+  await page.getByRole('button', { name: 'New task', exact: true }).click();
   await page.getByRole('button', { name: 'Review & submit' }).click();
   await expect(page.getByText(/No active device mapping was verified/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Submit reviewed task' })).toBeDisabled();
+  await page.getByRole('button', { name: 'Close New task', exact: true }).click();
   expect((await page.request.get('/v1/web/tasks')).status()).toBe(403);
   expect((await page.request.get('/v1/web/automations/capabilities')).status()).toBe(404);
   await page.getByTestId('search-trigger').click();
@@ -825,7 +877,7 @@ test('header search morphs in place, supports keyboard selection and closes pred
   await expect(trigger).toHaveAttribute('aria-expanded', 'false');
 });
 
-test('conversation-first navigation and contextual inspector remain reversible and keyboard accessible', async ({
+test('primary navigation persists independently of contextual history and inspector panels', async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -835,16 +887,33 @@ test('conversation-first navigation and contextual inspector remain reversible a
   await createConversation(page, 'Sidebar history item');
   await page.getByRole('link', { name: 'Tasks', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Open conversations' }).click();
+  await page.getByRole('link', { name: 'AI Workspace', exact: true }).click();
+  const rail = page.getByRole('complementary', { name: 'Primary navigation' });
+  const main = page.locator('#main-content');
+  const mainBounds = await main.boundingBox();
+  await openHistory(page);
   await page.getByRole('link', { name: 'Sidebar history item' }).click();
   await expect(page.getByRole('heading', { name: 'Sidebar history item' })).toBeVisible();
 
-  const history = page.getByRole('complementary', { name: 'Conversation sidebar' });
-  await expect(history).toHaveCSS('width', '306px');
-  await page.getByRole('button', { name: 'Collapse sidebar' }).click();
-  await expect(page.locator('.th-v4-history-pane')).toHaveCSS('width', '0px');
-  await page.getByRole('button', { name: 'Expand sidebar' }).click();
-  await expect(page.locator('.th-v4-history-pane')).toHaveCSS('width', '306px');
+  const history = page.locator('aside[aria-label="Conversation sidebar"]');
+  await expect(rail).toHaveCSS('width', '240px');
+  await expect(history).toHaveAttribute('inert', '');
+  await openHistory(page);
+  await expect(history).toHaveCSS('width', '290px');
+  expect(await main.boundingBox()).toEqual(mainBounds);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Open conversations' })).toBeFocused();
+  await expect(history).toHaveAttribute('inert', '');
+  await page.getByRole('button', { name: 'Collapse navigation' }).click();
+  await expect(rail).toHaveCSS('width', '68px');
+  await rail.getByRole('link', { name: 'Tasks', exact: true }).click();
+  await expect(rail).toHaveCSS('width', '68px');
+  await page.reload();
+  await expect(rail).toHaveCSS('width', '68px');
+  await rail.getByRole('link', { name: 'AI Workspace', exact: true }).click();
+  await expect(rail).toHaveCSS('width', '68px');
+  await page.getByRole('button', { name: 'Expand navigation' }).click();
+  await expect(rail).toHaveCSS('width', '240px');
 
   await expect(page.getByRole('button', { name: 'Open context panel' })).toHaveAttribute(
     'aria-expanded',
@@ -893,6 +962,7 @@ test('new conversation from another section waits for the real chat module and k
   await expect(page.getByRole('heading', { name: 'Fixture response' })).toBeVisible();
   expect(writes).toEqual(['/v1/web/conversations', expect.stringMatching(/\/messages\/stream$/)]);
   await page.reload();
+  await openHistory(page);
   await expect(page.getByRole('link', { name: firstMessage })).toBeVisible();
   await page.getByRole('button', { name: `Actions for ${firstMessage}` }).click();
   await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
@@ -1066,6 +1136,7 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
   page,
 }) => {
   test.setTimeout(120_000);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
   await signIn(page);
   const routes = [
     ['ai-workspace', 'AI Workspace'],
@@ -1082,6 +1153,7 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
     [1440, 900],
     [1280, 800],
     [1024, 768],
+    [930, 581],
     [768, 1024],
     [390, 844],
     [375, 812],
@@ -1111,7 +1183,7 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
           path: join(captureDir, `${slug}-${width}.png`),
           animations: 'disabled',
         });
-      if (width >= 1024) {
+      if (width >= 768) {
         await expect
           .poll(() =>
             page.evaluate(() => {
@@ -1165,14 +1237,16 @@ test('all routes retain a fixed shell and accessible scrolling at desktop, lapto
         height + 1
       );
       expect(metrics.shell).toBe(height);
-      expect(metrics.sidebar).toBe(width >= 1200 ? 76 : 0);
-      if (width >= 1200) {
+      expect(metrics.sidebar).toBe(width >= 1024 ? 240 : width >= 768 ? 232 : 0);
+      if (width >= 768) {
         expect(metrics.navHighlight).toBeDefined();
         expect(metrics.activeNav).toBeDefined();
         expect(metrics.navHighlight!.y).toBeCloseTo(metrics.activeNav!.y, 0);
         expect(metrics.navHighlight!.height).toBeCloseTo(metrics.activeNav!.height, 0);
       }
-      expect(metrics.mainOverflow).toBe(slug === 'ai-workspace' ? 'hidden' : 'auto');
+      expect(metrics.mainOverflow).toBe(
+        slug === 'ai-workspace' || slug === 'tasks' ? 'hidden' : 'auto'
+      );
       expect(metrics.mainScrollWidth, `${width}px ${slug} main width`).toBeLessThanOrEqual(
         metrics.mainWidth + 1
       );
@@ -1244,11 +1318,13 @@ test('long conversation history scrolls inside the chat without moving the appli
     el.scrollTop = 0;
   });
   await expect.poll(() => history.evaluate(el => el.scrollTop)).toBe(0);
+  await openHistory(page);
   await page
     .getByRole('complementary', { name: 'Conversation sidebar' })
     .getByRole('link', { name: 'Second scroll restoration conversation' })
     .click();
   await expect(page.getByTestId('chat-title')).toHaveText('Second scroll restoration conversation');
+  await openHistory(page);
   await page
     .getByRole('complementary', { name: 'Conversation sidebar' })
     .getByRole('link', { name: 'Long history layout verification' })
@@ -1393,8 +1469,10 @@ test.describe('Thozha 4 product walkthrough', () => {
           if (slug === 'ai-workspace') await expect(page.getByTestId('chat-title')).toBeVisible();
           else await expect(page.locator('#main-content h1:visible')).toHaveText(heading);
           if (slug === 'tasks') {
+            await page.getByRole('button', { name: 'New task', exact: true }).click();
             await page.getByLabel('What should Thozha do?').fill('Check my Mac disk space');
             await page.getByRole('button', { name: 'Review & submit' }).click();
+            await page.getByRole('button', { name: 'Close New task', exact: true }).click();
           }
           if (slug === 'trading-lab') {
             await page.getByRole('button', { name: 'Load synthetic demo' }).click();
@@ -1604,4 +1682,108 @@ test('rejects invalid and oversized attachments before upload and previews a sta
   await expect(staged).toContainText('PDF');
   await expect(staged.locator('img')).toHaveCount(0);
   expect(uploads).toBe(0);
+});
+
+test('precision layout aligns page headings and keeps profile/navigation usable at every requested viewport', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await signIn(page);
+  const capture = process.env.THOZHA_UI_RECOVERY_CAPTURE;
+  const rail = page.getByRole('complementary', { name: 'Primary navigation' });
+  const routes = ['tasks', 'developer-studio', 'trading-lab', 'device-hub', 'settings'];
+  for (const [width, height] of [
+    [1440, 900],
+    [1280, 800],
+    [1024, 768],
+    [930, 581],
+    [768, 1024],
+    [390, 844],
+  ]) {
+    await page.setViewportSize({ width, height });
+    for (const collapsed of width >= 768 ? [false, true] : [false]) {
+      if (width >= 768) {
+        const toggle = page.getByRole('button', {
+          name: collapsed ? 'Collapse navigation' : 'Expand navigation',
+          exact: true,
+        });
+        if (await toggle.isVisible()) await toggle.click();
+        await expect(rail).toHaveCSS('width', `${collapsed ? 68 : width >= 1024 ? 240 : 232}px`);
+        const rows = await rail
+          .locator('nav a')
+          .evaluateAll(items => items.map(el => el.getBoundingClientRect()));
+        expect(rows.every(row => row.height === 44)).toBe(true);
+        expect(new Set(rows.map(row => row.left)).size).toBe(1);
+        const icon = await rail.locator('nav a svg').first().boundingBox();
+        const avatar = await rail.locator('.th-profile-avatar').boundingBox();
+        expect(
+          Math.abs(icon!.x + icon!.width / 2 - avatar!.x - avatar!.width / 2)
+        ).toBeLessThanOrEqual(4);
+      }
+      let aligned: { x: number; y: number } | undefined;
+      for (const route of routes) {
+        await page.goto(`/#/${route}`);
+        const heading = page.locator('#main-content .th-page-heading h1');
+        await expect(heading).toBeVisible();
+        const box = (await heading.boundingBox())!;
+        if (aligned) {
+          expect(box.x, `${route} heading left at ${width}`).toBeCloseTo(aligned.x, 0);
+          expect(box.y, `${route} heading top at ${width}`).toBeCloseTo(aligned.y, 0);
+        } else aligned = { x: box.x, y: box.y };
+        expect(
+          await page.evaluate(() => [
+            innerWidth,
+            innerHeight,
+            document.documentElement.scrollWidth,
+            document.documentElement.scrollHeight,
+          ])
+        ).toEqual([width, height, width, height]);
+        if (capture)
+          await page.screenshot({
+            path: join(
+              capture,
+              `precision-fixture-${route}-${width}-${collapsed ? 'collapsed' : 'expanded'}.png`
+            ),
+            animations: 'disabled',
+          });
+      }
+      await page.goto('/#/ai-workspace?new=precision');
+      await expect(page.getByRole('textbox', { name: 'Message Jarvis' })).toBeVisible();
+      if (capture)
+        await page.screenshot({
+          path: join(
+            capture,
+            `precision-fixture-chat-${width}-${collapsed ? 'collapsed' : 'expanded'}.png`
+          ),
+          animations: 'disabled',
+        });
+      const profile = page.getByRole('button', { name: 'Open profile menu', exact: true });
+      if (width >= 768 && !collapsed) await expect(profile).toContainText('web-e2e-owner');
+      await profile.click();
+      const menu = page.getByRole('menu', { name: 'Profile and workspace' });
+      await expect(menu).toBeVisible();
+      await expect(menu).toContainText('Verified Web owner');
+      await expect(menu).toContainText('web-e2e-owner');
+      const bounds = (await menu.boundingBox())!;
+      expect(bounds.x).toBeGreaterThanOrEqual(0);
+      expect(bounds.y).toBeGreaterThanOrEqual(0);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(height);
+      if (capture)
+        await page.screenshot({
+          path: join(
+            capture,
+            `precision-fixture-profile-${width}-${collapsed ? 'collapsed' : 'expanded'}.png`
+          ),
+          animations: 'disabled',
+        });
+      await page.keyboard.press('Escape');
+      await expect(profile).toBeFocused();
+    }
+    if (width >= 768) {
+      await page.getByRole('button', { name: 'Expand navigation' }).click();
+      await expect(rail).toHaveCSS('width', `${width >= 1024 ? 240 : 232}px`);
+    }
+  }
 });

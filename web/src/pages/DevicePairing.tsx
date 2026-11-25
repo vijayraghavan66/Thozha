@@ -7,7 +7,7 @@ import type {
   PairingInvitationStatus,
   PairingRequest,
 } from '../api/control';
-import type { WorkspaceApi } from '../api/client';
+import { WebApiError, type WorkspaceApi } from '../api/client';
 import { formatDate, muted, outline, solid } from '../components/styles';
 import { Chip, Modal, Notice, Panel, Row } from '../components/ui';
 import { devicesKey, controlError } from './controlState';
@@ -131,6 +131,7 @@ export default function DevicePairing({
   const [review, setReview] = useState<PairingRequest>();
   const [notice, setNotice] = useState('');
   const [now, setNow] = useState(() => Date.now());
+  const [setupOpen, setSetupOpen] = useState(false);
   const requests = useQuery({
     queryKey: pairingRequestsKey,
     queryFn: ({ signal }) => api.listPairingRequests(50, signal),
@@ -212,10 +213,18 @@ export default function DevicePairing({
     invitation && remaining > 0 && status && !terminalInvitationStates.has(status)
   );
   const visibleQr = Boolean(invitation && remaining > 0 && (status === 'INVITED' || !status));
+  const gatewayUnavailable =
+    create.error instanceof WebApiError &&
+    create.error.status === 409 &&
+    /not enabled|not configured|gateway|tls|certificate/i.test(create.error.detail ?? '');
+  const networkUnavailable =
+    create.error instanceof WebApiError &&
+    (create.error.kind === 'connection' || create.error.kind === 'timeout');
 
   function openPairing() {
     setDialogOpen(true);
     setNotice('');
+    setSetupOpen(false);
     create.reset();
     cancel.reset();
     if (!hasActiveInvitation) {
@@ -234,8 +243,8 @@ export default function DevicePairing({
             </p>
             <h2 className="mt-1 text-base font-semibold">Pair a companion device</h2>
             <p className={`mt-2 max-w-3xl ${muted}`}>
-              Pairing issues Android access only after owner approval and phone key proof. It does
-              not map the phone for Web tasks or imply that a device is online.
+              Connect your phone over an approved private connection, scan an invitation, and
+              confirm its identity. Task permissions remain separate.
             </p>
           </div>
           <button
@@ -324,9 +333,20 @@ export default function DevicePairing({
           locked={create.isPending || cancel.isPending}
           cls="max-w-[560px]"
         >
-          <p className={muted}>
-            The signed Wi-Fi invitation expires in five minutes. This host must have its private TLS
-            gateway configured and verified before a QR can be created.
+          <ol className="th-pairing-steps" aria-label="Pairing steps">
+            {['Connect privately', 'Scan invitation', 'Approve phone'].map((step, index) => (
+              <li
+                key={step}
+                aria-current={index === (invitation ? (visibleQr ? 1 : 2) : 0) ? 'step' : undefined}
+              >
+                <span aria-hidden="true">{index + 1}</span>
+                {step}
+              </li>
+            ))}
+          </ol>
+          <p className={`${muted} mt-4`}>
+            Your Mac and phone need an approved private connection. An invitation is available only
+            when that connection has been securely configured.
           </p>
           {!connected && (
             <div className="mt-4">
@@ -341,14 +361,60 @@ export default function DevicePairing({
             </p>
           )}
           {create.isError && (
-            <div className="mt-4 space-y-3">
-              <Notice error retry={connected ? () => create.mutate() : undefined}>
-                {controlError(create.error, 'create a secure Wi-Fi pairing invitation')}
-              </Notice>
-              <p className={muted}>
-                If the private TLS gateway is unavailable, pairing fails closed. No QR code was
-                created; do not use an older or copied code.
+            <div className="th-pairing-unavailable">
+              <h3 role="alert">
+                {gatewayUnavailable
+                  ? 'Private connection is not set up'
+                  : networkUnavailable
+                    ? 'Could not reach your Mac'
+                    : 'Invitation unavailable'}
+              </h3>
+              <p>
+                {gatewayUnavailable
+                  ? 'Finish the private connection setup on your Mac before pairing this phone. No invitation has been created.'
+                  : networkUnavailable
+                    ? 'Check that your Mac is reachable and try again. No QR is available until the host confirms an invitation.'
+                    : 'The host could not issue an invitation. Review the details below before trying again.'}
               </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className={outline}
+                  aria-expanded={setupOpen}
+                  onClick={() => setSetupOpen(value => !value)}
+                >
+                  {setupOpen ? 'Hide setup requirements' : 'View setup requirements'}
+                </button>
+                <button
+                  type="button"
+                  className={outline}
+                  disabled={!connected || create.isPending}
+                  onClick={() => create.mutate()}
+                >
+                  Check connection
+                </button>
+              </div>
+              {setupOpen && (
+                <ul className="list-disc space-y-2 pl-4 text-xs leading-5 text-[#b8bac3]">
+                  <li>Keep the Mac and phone on the owner-approved private network.</li>
+                  <li>
+                    The Mac host needs its private Wi-Fi gateway and trusted TLS certificate
+                    configured and verified.
+                  </li>
+                  <li>
+                    Once the host is ready, check the connection here and scan the new invitation in
+                    the companion app.
+                  </li>
+                </ul>
+              )}
+              <details className="th-pairing-diagnostics">
+                <summary>Connection diagnostics</summary>
+                <p>{controlError(create.error, 'create a secure Wi-Fi pairing invitation')}</p>
+                {create.error instanceof WebApiError && create.error.status && (
+                  <p>HTTP {create.error.status}</p>
+                )}
+                <p>No QR code was created. Pairing fails closed; do not reuse an old invitation.</p>
+              </details>
             </div>
           )}
           {invitation && (
@@ -359,6 +425,7 @@ export default function DevicePairing({
                     <QRCodeSVG
                       value={JSON.stringify(invitation.qr_payload)}
                       size={288}
+                      className="th-pairing-qr"
                       level="L"
                       marginSize={2}
                       role="img"
@@ -366,7 +433,7 @@ export default function DevicePairing({
                     />
                   </div>
                   <p className="text-sm font-medium">
-                    Expires in <span aria-live="polite">{remainingText(remaining)}</span>
+                    Expires in <span>{remainingText(remaining)}</span>
                   </p>
                   <p className={`max-w-full break-all text-center font-mono text-[10px] ${muted}`}>
                     Host fingerprint: {invitation.server_fingerprint}

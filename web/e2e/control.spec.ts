@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { signIn } from './session';
@@ -29,6 +30,7 @@ async function submitTask(page: Page, objective?: string, scope = 'read_only') {
     await page.getByLabel('What should Thozha do?').fill(objective);
     await page.getByRole('button', { name: 'Review & submit' }).click();
   }
+
   await pairedDevice(page);
   await page.getByLabel('Capability scope').selectOption(scope);
   const accepted = page.waitForResponse(
@@ -43,6 +45,74 @@ async function submitTask(page: Page, objective?: string, scope = 'read_only') {
   return { id: body.task_id as string, request: response.request().postDataJSON() };
 }
 
+test('fixture long task history and execution details own their scroll without moving the shell', async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const tasks = Array.from({ length: 40 }, (_, index) => ({
+    task_id: (index + 1).toString(16).padStart(32, '0'),
+    state: 'COMPLETED',
+    summary: `Fixture task ${index + 1}: **read-only inspection** with a deliberately long summary for layout verification.`,
+    result_text: Array.from({ length: 90 }, (_, line) => `Fixture output line ${line + 1}.\n`).join(
+      '\n'
+    ),
+    idempotent_replay: false,
+  }));
+  await page.route(/\/v1\/web\/tasks\?/, route => route.fulfill({ json: { tasks } }));
+  await page.route(/\/v1\/web\/tasks\/[a-f0-9]{32}$/, route =>
+    route.fulfill({ json: tasks.find(item => route.request().url().endsWith(item.task_id))! })
+  );
+  await page.route(/\/v1\/web\/tasks\/[a-f0-9]{32}\/events\?/, route =>
+    route.fulfill({ json: { task_id: tasks[0].task_id, events: [], next_seq: 0 } })
+  );
+  await signIn(page, '/#/tasks');
+  const main = page.locator('#main-content');
+  const history = page.getByRole('region', { name: 'Task history', exact: true });
+  const capture = process.env.THOZHA_UI_RECOVERY_CAPTURE;
+  for (const [width, height] of [
+    [1440, 900],
+    [1280, 800],
+    [1024, 768],
+    [930, 581],
+    [768, 1024],
+    [390, 844],
+  ]) {
+    await page.setViewportSize({ width, height });
+    await page.goto('/#/tasks');
+    await expect(history.getByRole('link')).toHaveCount(40);
+    const header = await page.locator('header').boundingBox();
+    const heading = await page.getByRole('heading', { name: 'Tasks', exact: true }).boundingBox();
+    await history.evaluate(el => (el.scrollTop = el.scrollHeight));
+    expect(await history.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
+    expect(await page.locator('header').boundingBox()).toEqual(header);
+    expect(await page.getByRole('heading', { name: 'Tasks', exact: true }).boundingBox()).toEqual(
+      heading
+    );
+    expect(await main.evaluate(el => [el.scrollTop, el.scrollHeight - el.clientHeight])).toEqual([
+      0, 0,
+    ]);
+    if (capture)
+      await page.screenshot({ path: join(capture, `fixture-task-history-${width}.png`) });
+    await history.getByRole('link').first().click();
+    const details = page.getByRole('region', { name: 'Execution details', exact: true });
+    await expect(details.getByText('Fixture output line 90.')).toBeVisible();
+    await details.evaluate(el => (el.scrollTop = el.scrollHeight));
+    expect(await details.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
+    expect(await main.evaluate(el => el.scrollTop)).toBe(0);
+    expect(
+      await page.evaluate(() => [
+        document.documentElement.scrollWidth,
+        document.documentElement.scrollHeight,
+      ])
+    ).toEqual([width, height]);
+    if (capture) await page.screenshot({ path: join(capture, `fixture-task-detail-${width}.png`) });
+    if (width < 768) {
+      await expect(history).not.toBeVisible();
+      await page.getByRole('link', { name: 'Back to history' }).click();
+      await expect(history).toBeVisible();
+    }
+  }
+});
 test('prefills without execution, resumes real supervisor SSE, and reloads the verified result', async ({
   page,
 }) => {
@@ -377,11 +447,46 @@ test('labels unavailable Wi-Fi pairing honestly and never shows a fabricated QR'
   await page.getByRole('button', { name: 'Pair new device' }).click();
   expect((await createRequest).status()).toBe(409);
   const dialog = page.getByRole('dialog', { name: 'Pair new device' });
-  await expect(dialog.getByRole('alert')).toBeVisible();
+  await expect(dialog.getByRole('alert')).toHaveText('Private connection is not set up');
+  await dialog.getByRole('button', { name: 'View setup requirements' }).click();
+  await expect(dialog).toContainText('owner-approved private network');
+  await dialog.getByText('Connection diagnostics', { exact: true }).click();
   await expect(dialog).toContainText('No QR code was created');
+  await expect(dialog).toContainText('HTTP 409');
   await expect(
     dialog.getByRole('img', { name: 'Signed Wi-Fi pairing invitation QR code' })
   ).toHaveCount(0);
+  const capture = process.env.THOZHA_UI_RECOVERY_CAPTURE;
+  if (capture) {
+    await dialog.getByText('Connection diagnostics', { exact: true }).click();
+    for (const [width, height] of [
+      [1440, 900],
+      [1280, 800],
+      [1024, 768],
+      [930, 581],
+      [768, 1024],
+      [390, 844],
+    ]) {
+      await page.setViewportSize({ width, height });
+      await page.screenshot({ path: join(capture, `fixture-pairing-unavailable-${width}.png`) });
+    }
+  }
+});
+
+test('pairing distinguishes a temporary connection failure from missing setup', async ({
+  page,
+}) => {
+  await signIn(page, '/#/device-hub');
+  await page.route('**/v1/web/devices/pairing-invitations', route =>
+    route.abort('connectionreset')
+  );
+  await page.getByRole('button', { name: 'Pair new device' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Pair new device' });
+  await expect(dialog.getByRole('alert')).toHaveText('Could not reach your Mac');
+  await expect(dialog.getByRole('button', { name: 'Check connection' })).toBeEnabled();
+  await expect(dialog.getByRole('img')).toHaveCount(0);
+  await dialog.getByText('Connection diagnostics', { exact: true }).click();
+  await expect(dialog).toContainText('No QR code was created');
 });
 
 test('uses only the nested invitation payload and reviews identity before granting a pairing decision', async ({

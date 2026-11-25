@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import Markdown from 'react-markdown';
 import { mayHaveBeenAccepted, type WorkspaceApi } from '../api/client';
 import { type PairedDevice, type TaskInput, type TaskScope } from '../api/control';
 import { field, muted, outline, solid } from '../components/styles';
-import { Chip, Head, Loading, Notice, Panel } from '../components/ui';
+import { Chip, Head, Loading, Modal, Notice, Panel } from '../components/ui';
 import { Approvals } from './Approvals';
 import { controlError, taskHref, tasksKey, useDevices, useTasks } from './controlState';
 import { DevicePicker } from './DevicePicker';
@@ -254,6 +255,7 @@ export default function DeveloperStudio({
   view?: 'tasks' | 'developer';
 }) {
   const [filter, setFilter] = useState<'active' | 'completed' | 'all'>('all');
+  const [composerOpen, setComposerOpen] = useState(false);
   const devices = useDevices(api, connected);
   const tasks = useTasks(api, filter, connected);
   const approvals = useQuery({
@@ -268,12 +270,13 @@ export default function DeveloperStudio({
     return result;
   }, {});
   const accepted = (id: string) => {
+    setComposerOpen(false);
     clearDraft();
     window.location.hash = taskHref(id);
   };
 
   return (
-    <>
+    <div className={view === 'tasks' ? 'th-tasks-page' : undefined}>
       <Head
         label={view === 'tasks' ? 'SUPERVISOR / AUTHORIZED WORK' : 'EXECUTION / EVIDENCE'}
         title={view === 'tasks' ? 'Tasks' : 'Developer Studio'}
@@ -283,22 +286,29 @@ export default function DeveloperStudio({
             : 'Inspect persisted supervisor activity and execution evidence.'
         }
         action={
-          <button
-            type="button"
-            className={solid}
-            onClick={() => document.getElementById('task-objective')?.focus()}
-          >
+          <button type="button" className={solid} onClick={() => setComposerOpen(true)}>
             New task
           </button>
         }
       />
-      <TaskComposer
-        api={api}
-        devices={mapped}
-        connected={connected}
-        prefill={draft ?? ''}
-        onAccepted={accepted}
-      />
+      {(composerOpen || Boolean(draft)) && (
+        <Modal
+          title="New task"
+          cls="max-w-[720px]"
+          close={() => {
+            setComposerOpen(false);
+            clearDraft();
+          }}
+        >
+          <TaskComposer
+            api={api}
+            devices={mapped}
+            connected={connected}
+            prefill={draft ?? ''}
+            onAccepted={accepted}
+          />
+        </Modal>
+      )}
       {view === 'developer' && (
         <p className={`${muted} th-v4-diagnostics-note`}>
           GitHub and CI are not connected in Web v1. The timeline contains only server-saved
@@ -306,29 +316,29 @@ export default function DeveloperStudio({
         </p>
       )}
       {view === 'tasks' && (
-        <div className="mb-4 grid grid-cols-4 gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
+        <div className="th-task-stats" aria-label="Task summary">
           {[
             ['Active', counts.Active ?? 0],
             ['Pending approvals', approvals.data?.count ?? 0],
             ['Completed / cancelled', counts.Completed ?? 0],
             ['Failed', counts.Failed ?? 0],
           ].map(([label, value]) => (
-            <Panel key={label} cls="p-4">
-              <p className={muted}>{label}</p>
-              <p className="mt-2 text-2xl font-semibold">{value}</p>
-            </Panel>
+            <div key={label}>
+              <span>{label}</span>
+              <b>{value}</b>
+            </div>
           ))}
         </div>
       )}
       <div
         className={
           view === 'tasks'
-            ? 'th-task-workspace'
+            ? `th-task-workspace ${taskId ? 'has-selection' : ''}`
             : 'grid grid-cols-[minmax(0,1.5fr)_minmax(280px,1fr)] gap-4 max-lg:grid-cols-1'
         }
       >
-        <Panel cls="min-w-0 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
+        <Panel cls="th-task-history min-w-0">
+          <div className="th-task-history-toolbar">
             <h2 className="font-semibold">Task history</h2>
             <div className="flex items-center gap-2">
               <label className="sr-only" htmlFor="task-filter">
@@ -357,63 +367,98 @@ export default function DeveloperStudio({
               </button>
             </div>
           </div>
-          {tasks.isPending && connected && <Loading label="Loading persisted tasks…" />}
-          {tasks.isError && (
-            <div className="mt-3">
-              <Notice error retry={connected ? () => void tasks.refetch() : undefined}>
-                {controlError(tasks.error, 'list supervisor tasks')}
-              </Notice>
-            </div>
-          )}
-          {tasks.isSuccess && !rows.length && (
-            <p className={`py-10 text-center ${muted}`}>
-              No saved tasks in this view. Submitted tasks will appear here.
-            </p>
-          )}
-          <ul className="mt-3 divide-y divide-white/[.07]">
-            {rows.map(item => (
-              <li key={item.task_id} className={item.task_id === taskId ? 'bg-white/[.05]' : ''}>
-                <a
-                  href={taskHref(item.task_id)}
-                  className="block rounded-lg px-2 py-3"
-                  aria-current={item.task_id === taskId ? 'true' : undefined}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <b className="block truncate text-xs">
-                        {item.summary || `Task ${item.task_id.slice(0, 8)}`}
-                      </b>
-                      <span className={`mt-1 block break-all ${muted}`}>{item.task_id}</span>
-                    </div>
-                    <Chip>
-                      {taskGroup(item.state)} · {item.state.replace(/_/g, ' ')}
-                    </Chip>
-                  </div>
-                </a>
-              </li>
-            ))}
-          </ul>
-        </Panel>
-        {view === 'tasks' ? (
-          <Panel cls="th-task-detail min-w-0 p-4">
-            {taskId ? (
-              <TaskDetail key={taskId} api={api} taskId={taskId} connected={connected} />
-            ) : (
-              <div className="grid min-h-60 place-items-center text-center">
-                <div>
-                  <h2 className="font-semibold">Execution detail</h2>
-                  <p className={`mt-2 ${muted}`}>
-                    Select a saved task to see only the milestones, output and artifacts reported by
-                    the host.
-                  </p>
-                </div>
+          <div
+            className="th-task-history-scroll"
+            role="region"
+            aria-label="Task history"
+            tabIndex={0}
+          >
+            {tasks.isPending && connected && <Loading label="Loading persisted tasks…" />}
+            {tasks.isError && (
+              <div className="mt-3">
+                <Notice error retry={connected ? () => void tasks.refetch() : undefined}>
+                  {controlError(tasks.error, 'list supervisor tasks')}
+                </Notice>
               </div>
             )}
-          </Panel>
+            {tasks.isSuccess && !rows.length && (
+              <p className={`py-10 text-center ${muted}`}>
+                No saved tasks in this view. Submitted tasks will appear here.
+              </p>
+            )}
+            <ul>
+              {rows.map(item => (
+                <li key={item.task_id}>
+                  <a
+                    href={taskHref(item.task_id)}
+                    className="th-task-row"
+                    title={item.summary || `Task ${item.task_id}`}
+                    aria-current={item.task_id === taskId ? 'true' : undefined}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="th-task-title">
+                          <Markdown
+                            allowedElements={['strong', 'em', 'code']}
+                            unwrapDisallowed
+                            skipHtml
+                          >
+                            {item.summary ||
+                              `${item.state.charAt(0)}${item.state.slice(1).toLowerCase().replace(/_/g, ' ')} task`}
+                          </Markdown>
+                        </div>
+                        <span className="th-task-meta" title={item.task_id}>
+                          {item.state.replace(/_/g, ' ').toLowerCase()} · {item.task_id.slice(0, 8)}
+                          <span className="sr-only"> · Task ID {item.task_id}</span>
+                        </span>
+                      </div>
+                      <Chip>{taskGroup(item.state)}</Chip>
+                    </div>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </Panel>
+        {view === 'tasks' ? (
+          taskId ? (
+            <Panel cls="th-task-detail min-w-0">
+              <div className="th-task-detail-toolbar">
+                <h2>Execution details</h2>
+                <a className={outline} href="#/tasks">
+                  Back to history
+                </a>
+              </div>
+              <div
+                className="th-task-detail-scroll"
+                role="region"
+                aria-label="Execution details"
+                tabIndex={0}
+              >
+                {taskId ? (
+                  <TaskDetail key={taskId} api={api} taskId={taskId} connected={connected} />
+                ) : (
+                  <div className="th-task-empty">
+                    <div>
+                      <h2 className="font-semibold">Execution detail</h2>
+                      <p className={`mt-2 ${muted}`}>
+                        Select a saved task to see only the milestones, output and artifacts
+                        reported by the host.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Panel>
+          ) : (
+            <p className="th-task-selection-hint">
+              Select a task to inspect its saved progress, output, and artifacts.
+            </p>
+          )
         ) : (
           <Approvals api={api} devices={mapped} connected={connected} />
         )}
       </div>
-    </>
+    </div>
   );
 }
