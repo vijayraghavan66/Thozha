@@ -63,6 +63,10 @@ fun main(args: Array<String>) {
     check(classifyTdlibSendFailure(401) == TdlibSendFailureKind.AUTHORIZATION, "TDLib authentication rejection is not auto-retried")
     check(classifyTdlibSendFailure(503) == TdlibSendFailureKind.TRANSIENT, "TDLib server errors use bounded backoff")
     check(classifyTdlibSendFailure(400) == TdlibSendFailureKind.PERMANENT, "TDLib permanent request rejection is blocked")
+    check(classifyRelayFailure(401, "AUTH_FAILED") == RelayFailureDisposition.PERMANENT, "relay authorization failures stop automatic retries")
+    check(classifyRelayFailure(429, "RATE_LIMITED") == RelayFailureDisposition.TRANSIENT, "relay rate limits use bounded cooldown")
+    check(classifyRelayFailure(503, "INTERNAL_ERROR") == RelayFailureDisposition.TRANSIENT, "relay service failures use backoff")
+    check(classifyRelayFailure(404, "NOT_FOUND") == RelayFailureDisposition.PERMANENT, "permanent relay rejection does not loop")
 
     val fixture = LinkJson.parseObject(File(args[0]).readText(Charsets.UTF_8))
     val requestFrames = (fixture["request_frames"] as List<*>).map { it as String }

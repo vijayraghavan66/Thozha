@@ -33,6 +33,7 @@ object CompanionProtocolTest {
         fastCommandExpiryCoversObservedTelegramRetryWindow(now)
         endToEndEnvelopeRoundTrip(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
+        multipleQueuedTasksSurviveRestartAndFlushOnce(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         staleTimestampRetryKeepsAuthenticatedEnvelopeQueued(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         crashAfterRelayAcceptancePreservesExactEnvelope(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         inboxPersistenceBeforeAck(host, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
@@ -439,6 +440,36 @@ object CompanionProtocolTest {
         check(restarted.flushOutbox().size == 1)
         check(relay.queued.size == 2 && relay.queued[1] == acceptedBytes) { "retry changed the signed bytes or ID" }
         check(FileMessageOutbox(file).list().isEmpty())
+        directory.deleteRecursively()
+    }
+
+    private fun multipleQueuedTasksSurviveRestartAndFlushOnce(
+        hostCert: DeviceCertificate,
+        companion: SigningIdentity,
+        companionEnc: EncryptionIdentity,
+        companionCert: DeviceCertificate,
+        hostRoot: TrustedHostRoot,
+        now: Long,
+    ) {
+        val directory = java.nio.file.Files.createTempDirectory("telegram-queued-tasks").toFile()
+        val relay = MemoryRelay(companion)
+        val outboxFile = File(directory, "outbox.json")
+        fun client() = JarvisLinkCompanion(
+            "tenant_sim", companion, companionEnc, companionCert, hostRoot, hostCert, relay,
+            FileMessageOutbox(outboxFile), MemoryMessageInbox(), now = { now },
+        )
+        val first = client()
+        val firstId = "a1".repeat(16)
+        val secondId = "b2".repeat(16)
+        check(first.submitTask(TaskSubmission("first harmless task", setOf(SafeCapability.ASSISTANT), firstId)).queuedOffline)
+        check(first.submitTask(TaskSubmission("second harmless task", setOf(SafeCapability.ASSISTANT), secondId)).queuedOffline)
+        check(FileMessageOutbox(outboxFile).list().size == 2) { "both tasks must survive while Telegram is unavailable" }
+
+        val restored = client().also { it.setOnline(true) }
+        val receipts = restored.flushOutbox()
+        check(receipts.map { it.messageId }.toSet() == setOf(firstId, secondId)) { "restart recovery must flush each original idempotency ID once" }
+        check(FileMessageOutbox(outboxFile).list().isEmpty()) { "confirmed queue entries must be removed" }
+        check(restored.flushOutbox().isEmpty() && relay.queued.size == 2) { "a catch-up must not submit duplicate tasks" }
         directory.deleteRecursively()
     }
 

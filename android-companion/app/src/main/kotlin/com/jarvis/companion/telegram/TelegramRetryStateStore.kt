@@ -15,11 +15,27 @@ internal data class TelegramRetryState(
 )
 
 internal enum class TelegramRetryDisposition { READY, RATE_LIMITED, PERMANENTLY_BLOCKED }
+internal enum class RelayFailureDisposition { NONE, TRANSIENT, PERMANENT }
 
 internal fun telegramRetryDisposition(state: TelegramRetryState, nowMs: Long): TelegramRetryDisposition = when {
     state.blockedCode != null -> TelegramRetryDisposition.PERMANENTLY_BLOCKED
     state.retryUntilUnixMs > nowMs -> TelegramRetryDisposition.RATE_LIMITED
     else -> TelegramRetryDisposition.READY
+}
+
+internal fun classifyRelayFailure(status: Int?, code: String): RelayFailureDisposition {
+    val normalized = code.uppercase()
+    if (normalized.isBlank() && status == null) return RelayFailureDisposition.NONE
+    if (normalized in setOf(
+            "AUTH_FAILED", "DEVICE_REVOKED", "DEVICE_NOT_AUTHORIZED", "CERTIFICATE_REVOKED", "CERTIFICATE_INVALID",
+            "RELAY_AUTH_FAILED", "PERMISSION_DENIED",
+        ) || status == 401 || status == 403
+    ) return RelayFailureDisposition.PERMANENT
+    if (status == 408 || status == 429 || (status != null && status in 500..599) ||
+        normalized in setOf("NETWORK_UNAVAILABLE", "PROTOCOL_ERROR", "REQUEST_STALE_RETRY", "RATE_LIMITED")
+    ) return RelayFailureDisposition.TRANSIENT
+    if (status != null && status in 400..499) return RelayFailureDisposition.PERMANENT
+    return RelayFailureDisposition.TRANSIENT
 }
 
 internal class TelegramRetryStateStore(
