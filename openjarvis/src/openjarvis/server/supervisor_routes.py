@@ -446,51 +446,45 @@ def create_signed_pairing_qr(
 
 
 def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:
-    """Return a signed Wi-Fi endpoint only when the explicitly enabled gateway is live."""
+    """Return a signed Wi-Fi endpoint only when protected policy and TLS agree."""
     from openjarvis.server.companion_wifi import (
-        ensure_local_gateway_tls_identity,
-        local_gateway_hostname,
-        read_wifi_ssid,
         SUPPORTED_WIFI_PORTS,
+        ensure_local_gateway_tls_identity,
+        load_wifi_gateway_policy,
+        local_gateway_loopback_port,
+        read_wifi_ssid,
         validate_wifi_bind_host,
-        wifi_gateway_enabled,
         wifi_interface_ipv4_address,
         verify_local_gateway_tls_listener,
     )
 
-    if not wifi_gateway_enabled():
-        raise HTTPException(status_code=409, detail="Local Wi-Fi pairing is not enabled")
-    interface = os.environ.get("JARVIS_COMPANION_WIFI_INTERFACE", "en0").strip()
-    allowed_ssid = os.environ.get("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "").strip()
-    configured_bind = os.environ.get("JARVIS_COMPANION_WIFI_BIND_HOST", "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", interface) or not allowed_ssid or not configured_bind:
-        raise HTTPException(status_code=409, detail="Local Wi-Fi pairing configuration is incomplete")
-    if len(allowed_ssid) > 128 or any(ord(char) < 0x20 or ord(char) == 0x7f for char in allowed_ssid):
-        raise HTTPException(status_code=409, detail="Local Wi-Fi pairing configuration is invalid")
     try:
-        configured_address = validate_wifi_bind_host(configured_bind)
+        policy = load_wifi_gateway_policy()
+    except (OSError, ValueError) as exc:
+        logger.info("Local Wi-Fi policy unavailable (%s)", type(exc).__name__)
+        raise HTTPException(status_code=409, detail="Local Wi-Fi gateway configuration is invalid") from exc
+    if policy is None:
+        raise HTTPException(status_code=409, detail="Local Wi-Fi pairing is not enabled")
+
+    interface = policy["JARVIS_COMPANION_WIFI_INTERFACE"]
+    allowed_ssid = policy["JARVIS_COMPANION_WIFI_ALLOWED_SSID"]
+    hostname = policy["JARVIS_COMPANION_WIFI_HOSTNAME"]
+    port = int(policy["JARVIS_COMPANION_WIFI_PORT"])
+    expected_sha256 = policy["JARVIS_COMPANION_WIFI_TLS_CERT_SHA256"]
+    bind_address = validate_wifi_bind_host(policy["JARVIS_COMPANION_WIFI_BIND_HOST"])
+    if ":" in bind_address or port not in SUPPORTED_WIFI_PORTS:
+        raise HTTPException(status_code=409, detail="The approved Wi-Fi gateway endpoint is invalid")
+    try:
+        local_gateway_loopback_port(port)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="The Wi-Fi gateway port is not supported") from exc
+    try:
         actual_address = wifi_interface_ipv4_address(interface)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         logger.info("Local Wi-Fi pairing unavailable (%s)", type(exc).__name__)
         raise HTTPException(status_code=409, detail="The configured Wi-Fi address is unavailable") from exc
-    if actual_address != configured_address or ":" in actual_address:
-        raise HTTPException(status_code=409, detail="The configured Wi-Fi address is not assigned to this interface")
-
-    current_ssid = read_wifi_ssid(
-        interface,
-        runner=subprocess.run,
-        environment=os.environ,
-    )
-    if current_ssid != allowed_ssid:
+    if read_wifi_ssid(interface, runner=subprocess.run, environment=policy) != allowed_ssid:
         raise HTTPException(status_code=409, detail="The current Wi-Fi network is not the configured network")
-
-    raw_port = os.environ.get("JARVIS_COMPANION_WIFI_PORT", "8443").strip()
-    try:
-        port = int(raw_port)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail="The Wi-Fi gateway port is invalid") from exc
-    if port not in SUPPORTED_WIFI_PORTS:
-        raise HTTPException(status_code=409, detail="The Wi-Fi gateway port is not supported")
 
     loopback_url = os.environ.get("JARVIS_COMPANION_LOOPBACK_API_BASE_URL", "").strip().rstrip("/")
     if loopback_url:
@@ -513,25 +507,16 @@ def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:
             raise HTTPException(status_code=409, detail="The loopback API endpoint is invalid") from exc
 
     try:
-        hostname = local_gateway_hostname()
-        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local", hostname):
-            raise ValueError("invalid local hostname")
         tls_identity = ensure_local_gateway_tls_identity(
             Path(store.db_path).parent / "companion-wifi", hostname, port=port,
         )
         if (
             tls_identity.hostname != hostname
             or tls_identity.port != port
-            or not re.fullmatch(r"sha256:[0-9a-f]{64}", tls_identity.certificate_sha256)
+            or tls_identity.certificate_sha256 != expected_sha256
+            or not verify_local_gateway_tls_listener(actual_address, hostname, port, expected_sha256)
         ):
-            raise ValueError("Wi-Fi TLS identity does not match the configured endpoint")
-        if not verify_local_gateway_tls_listener(
-            actual_address,
-            hostname,
-            port,
-            tls_identity.certificate_sha256,
-        ):
-            raise ValueError("Wi-Fi gateway listener certificate does not match the stored identity")
+            raise ValueError("Wi-Fi gateway listener certificate does not match the protected policy")
     except (OSError, RuntimeError, ValueError) as exc:
         logger.info("Local Wi-Fi gateway not ready (%s)", type(exc).__name__)
         raise HTTPException(status_code=409, detail="The local Wi-Fi gateway is not accepting the stored TLS identity") from exc
@@ -545,7 +530,6 @@ def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:
     if loopback_url:
         result["loopback_url"] = loopback_url
     return result
-
 
 # Compatibility alias for the previous internal API name. It follows the same
 # loopback and master-authentication rules and returns the safe invitation QR.

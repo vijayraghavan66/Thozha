@@ -9,10 +9,12 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import os
+import plistlib
 import re
 import secrets
 import socket
 import ssl
+import stat
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -42,6 +44,18 @@ _NETWORKSETUP_PREFIX = "Current Wi-Fi Network:"
 _NETWORKSETUP_UNAVAILABLE = re.compile(
     r"^You are not associated with (?:an )?(?:AirPort|Wi-Fi) network\.?$",
     re.IGNORECASE,
+)
+_GATEWAY_LAUNCH_AGENT_LABEL = "com.thozha.companion-wifi-gateway"
+_GATEWAY_POLICY_ENV_KEYS = (
+    "JARVIS_COMPANION_WIFI_ENABLED",
+    "JARVIS_COMPANION_WIFI_INTERFACE",
+    "JARVIS_COMPANION_WIFI_ALLOWED_SSID",
+    "JARVIS_COMPANION_WIFI_BIND_HOST",
+    "JARVIS_COMPANION_WIFI_PORT",
+    "JARVIS_COMPANION_WIFI_HOSTNAME",
+    "JARVIS_COMPANION_WIFI_TLS_CERT_SHA256",
+    "JARVIS_COMPANION_TLS_PROXY_PYTHON",
+    "JARVIS_COMPANION_WIFI_SSID_HELPER",
 )
 
 
@@ -85,6 +99,70 @@ def validate_wifi_bind_host(host: str) -> str:
 
 def wifi_gateway_enabled() -> bool:
     return os.environ.get("JARVIS_COMPANION_WIFI_ENABLED", "").strip() == "1"
+
+
+def load_wifi_gateway_policy(path: str | Path | None = None) -> dict[str, str] | None:
+    """Read the owner-only gateway LaunchAgent as the single Wi-Fi policy source.
+
+    The gateway and loopback API are separate launchd processes. Pairing reads
+    the protected LaunchAgent file instead of assuming its environment leaked
+    into the API process.
+    """
+    policy_path = Path(path) if path is not None else Path.home() / "Library/LaunchAgents" / f"{_GATEWAY_LAUNCH_AGENT_LABEL}.plist"
+    try:
+        metadata = policy_path.lstat()
+        if (
+            policy_path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size <= 0
+            or metadata.st_size > 32 * 1024
+        ):
+            raise ValueError("gateway policy ownership or mode is invalid")
+        payload = plistlib.loads(policy_path.read_bytes())
+    except FileNotFoundError:
+        return None
+    except (OSError, plistlib.InvalidFileException, ValueError, TypeError) as exc:
+        raise ValueError("gateway policy is invalid") from exc
+    if not isinstance(payload, dict) or payload.get("Label") != _GATEWAY_LAUNCH_AGENT_LABEL:
+        raise ValueError("gateway policy label is invalid")
+    arguments = payload.get("ProgramArguments")
+    if (
+        not isinstance(arguments, list)
+        or len(arguments) != 4
+        or not all(isinstance(value, str) for value in arguments)
+        or arguments[2:] != ["-m", "openjarvis.server.companion_wifi_gateway"]
+        or not Path(arguments[0]).is_absolute()
+        or not Path(arguments[1]).is_absolute()
+    ):
+        raise ValueError("gateway policy runner is invalid")
+    values = payload.get("EnvironmentVariables")
+    if not isinstance(values, dict) or any(not isinstance(values.get(key), str) for key in _GATEWAY_POLICY_ENV_KEYS):
+        raise ValueError("gateway policy environment is incomplete")
+    policy = {key: values[key] for key in _GATEWAY_POLICY_ENV_KEYS}
+    if policy["JARVIS_COMPANION_WIFI_ENABLED"] != "1":
+        return None
+    interface = policy["JARVIS_COMPANION_WIFI_INTERFACE"].strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", interface) or not _validate_ssid_line(policy["JARVIS_COMPANION_WIFI_ALLOWED_SSID"]):
+        raise ValueError("gateway policy network is invalid")
+    bind = validate_wifi_bind_host(policy["JARVIS_COMPANION_WIFI_BIND_HOST"])
+    try:
+        port = int(policy["JARVIS_COMPANION_WIFI_PORT"])
+    except ValueError as exc:
+        raise ValueError("gateway policy port is invalid") from exc
+    if ":" in bind or str(port) != policy["JARVIS_COMPANION_WIFI_PORT"] or port not in SUPPORTED_WIFI_PORTS:
+        raise ValueError("gateway policy endpoint is invalid")
+    local_gateway_loopback_port(port)
+    hostname = policy["JARVIS_COMPANION_WIFI_HOSTNAME"].strip().lower()
+    fingerprint = policy["JARVIS_COMPANION_WIFI_TLS_CERT_SHA256"].strip().lower()
+    if not _LOCAL_HOST_RE.fullmatch(hostname) or not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint):
+        raise ValueError("gateway policy TLS identity is invalid")
+    for key in ("JARVIS_COMPANION_TLS_PROXY_PYTHON", "JARVIS_COMPANION_WIFI_SSID_HELPER"):
+        executable = Path(policy[key])
+        if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
+            raise ValueError("gateway policy runtime is unavailable")
+    return policy
 
 
 def verify_local_gateway_tls_listener(

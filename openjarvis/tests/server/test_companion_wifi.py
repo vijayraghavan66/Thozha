@@ -5,7 +5,9 @@ import base64
 import hashlib
 import json
 import os
+import plistlib
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -159,6 +161,45 @@ def _make_ssid_helper(tmp_path, *, executable=True):
     helper.write_text("test fixture; subprocess is always mocked\n", encoding="utf-8")
     helper.chmod(0o700 if executable else 0o600)
     return helper
+
+
+def _write_gateway_policy(tmp_path, *, enabled="1", interface="en0", ssid="HomeNet", bind="192.168.1.8", port="8443", hostname="thozha-mac.local"):
+    helper = _make_ssid_helper(tmp_path)
+    path = tmp_path / "com.thozha.companion-wifi-gateway.plist"
+    payload = {
+        "Label": "com.thozha.companion-wifi-gateway",
+        "ProgramArguments": [sys.executable, sys.executable, "-m", "openjarvis.server.companion_wifi_gateway"],
+        "EnvironmentVariables": {
+            "JARVIS_COMPANION_WIFI_ENABLED": enabled,
+            "JARVIS_COMPANION_WIFI_INTERFACE": interface,
+            "JARVIS_COMPANION_WIFI_ALLOWED_SSID": ssid,
+            "JARVIS_COMPANION_WIFI_BIND_HOST": bind,
+            "JARVIS_COMPANION_WIFI_PORT": port,
+            "JARVIS_COMPANION_WIFI_HOSTNAME": hostname,
+            "JARVIS_COMPANION_WIFI_TLS_CERT_SHA256": "sha256:" + "a" * 64,
+            "JARVIS_COMPANION_TLS_PROXY_PYTHON": sys.executable,
+            "JARVIS_COMPANION_WIFI_SSID_HELPER": str(helper),
+        },
+    }
+    path.write_bytes(plistlib.dumps(payload))
+    path.chmod(0o600)
+    return path, helper
+
+
+def _use_gateway_policy(monkeypatch, path):
+    load_policy = wifi.load_wifi_gateway_policy
+    monkeypatch.setattr(wifi, "load_wifi_gateway_policy", lambda: load_policy(path))
+
+
+def test_wifi_policy_is_read_from_owner_only_launchagent_file(tmp_path):
+    policy_path, _helper = _write_gateway_policy(tmp_path)
+    policy = wifi.load_wifi_gateway_policy(policy_path)
+    assert policy is not None
+    assert policy["JARVIS_COMPANION_WIFI_ENABLED"] == "1"
+    assert policy["JARVIS_COMPANION_WIFI_INTERFACE"] == "en0"
+    policy_path.chmod(0o644)
+    with pytest.raises(ValueError, match="gateway policy is invalid"):
+        wifi.load_wifi_gateway_policy(policy_path)
 
 
 def test_networksetup_ssid_takes_precedence_over_helper(tmp_path, monkeypatch):
@@ -773,6 +814,8 @@ def test_wifi_qr_refuses_invalid_or_disabled_gateway_configuration(
     tmp_path, monkeypatch, bind, ssid, enabled, expected_status,
 ):
     client, store = _pairing_test_client(tmp_path, monkeypatch)
+    policy_path, _helper = _write_gateway_policy(tmp_path, enabled=enabled, ssid="HomeNet", bind=bind)
+    _use_gateway_policy(monkeypatch, policy_path)
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_ENABLED", enabled)
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_INTERFACE", "en0")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
@@ -797,17 +840,11 @@ def test_wifi_qr_refuses_invalid_or_disabled_gateway_configuration(
 @pytest.mark.parametrize("tls_port,loopback_port", [(8443, 8001), (8444, 8002)])
 def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_path, monkeypatch, tls_port, loopback_port):
     client, store = _pairing_test_client(tmp_path, monkeypatch)
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ENABLED", "1")
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_INTERFACE", "en0")
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_BIND_HOST", "192.168.1.8")
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_PORT", str(tls_port))
+    policy_path, helper = _write_gateway_policy(tmp_path, port=str(tls_port))
+    _use_gateway_policy(monkeypatch, policy_path)
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_LOOPBACK_PORT", str(loopback_port))
     monkeypatch.setenv("JARVIS_COMPANION_LOOPBACK_API_BASE_URL", "http://127.0.0.1:18000")
-    helper = _make_ssid_helper(tmp_path)
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
-    monkeypatch.setattr(wifi, "wifi_interface_ipv4_address", lambda _interface: "192.168.1.8")
-    monkeypatch.setattr(wifi, "local_gateway_hostname", lambda: "thozha-mac.local")
+    monkeypatch.setattr(wifi, "wifi_interface_ipv4_address", lambda _interface: "192.168.1.7")
 
     def ssid_commands(args, **kwargs):
         if args == ["/usr/sbin/networksetup", "-getairportnetwork", "en0"]:
@@ -843,7 +880,7 @@ def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_
     assert payload["protocol"] == "openjarvis-pairing-v2"
     assert payload["server_url"] == f"https://thozha-mac.local:{tls_port}"
     assert payload["loopback_url"] == "http://127.0.0.1:18000"
-    assert payload["gateway_address"] == "192.168.1.8"
+    assert payload["gateway_address"] == "192.168.1.7"
     assert payload["gateway_port"] == str(tls_port)
     assert payload["gateway_certificate_sha256"] == "sha256:" + "a" * 64
     unsigned = dict(payload)
@@ -859,12 +896,13 @@ def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_
 
 def test_wifi_qr_fails_closed_when_ssid_helper_cannot_verify_network(tmp_path, monkeypatch):
     client, store = _pairing_test_client(tmp_path, monkeypatch)
+    policy_path, helper = _write_gateway_policy(tmp_path)
+    _use_gateway_policy(monkeypatch, policy_path)
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_ENABLED", "1")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_INTERFACE", "en0")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_BIND_HOST", "192.168.1.8")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_PORT", "8443")
-    helper = _make_ssid_helper(tmp_path)
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
     monkeypatch.setattr(wifi, "wifi_interface_ipv4_address", lambda _interface: "192.168.1.8")
 
@@ -893,6 +931,11 @@ def test_wifi_qr_fails_closed_when_ssid_helper_cannot_verify_network(tmp_path, m
 @pytest.mark.parametrize("failure", ["hostname", "certificate", "listener"])
 def test_wifi_qr_rejects_unverifiable_tls_endpoint(tmp_path, monkeypatch, failure):
     client, store = _pairing_test_client(tmp_path, monkeypatch)
+    policy_path, _helper = _write_gateway_policy(
+        tmp_path,
+        hostname="attacker.example" if failure == "hostname" else "thozha-mac.local",
+    )
+    _use_gateway_policy(monkeypatch, policy_path)
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_ENABLED", "1")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_INTERFACE", "en0")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
@@ -903,7 +946,6 @@ def test_wifi_qr_rejects_unverifiable_tls_endpoint(tmp_path, monkeypatch, failur
         "openjarvis.server.supervisor_routes.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="Current Wi-Fi Network: HomeNet\n"),
     )
-    monkeypatch.setattr(wifi, "local_gateway_hostname", lambda: "attacker.example" if failure == "hostname" else "thozha-mac.local")
     fingerprint = "sha256:invalid" if failure == "certificate" else "sha256:" + "a" * 64
     monkeypatch.setattr(
         wifi,
