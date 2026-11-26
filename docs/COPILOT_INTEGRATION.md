@@ -26,6 +26,24 @@ For owner-authenticated conversations, the browser uploads raw bytes to `POST /v
 
 On macOS, local Vision/PDFKit extracts text from PNG/JPEG and PDF pages (maximum 10 pages, 100,000 extracted characters/file). The extraction is performed by a fixed Swift helper in a bounded subprocess; the original file and extracted text are persisted, while logs contain only safe error codes. The model receives only bounded OCR/PDF text, clearly marked as untrusted document content, with tools disabled. This does **not** send image pixels to a multimodal model and cannot reliably interpret diagrams, handwriting, color/layout, or unreadable scans. Empty or malformed documents fail visibly. Linux runtimes report extraction unavailable until an equivalent reviewed backend is supplied. The course checklist screenshot was OCR-checked but contained no question to answer; no course answer or live model answer was tested.
 
+## Web backend updates on `codex/core`
+
+The owner-authenticated Web API is implemented on the backend branch, but the running LaunchAgent on port 8000 does not mount these routes. The loopback Web integration test uses port 45840 and a separate Web profile; do not infer production readiness from that test process. Web session cookies are independent of Android bearer credentials and every Web task/approval route requires an explicit owner-to-active-device mapping.
+
+- Conversation messages can stream final-answer deltas when the engine supports streaming. Internal reasoning and tool calls are excluded. The `stream_mode` event distinguishes `engine_stream` from `buffered`; completed responses are persisted and digest-checked by the client.
+- `PATCH /v1/web/conversations/{conversation_id}` renames an owner-scoped conversation. It requires the Web session, CSRF header and same-origin request; title is trimmed, nonblank and limited to 160 UTF-8 bytes.
+- Web memory storage/search remains owner-scoped. Only a record explicitly tagged `chat_context` is considered for prompt context; `sensitive`, `private`, `no_chat`, and `never_inject` tags override the opt-in. Retrieval is deterministic token overlap, at most three records and 4,000 characters. The model receives the memories as untrusted data, never as instructions. Completed conversation-event details include only the count and opaque memory IDs, not memory content.
+
+The browser UI must use the generated/versioned contract. Do not wire this to the currently running port 8000 unless that service is separately configured and restarted through an approved deployment. No frontend files were changed by this backend update.
+
+## 2026-11-24 backend contract delta
+
+The `codex/openapi-contracts` revision adds `PATCH /v1/web/conversations/{conversation_id}` with request type `WebConversationRename` (`title`, trimmed nonblank, at most 160 UTF-8 bytes). It is a Web-session mutation and therefore requires same-origin CSRF; it returns the updated owner-scoped `WebConversation`, or 404 when the conversation is not owned by the session.
+
+Web memory remains deliberately opt-in for chat context. A saved memory participates only when its tags contain `chat_context`; any of `sensitive`, `private`, `no_chat`, or `never_inject` excludes it. Retrieval is owner-scoped and deterministic token-overlap (not semantic search), bounded to three records/4,000 characters. Completed conversation-event details expose only `memory_context_count` and opaque `memory_ids`, never memory content. A client may render this as provenance, but must not surface the memory text as a new user message.
+
+Backend verification: conversation rename and memory retrieval are covered by isolated API/store tests. The currently running LaunchAgent on port 8000 remains an older local service without Web routes; the verified Web runtime used a separate loopback-only test profile on port 45840. Do not treat the test runtime as production deployment.
+
 ## Frontend rules before live backend wiring
 
 - Implement from the approved MagicPath Web Workspace concept. Keep preview fixtures labeled while wiring is pending; do not independently recreate or replace the design.

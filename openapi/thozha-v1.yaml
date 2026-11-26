@@ -1,0 +1,2285 @@
+openapi: 3.1.0
+info:
+  title: Thozha and OpenJarvis APIs
+  version: 1.0.0
+  description: >
+    Source-derived contract for implemented local APIs. This is not a public Internet API.
+    Companion-specific routes are distinguished from general OpenJarvis server routes;
+    the strict companion gateway exposes only operations marked x-companion-gateway: true.
+servers:
+  - url: http://127.0.0.1:8000
+    description: OpenJarvis loopback API. Do not expose directly.
+security:
+  - BearerAuth: []
+tags:
+  - name: companion
+  - name: conversation
+  - name: memory
+  - name: session
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      security: []
+      tags: [companion]
+      responses:
+        '200':
+          description: OpenJarvis health
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+  /v1/jarvis/pair/{invitation_id}/cancel:
+    post:
+      operationId: cancelLocalPairingInvitation
+      security: []
+      tags: [companion]
+      description: >
+        Cancels an unclaimed QR pairing invitation on the Mac. This is a
+        state-changing Mac-local UI operation; the caller must be loopback and
+        send an allowed same-origin Origin. It never revokes an already issued
+        paired-device credential. If the invitation has already been claimed,
+        the caller must use the separate owner-confirmed device revocation flow.
+      parameters:
+        - name: invitation_id
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+      responses:
+        '200':
+          description: Current terminal status after cancellation attempt.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invitation_id, status]
+                properties:
+                  invitation_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+                  status: { type: string, enum: [CANCELLED, EXPIRED, REJECTED] }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The invitation was already claimed; revoke the resulting device instead.
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/session/login:
+    post:
+      operationId: createWebSession
+      security: []
+      tags: [session]
+      description: >
+        Implemented but disabled unless THOZHA_WEB_OWNER_ID,
+        THOZHA_WEB_PASSWORD_HASH, and THOZHA_WEB_ORIGIN are configured outside
+        source control. Requires an exact same-origin Origin header. Sets an
+        opaque HttpOnly SameSite=Strict cookie; never accepts Android tokens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebLoginRequest' }
+      responses:
+        '200':
+          description: Authenticated owner and CSRF value; session cookie is set.
+          headers:
+            Set-Cookie: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/session:
+    get:
+      operationId: getWebSession
+      security:
+        - WebSessionCookie: []
+      tags: [session]
+      responses:
+        '200':
+          description: Current browser-session metadata and CSRF value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/session/logout:
+    post:
+      operationId: revokeWebSession
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      tags: [session]
+      description: Requires exact same-origin Origin, application/json, and X-Thozha-CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '204': { description: Session revoked and cookies expired. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/web/conversations:
+    post:
+      operationId: createWebConversation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: Owner identity is derived from the server-side browser session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebConversationCreate' }
+      responses:
+        '201':
+          description: Conversation created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebConversation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      operationId: listWebConversations
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      parameters:
+        - name: include_archived
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Owner-scoped conversations.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/WebConversation' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/web/conversations/{conversation_id}:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+    get:
+      operationId: getWebConversation
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      responses:
+        '200':
+          description: Owner-scoped conversation with persisted messages and lifecycle events.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebConversationDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      operationId: renameWebConversation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: Requires exact same-origin Origin, application/json, and X-Thozha-CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebConversationRename' }
+      responses:
+        '200':
+          description: Renamed owner-scoped conversation; title is persisted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebConversation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { description: Title is blank after trimming or exceeds the supported UTF-8 length. }
+    delete:
+      operationId: deleteWebConversation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: Requires exact same-origin Origin, application/json, and X-Thozha-CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '204': { description: Conversation and owned history deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/conversations/{conversation_id}/archive:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+    post:
+      operationId: archiveWebConversation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: Requires exact same-origin Origin, application/json, and X-Thozha-CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200': { description: Conversation archived. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/conversations/{conversation_id}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+    post:
+      operationId: uploadWebConversationAttachment
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid on macOS
+      tags: [conversation]
+      description: >
+        Uploads a raw PNG, JPEG, or PDF body (8 MiB/file; ten files and 30 MiB
+        per conversation; 100 MiB per owner). The file is stored in the owner-scoped conversation
+        database. macOS Vision/PDFKit extracts text locally; only extracted,
+        bounded text is added to model context when the message references the
+        returned attachment ID. This is OCR/text extraction, not image-native
+        visual reasoning. Attachment content is treated as untrusted data and
+        is never used to enable tools.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$' }
+        - name: X-File-Name
+          in: header
+          required: false
+          schema: { type: string, maxLength: 256 }
+      requestBody:
+        required: true
+        content:
+          image/png:
+            schema: { type: string, format: binary }
+          image/jpeg:
+            schema: { type: string, format: binary }
+          application/pdf:
+            schema: { type: string, format: binary }
+      responses:
+        '201':
+          description: Attachment stored and text extraction completed; OCR text is not returned.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAttachmentUploadResult' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { description: File or per-conversation storage limit exceeded. }
+        '415': { description: Unsupported media type or file signature. }
+        '422': { description: Malformed document or no extractable text. }
+        '429': { description: Document extractor concurrency limit reached; retry after a short delay. }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/conversations/{conversation_id}/attachments/{attachment_id}:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+      - name: attachment_id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+    get:
+      operationId: downloadWebConversationAttachment
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      responses:
+        '200':
+          description: Original owner-uploaded attachment.
+          headers:
+            X-Content-SHA256: { schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+            Content-Disposition: { schema: { type: string } }
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/conversations/{conversation_id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+    post:
+      operationId: submitWebConversationMessage
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: >
+        Persists the message and calls the configured model with tools disabled.
+        The response is asynchronous (202) but this is not a streaming API.
+        A blocking model call cannot be forcibly cancelled; late output is suppressed.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebMessageCreate' }
+      responses:
+        '202':
+          description: User message persisted and response work accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMessageAccepted' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/web/conversations/{conversation_id}/messages/{message_id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+      - name: message_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: cancelWebConversationMessage
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: "message_id is the assistant response ID; cancellation suppresses late results but may not stop inference already running."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200':
+          description: Current cancellation state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMessageCancelResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/conversations/{conversation_id}/messages/stream:
+    parameters:
+      - $ref: '#/components/parameters/WebConversationId'
+    post:
+      operationId: streamWebConversationMessage
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [conversation]
+      description: >
+        Uses the configured engine's actual stream() method with tools disabled.
+        Engines with native streaming emit deltas incrementally. Codex SDK emits
+        one buffered result after generate() completes and is labeled buffered.
+        Disconnect/cancel suppresses late result persistence, but blocking
+        inference cannot be forcibly interrupted.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebMessageCreate' }
+      responses:
+        '200':
+          description: Authenticated server-sent events for acceptance, lifecycle, deltas, and completion.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/memory:
+    post:
+      operationId: createWebMemory
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [memory]
+      description: Owner-scoped persistent memory. Requires exact same-origin Origin, JSON, CSRF, and Idempotency-Key. Owner limits are 5000 entries and 20 MiB content.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebMemoryCreate' }
+      responses:
+        '201':
+          description: Memory persisted or returned as an idempotent replay.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMemoryCreateResult' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { description: Owner-scoped memory quota exceeded. }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+    get:
+      operationId: listWebMemory
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [memory]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 5000, default: 0 }
+      responses:
+        '200':
+          description: Owner-scoped memories, ordered by most recently updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMemoryList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/web/memory/search:
+    get:
+      operationId: searchWebMemory
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [memory]
+      description: Deterministic case-insensitive substring search; not semantic retrieval.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Owner-scoped substring matches.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMemoryList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+  /v1/web/memory/{memory_id}:
+    parameters:
+      - name: memory_id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+    get:
+      operationId: getWebMemory
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [memory]
+      responses:
+        '200':
+          description: Owned memory item.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebMemory' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteWebMemory
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: complete browser auth configuration is valid
+      tags: [memory]
+      description: Requires exact same-origin Origin, application/json, and X-Thozha-CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '204': { description: Owned memory deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/supervisor/readiness:
+    get:
+      operationId: getWebSupervisorReadiness
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: complete browser authentication configuration
+      tags: [companion]
+      description: >
+        Returns only safe component states and reason codes. Codex credential
+        file presence is preflight evidence and is not reported as runtime
+        authentication unless a model turn has succeeded in this process.
+      responses:
+        '200':
+          description: Supervisor, engine, device-mapping, and automation readiness.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebSupervisorReadiness' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/web/tasks:
+    post:
+      operationId: submitWebSupervisorTask
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      description: >
+        Creates a durable Link task owned by an explicitly mapped paired device.
+        Only existing Link scopes are accepted. Execution uses the existing Link
+        runner; approvals and sandbox restrictions are unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebTaskCreate' }
+      responses:
+        '200':
+          description: Completed idempotent replay; no worker wake occurs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebTaskResult' }
+        '202':
+          description: Newly accepted task or nonterminal idempotent replay.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebTaskResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    get:
+      operationId: listWebSupervisorTasks
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, enum: [active, completed, all], default: active }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Tasks owned by explicitly mapped active paired devices.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tasks]
+                properties:
+                  tasks: { type: array, items: { $ref: '#/components/schemas/WebTaskResult' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/web/tasks/{task_id}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: getWebSupervisorTask
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      responses:
+        '200':
+          description: Owner-scoped durable task state and result.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebTaskResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/tasks/{task_id}/events:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: getWebSupervisorTaskEvents
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      parameters:
+        - name: after_seq
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+      responses:
+        '200':
+          description: Sanitized durable event page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebTaskEventPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/tasks/{task_id}/events/stream:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: streamWebSupervisorTaskEvents
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      description: Bounded replayable SSE of persisted task events; not model-token streaming.
+      parameters:
+        - name: after_seq
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: Last-Event-ID
+          in: header
+          schema: { type: string, pattern: '^[0-9]{1,18}$' }
+      responses:
+        '200':
+          description: Sanitized task lifecycle event stream with reconnect replay.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/tasks/{task_id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      operationId: cancelWebSupervisorTask
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200':
+          description: Current cancellation state; an operation already started may not be reversible.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebTaskCancellation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/web/approvals/pending:
+    get:
+      operationId: listWebPendingApprovals
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        '200':
+          description: Pending exact-operation approvals for mapped devices.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [approvals, count]
+                properties:
+                  approvals: { type: array, items: { $ref: '#/components/schemas/Approval' } }
+                  count: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/web/approvals/{approval_id}:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalId'
+    get:
+      operationId: getWebApproval
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      responses:
+        '200':
+          description: Exact approval details for the mapped task owner.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Approval' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/approvals/{approval_id}/decision:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalId'
+    post:
+      operationId: decideWebApproval
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      description: Reuses the Android exact-digest, expiry, replay, dispatch-claim and executor path.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebApprovalDecision' }
+      responses:
+        '200':
+          description: Decision and actual execution/continuation result.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/web/tasks/{task_id}/artifacts:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: listWebTaskArtifacts
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      responses:
+        '200':
+          description: Artifacts for a completed development task owned by a mapped device.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task_id, artifacts]
+                properties:
+                  task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+                  artifacts: { type: array, items: { $ref: '#/components/schemas/Artifact' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/web/tasks/{task_id}/artifacts/{artifact_id}/download:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+      - name: artifact_id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+    get:
+      operationId: downloadWebTaskArtifact
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      responses:
+        '200':
+          description: ZIP file with SHA-256 integrity header.
+          headers:
+            X-Content-SHA256: { schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+            ETag: { schema: { type: string } }
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/web/devices:
+    get:
+      operationId: listWebDevices
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      responses:
+        '200':
+          description: Safe metadata for explicitly mapped active paired devices.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebDeviceList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/web/devices/pairing-invitations:
+    post:
+      operationId: createWebPairingInvitation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: browser auth is configured and a private Wi-Fi gateway is verified
+      tags: [companion]
+      description: >
+        Creates a five-minute signed Wi-Fi QR invitation for the authenticated
+        owner of this Mac installation. The endpoint fails closed unless the
+        configured private Wi-Fi address, SSID, pinned gateway certificate,
+        and gateway listener are verified. It never creates a loopback-only QR
+        through the Web UI and does not add the resulting phone to the separate
+        THOZHA_WEB_ALLOWED_DEVICE_IDS task-actor mapping.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebPairingInvitationCreate' }
+      responses:
+        '200':
+          description: Signed v2 QR payload. Response is no-store.
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebPairingInvitationResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Local Wi-Fi pairing is disabled or its configured identity/listener is unavailable.
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/devices/pairing-requests:
+    get:
+      operationId: listWebPairingRequests
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth is configured for this Mac owner
+      tags: [companion]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Unexpired devices that proved possession and await owner confirmation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebPairingRequestList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/devices/pairing-requests/{invitation_id}/decision:
+    post:
+      operationId: decideWebPairingRequest
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: browser auth is configured for this Mac owner
+      tags: [companion]
+      parameters:
+        - $ref: '#/components/parameters/PairingInvitationId'
+      description: >
+        Records the authenticated Mac installation owner's explicit decision.
+        Approve permits only the invitation-scoped phone claim; it does not
+        itself issue a device credential. Reject never creates a paired device.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebPairingDecision' }
+      responses:
+        '200':
+          description: Owner decision recorded or invitation expired before decision.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebPairingDecisionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+  /v1/web/devices/pairing-invitations/{invitation_id}:
+    get:
+      operationId: getWebPairingInvitationStatus
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth is configured for this Mac owner
+      tags: [companion]
+      parameters:
+        - $ref: '#/components/parameters/PairingInvitationId'
+      description: Returns invitation lifecycle only; never returns the phone's claim challenge or device token.
+      responses:
+        '200':
+          description: Pairing status for the invitation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebPairingInvitationStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/devices/pairing-invitations/{invitation_id}/cancel:
+    post:
+      operationId: cancelWebPairingInvitation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: browser auth is configured for this Mac owner
+      tags: [companion]
+      parameters:
+        - $ref: '#/components/parameters/PairingInvitationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebPairingCancelRequest' }
+      responses:
+        '200':
+          description: Invitation cancelled, expired, or already rejected. Issued device credentials are not revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebPairingDecisionResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+  /v1/web/devices/{device_id}:
+    parameters:
+      - $ref: '#/components/parameters/WebDeviceId'
+    get:
+      operationId: getWebDevice
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth and active mapped device configuration
+      tags: [companion]
+      responses:
+        '200':
+          description: Safe active metadata; no key material or token hash.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebDevice' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/devices/{device_id}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/WebDeviceId'
+    post:
+      operationId: revokeWebDevice
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: browser auth and mapped device configuration
+      tags: [companion]
+      description: Confirmed revocation only; no pairing/enrollment operation is exposed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirm]
+              properties:
+                confirm: { type: boolean, const: true }
+      responses:
+        '200':
+          description: Revocation and FCM cleanup state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebDeviceRevokeResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/automations:
+    get:
+      operationId: listWebAutomations
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1, browser auth, active device mapping, and Link runner
+      tags: [automation]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, paused, completed, cancelled] }
+      responses:
+        '200':
+          description: Owner-scoped Web automation records.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/WebAutomation' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    post:
+      operationId: createWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1, browser auth, active device mapping, and Link runner
+      tags: [automation]
+      description: >
+        Read-only scheduled requests only. Each occurrence is a durable Link
+        task bound to the selected active paired device and uses the ordinary
+        read_only supervisor scope. No arbitrary tools are scheduled.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebAutomationCreate' }
+      responses:
+        '202':
+          description: Persisted automation record.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, automation]
+                properties:
+                  status: { type: string, const: created }
+                  automation: { $ref: '#/components/schemas/WebAutomation' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/automations/capabilities:
+    get:
+      operationId: getWebAutomationCapabilities
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: browser auth; reports unavailable operations when feature is disabled
+      tags: [automation]
+      responses:
+        '200':
+          description: Capability availability based on active scheduler, mapping, and Link runner.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAutomationCapabilities' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/automations/{automation_id}:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    get:
+      operationId: getWebAutomation
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      responses:
+        '200':
+          description: Owner-scoped automation with latest correlated supervisor state.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAutomationDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    patch:
+      operationId: updateWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      description: Update only an owned Web schedule; supported scope remains read_only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebAutomationUpdate' }
+      responses:
+        '200':
+          description: Updated owner-scoped automation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAutomation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+    delete:
+      operationId: deleteWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      description: Soft-cancels an owned schedule; history is retained.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200': { description: Automation cancelled; history retained. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/automations/{automation_id}/history:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    get:
+      operationId: getWebAutomationHistory
+      security:
+        - WebSessionCookie: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Persisted occurrence history with current correlated Link task status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/WebAutomationRun' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/web/automations/{automation_id}/enable:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    post:
+      operationId: enableWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200': { description: Automation resumed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/automations/{automation_id}/disable:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    post:
+      operationId: disableWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200': { description: Automation paused. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/automations/{automation_id}/pause:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    post:
+      operationId: pauseWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1 and browser auth
+      tags: [automation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200': { description: Automation paused. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/web/automations/{automation_id}/trigger:
+    parameters:
+      - name: automation_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    post:
+      operationId: triggerWebAutomation
+      security:
+        - WebSessionCookie: []
+          WebCsrf: []
+      x-web-enabled-when: THOZHA_WEB_AUTOMATION_ENABLED=1, mapped active device, and Link runner
+      tags: [automation]
+      description: Runs one read_only occurrence through a durable supervisor Link task.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200':
+          description: Manual occurrence dispatch state and supervisor task correlation.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/jarvis/system/info:
+    get:
+      operationId: getMacSystemInfo
+      x-companion-gateway: true
+      tags: [companion]
+      responses:
+        '200':
+          description: Fixed, read-only Mac facts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MacSystemInfo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/jarvis/tasks:
+    get:
+      operationId: listTasks
+      x-companion-gateway: true
+      tags: [companion]
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, enum: [active, completed, all], default: active }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        '200':
+          description: Persisted tasks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tasks]
+                properties:
+                  tasks:
+                    type: array
+                    items: { $ref: '#/components/schemas/Task' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/InvalidRequest' }
+  /v1/jarvis/tasks/{task_id}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: getTask
+      x-companion-gateway: true
+      tags: [companion]
+      responses:
+        '200':
+          description: Persisted task and recorded events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task: { $ref: '#/components/schemas/Task' }
+                  events:
+                    type: array
+                    items: { $ref: '#/components/schemas/TaskEvent' }
+                additionalProperties: true
+        '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/jarvis/link/tasks:
+    post:
+      operationId: submitLinkTask
+      x-companion-gateway: true
+      tags: [companion]
+      parameters:
+        - name: mode
+          in: query
+          schema: { type: string, enum: [async] }
+          description: Omit for synchronous server behavior; Android uses async.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LinkTaskRequest' }
+      responses:
+        '200':
+          description: Completed result or idempotent completed replay
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LinkTaskResult' }
+        '202':
+          description: Accepted or queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LinkTaskResult' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /v1/jarvis/link/tasks/{idempotency_key}:
+    parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+    get:
+      operationId: getLinkTaskStatus
+      x-companion-gateway: true
+      tags: [companion]
+      responses:
+        '200':
+          description: Current durable state and terminal result when available
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LinkTaskResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/jarvis/link/tasks/{idempotency_key}/events:
+    parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - name: after_seq
+        in: query
+        schema: { type: integer, minimum: 0, default: 0 }
+      - name: limit
+        in: query
+        schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+    get:
+      operationId: getLinkTaskEvents
+      x-companion-gateway: false
+      tags: [companion]
+      description: Direct loopback API only; paginated polling, not SSE or WebSocket.
+      responses:
+        '200':
+          description: Owner-authorized persisted event page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskEventPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/jarvis/link/tasks/{idempotency_key}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      operationId: cancelLinkTask
+      x-companion-gateway: true
+      tags: [companion]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, maxProperties: 0 }
+      responses:
+        '200':
+          description: Actual cancellation state, including whether an operation may already have started
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LinkTaskResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/jarvis/approvals/pending:
+    get:
+      operationId: listPendingApprovals
+      x-companion-gateway: true
+      tags: [companion]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        '200':
+          description: Pending exact-operation approvals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approvals:
+                    type: array
+                    items: { $ref: '#/components/schemas/Approval' }
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Approval' }
+                  count: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/jarvis/approvals/{approval_id}:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalId'
+    get:
+      operationId: getApproval
+      x-companion-gateway: true
+      tags: [companion]
+      responses:
+        '200':
+          description: Exact approval fields
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Approval' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/jarvis/approvals/{approval_id}/decision:
+    parameters:
+      - $ref: '#/components/parameters/ApprovalId'
+    post:
+      operationId: decideApproval
+      x-companion-gateway: true
+      tags: [companion]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalDecision' }
+      responses:
+        '200':
+          description: Decision accepted; this alone does not prove tool execution completed
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Unavailable' }
+  /v1/jarvis/tasks/{task_id}/artifacts:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: listTaskArtifacts
+      x-companion-gateway: false
+      tags: [companion]
+      description: Direct API only; not in the strict companion gateway allowlist.
+      responses:
+        '200':
+          description: Artifacts for the paired device's completed development task
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: { type: string }
+                  artifacts:
+                    type: array
+                    items: { $ref: '#/components/schemas/Artifact' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /v1/jarvis/tasks/{task_id}/artifacts/{artifact_id}/download:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+      - name: artifact_id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+    get:
+      operationId: downloadTaskArtifact
+      x-companion-gateway: false
+      tags: [companion]
+      description: Direct API only. Verify Content-Length and X-Content-SHA256 before opening.
+      responses:
+        '200':
+          description: ZIP archive
+          headers:
+            X-Content-SHA256: { schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+            ETag: { schema: { type: string } }
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/jarvis/devices/fcm-token:
+    post:
+      operationId: registerFcmToken
+      x-companion-gateway: true
+      tags: [companion]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, minLength: 20, maxLength: 4096 }
+      responses:
+        '200':
+          description: Registration stored encrypted at rest
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: registered }
+    delete:
+      operationId: revokeFcmToken
+      x-companion-gateway: true
+      tags: [companion]
+      responses:
+        '200':
+          description: Current device registration revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: revoked }
+  /v1/chat/completions:
+    post:
+      operationId: openJarvisChatCompletion
+      x-companion-gateway: false
+      tags: [conversation]
+      description: General OpenJarvis API, not a Web Workspace authentication route. Tools/agent behavior follows the configured server policy. No request idempotency key is defined.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatCompletionRequest' }
+      responses:
+        '200':
+          description: JSON completion or Server-Sent Events when stream is true and the selected engine supports streaming
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+            text/event-stream:
+              schema: { type: string }
+  /v1/memory/store:
+    post:
+      operationId: storeOpenJarvisMemory
+      x-companion-gateway: false
+      tags: [memory]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemoryStoreRequest' }
+      responses:
+        '200': { description: Stored }
+        '503': { description: Memory backend is not configured }
+  /v1/memory/search:
+    post:
+      operationId: searchOpenJarvisMemory
+      x-companion-gateway: false
+      tags: [memory]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemorySearchRequest' }
+      responses:
+        '200':
+          description: Results; empty when no memory backend is configured
+          content:
+            application/json:
+              schema: { type: object, properties: { results: { type: array, items: { type: object } } } }
+  /v1/sessions:
+    get:
+      operationId: listOpenJarvisSessions
+      x-companion-gateway: false
+      tags: [session]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: Server SessionStore records, not per-device conversation history
+          content:
+            application/json:
+              schema: { type: object, properties: { sessions: { type: array, items: { type: object } } } }
+  /v1/sessions/{session_id}:
+    parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getOpenJarvisSession
+      x-companion-gateway: false
+      tags: [session]
+      responses:
+        '200':
+          description: Session record from the server SessionStore
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '404': { $ref: '#/components/responses/NotFound' }
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Server/device credential for direct API only; never place in a browser.
+    WebSessionCookie:
+      type: apiKey
+      in: cookie
+      name: thozha_web_session
+      description: Separate opaque owner session. Never use Android paired-device credentials.
+    WebCsrf:
+      type: apiKey
+      in: header
+      name: X-Thozha-CSRF
+      description: Session-bound CSRF value required for state-changing Web requests.
+  parameters:
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+    IdempotencyKey:
+      name: idempotency_key
+      in: path
+      required: true
+      schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' }
+    ApprovalId:
+      name: approval_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+    WebConversationId:
+      name: conversation_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    WebDeviceId:
+      name: device_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+    PairingInvitationId:
+      name: invitation_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[0-9a-f]{32}$' }
+  schemas:
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          oneOf:
+            - { type: string }
+            - { type: object, additionalProperties: true }
+            - { type: array, items: {} }
+    WebLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: { type: string, maxLength: 128 }
+        password: { type: string, minLength: 12, maxLength: 1024, writeOnly: true }
+    WebSession:
+      type: object
+      required: [user_id, expires_at, csrf_token]
+      properties:
+        user_id: { type: string }
+        expires_at: { type: integer, format: int64 }
+        csrf_token: { type: string }
+    WebConversationCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        title: { type: [string, 'null'], maxLength: 160 }
+    WebConversationRename:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 160, description: Trimmed title must be non-blank and at most 160 UTF-8 bytes. }
+    WebConversation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        archived_at: { type: [string, 'null'], format: date-time }
+    WebConversationDetail:
+      allOf:
+        - $ref: '#/components/schemas/WebConversation'
+        - type: object
+          properties:
+            messages: { type: array, items: { $ref: '#/components/schemas/WebMessage' } }
+            events: { type: array, items: { $ref: '#/components/schemas/WebConversationEvent' } }
+    WebMessageCreate:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1, maxLength: 16000 }
+        attachment_ids:
+          type: array
+          maxItems: 5
+          uniqueItems: true
+          items: { type: string, pattern: '^[0-9a-f]{32}$' }
+    WebMessage:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string }
+        status: { type: string, enum: [accepted, queued, running, completed, failed, cancelled] }
+        response_to: { type: [string, 'null'], format: uuid }
+        error_code: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        attachment_ids: { type: array, maxItems: 5, items: { type: string, pattern: '^[0-9a-f]{32}$' } }
+        attachments: { type: array, items: { $ref: '#/components/schemas/WebAttachmentMetadata' } }
+    WebAttachmentMetadata:
+      type: object
+      required: [id, file_name, media_type, size_bytes, sha256, page_count, created_at]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        file_name: { type: string, maxLength: 120 }
+        media_type: { type: string, enum: [image/png, image/jpeg, application/pdf] }
+        size_bytes: { type: integer, minimum: 1, maximum: 8388608 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        page_count: { type: integer, minimum: 1, maximum: 10 }
+        created_at: { type: string, format: date-time }
+    WebAttachmentUploadResult:
+      type: object
+      required: [attachment, replayed]
+      properties:
+        attachment: { $ref: '#/components/schemas/WebAttachmentMetadata' }
+        replayed: { type: boolean }
+    WebConversationEvent:
+      type: object
+      description: >
+        A completed event may include memory_context_count and memory_ids for explicit,
+        relevant chat-context memories. Memory content is never included in event details.
+      properties:
+        sequence: { type: integer }
+        message_id: { type: string, format: uuid }
+        event_type: { type: string, enum: [accepted, queued, started, completed, failed, cancelled, cancellation_requested] }
+        created_at: { type: string, format: date-time }
+        details:
+          type: object
+          additionalProperties: true
+          properties:
+            memory_context_count: { type: integer, minimum: 0, maximum: 3 }
+            memory_ids: { type: array, maxItems: 3, items: { type: string, pattern: '^[0-9a-f]{32}$' } }
+            attachment_context_count: { type: integer, minimum: 0, maximum: 10 }
+            attachment_context_chars: { type: integer, minimum: 0, maximum: 50000 }
+            error_code: { type: string }
+    WebMessageAccepted:
+      type: object
+      required: [conversation_id, message_id, response_id, status, replayed]
+      properties:
+        conversation_id: { type: string, format: uuid }
+        message_id: { type: string, format: uuid }
+        response_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, completed, failed, cancelled] }
+        replayed: { type: boolean }
+    WebMessageCancelResult:
+      type: object
+      required: [conversation_id, message_id, status]
+      properties:
+        conversation_id: { type: string, format: uuid }
+        message_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, completed, failed, cancelled, cancellation_requested] }
+    WebMemoryCreate:
+      type: object
+      additionalProperties: false
+      required: [content]
+      description: >
+        Memories are stored owner-scoped and are not automatically injected into chat unless
+        explicitly tagged `chat_context`. `sensitive`, `private`, `no_chat`, and
+        `never_inject` tags override that opt-in.
+      properties:
+        content: { type: string, minLength: 1, maxLength: 16384 }
+        title: { type: [string, 'null'], maxLength: 160 }
+        tags: { type: array, maxItems: 16, items: { type: string, maxLength: 64 } }
+    WebMemory:
+      type: object
+      required: [id, title, content, tags, created_at, updated_at]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        title: { type: string }
+        content: { type: string }
+        tags: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    WebMemoryCreateResult:
+      type: object
+      required: [memory, replayed]
+      properties:
+        memory: { $ref: '#/components/schemas/WebMemory' }
+        replayed: { type: boolean }
+    WebMemoryList:
+      type: object
+      required: [items, search_mode]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/WebMemory' } }
+        search_mode: { type: string, const: substring }
+    WebTaskCreate:
+      type: object
+      additionalProperties: false
+      required: [objective, capability_scope, idempotency_key, requester_device_id]
+      properties:
+        objective: { type: string, minLength: 1, maxLength: 20000 }
+        capability_scope: { type: array, minItems: 1, maxItems: 1, items: { type: string, enum: [read_only, mac_read, assistant, development] } }
+        idempotency_key: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' }
+        requester_device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+    WebTaskResult:
+      type: object
+      required: [task_id, state, summary, idempotent_replay]
+      properties:
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        state: { type: string, enum: [CREATED, PLANNING, RUNNING, VERIFYING, WAITING_APPROVAL, PAUSED, COMPLETED, FAILED, CANCELLED] }
+        summary: { type: string }
+        result_text: { type: [string, 'null'] }
+        result_digest: { type: [string, 'null'], pattern: '^[0-9a-f]{64}$' }
+        idempotent_replay: { type: boolean }
+        error_code: { type: [string, 'null'] }
+    WebSupervisorReadiness:
+      type: object
+      required: [status, components]
+      properties:
+        status: { type: string, enum: [ready, degraded] }
+        components:
+          type: object
+          required: [authentication, device_mapping, engine, supervisor_worker, automation_scheduler]
+          properties:
+            authentication:
+              type: object
+              required: [browser_session, codex_sdk]
+              properties:
+                browser_session: { type: string, const: authenticated }
+                codex_sdk: { type: string, enum: [not_reported, missing, credential_present_unverified, verified_this_process, unavailable] }
+            device_mapping:
+              allOf:
+                - $ref: '#/components/schemas/WebComponentReadiness'
+                - type: object
+                  required: [active_device_count]
+                  properties:
+                    active_device_count: { type: integer, minimum: 0 }
+            engine:
+              allOf:
+                - $ref: '#/components/schemas/WebComponentReadiness'
+                - type: object
+                  properties:
+                    check: { type: string, enum: [preflight, runtime] }
+            supervisor_worker: { $ref: '#/components/schemas/WebComponentReadiness' }
+            automation_scheduler: { $ref: '#/components/schemas/WebComponentReadiness' }
+    WebComponentReadiness:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string, enum: [ready, unavailable, unknown] }
+        reason: { type: string }
+    WebTaskCancellation:
+      type: object
+      additionalProperties: false
+      required: [task_id, state, cancelled, action_may_have_started]
+      properties:
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        state: { type: string, enum: [CREATED, PLANNING, RUNNING, VERIFYING, WAITING_APPROVAL, PAUSED, COMPLETED, FAILED, CANCELLED] }
+        cancelled: { type: boolean }
+        action_may_have_started: { type: boolean }
+    WebTaskEventPage:
+      type: object
+      required: [task_id, events, next_seq]
+      properties:
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        events: { type: array, items: { $ref: '#/components/schemas/WebTaskEvent' } }
+        next_seq: { type: integer, minimum: 0 }
+    WebTaskEvent:
+      type: object
+      required: [seq, event_type, created_at, payload]
+      properties:
+        seq: { type: integer, minimum: 1 }
+        event_type: { type: string }
+        created_at: { type: string, format: date-time }
+        payload: { type: object, additionalProperties: true }
+    WebApprovalDecision:
+      type: object
+      additionalProperties: false
+      required: [decision, expected_operation_digest, idempotency_key, requester_device_id]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        task_id: { type: [string, 'null'], pattern: '^[0-9a-f]{32}$' }
+        expected_operation_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        idempotency_key: { type: string, minLength: 16, maxLength: 128 }
+        requester_device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        continuation_objective: { type: [string, 'null'], maxLength: 4096 }
+    WebDevice:
+      type: object
+      required: [device_id, device_name, created_at, expires_at, status]
+      properties:
+        device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        device_name: { type: string, maxLength: 80 }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        status: { type: string, const: active }
+    WebDeviceList:
+      type: object
+      required: [devices, count]
+      properties:
+        devices: { type: array, items: { $ref: '#/components/schemas/WebDevice' } }
+        count: { type: integer, minimum: 0 }
+    WebDeviceRevokeResult:
+      type: object
+      required: [status, device_id, notification_token_cleanup]
+      properties:
+        status: { type: string, enum: [revoked, already_revoked] }
+        device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        notification_token_cleanup: { type: string, enum: [none, revoked] }
+    WebPairingInvitationCreate:
+      type: object
+      additionalProperties: false
+      required: [transport]
+      properties:
+        transport: { type: string, const: wifi }
+    PairingQrPayloadV2:
+      type: object
+      additionalProperties: false
+      required: [protocol, server_url, gateway_address, gateway_port, gateway_certificate_sha256, server_fingerprint, server_public_key, invitation_id, challenge, expires_at, server_signature]
+      properties:
+        protocol: { type: string, const: openjarvis-pairing-v2 }
+        server_url: { type: string, format: uri }
+        gateway_address: { type: string, format: ipv4 }
+        gateway_port: { type: string, const: '8443' }
+        gateway_certificate_sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        server_fingerprint: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        server_public_key: { type: string, contentEncoding: base64 }
+        invitation_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        challenge: { type: string, minLength: 1 }
+        expires_at: { type: string, format: date-time }
+        server_signature: { type: string, contentEncoding: base64 }
+    WebPairingInvitationResponse:
+      type: object
+      additionalProperties: false
+      required: [protocol, server_url, gateway_address, gateway_port, gateway_certificate_sha256, server_fingerprint, server_public_key, invitation_id, challenge, expires_at, server_signature, qr_payload]
+      properties:
+        protocol: { type: string, const: openjarvis-pairing-v2 }
+        server_url: { type: string, format: uri }
+        gateway_address: { type: string, format: ipv4 }
+        gateway_port: { type: string, const: '8443' }
+        gateway_certificate_sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        server_fingerprint: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        server_public_key: { type: string, contentEncoding: base64 }
+        invitation_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        challenge: { type: string, minLength: 1 }
+        expires_at: { type: string, format: date-time }
+        server_signature: { type: string, contentEncoding: base64 }
+        qr_payload: { $ref: '#/components/schemas/PairingQrPayloadV2' }
+    WebPairingRequest:
+      type: object
+      required: [id, status, device_name, device_fingerprint, expires_at]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        status: { type: string, const: PENDING_CONFIRMATION }
+        device_name: { type: string, maxLength: 80 }
+        device_fingerprint: { type: string }
+        requested_at: { type: [string, 'null'], format: date-time }
+        expires_at: { type: string, format: date-time }
+    WebPairingRequestList:
+      type: object
+      required: [requests, count]
+      properties:
+        requests: { type: array, items: { $ref: '#/components/schemas/WebPairingRequest' } }
+        count: { type: integer, minimum: 0 }
+    WebPairingDecision:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+    WebPairingDecisionResult:
+      type: object
+      required: [invitation_id, status]
+      properties:
+        invitation_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        status: { type: string, enum: [APPROVED, REJECTED, EXPIRED, CANCELLED] }
+    WebPairingInvitationStatus:
+      type: object
+      required: [invitation_id, status]
+      properties:
+        invitation_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        status:
+          type: string
+          enum: [INVITED, PENDING_CONFIRMATION, APPROVED, REJECTED, EXPIRED, CANCELLED, TOKEN_ISSUED]
+    WebPairingCancelRequest:
+      type: object
+      additionalProperties: false
+    WebAutomationCreate:
+      type: object
+      additionalProperties: false
+      required: [prompt, schedule_type, schedule_value, device_id]
+      properties:
+        prompt: { type: string, minLength: 1, maxLength: 2000 }
+        schedule_type: { type: string, enum: [once, interval, cron] }
+        schedule_value: { type: string, minLength: 1, maxLength: 200 }
+        timezone: { type: [string, 'null'], maxLength: 80 }
+        device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+    WebAutomationUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        prompt: { type: string, minLength: 1, maxLength: 2000 }
+        schedule_type: { type: string, enum: [once, interval, cron] }
+        schedule_value: { type: string, minLength: 1, maxLength: 200 }
+        timezone: { type: string, maxLength: 80 }
+    WebAutomation:
+      type: object
+      required: [id, prompt, schedule_type, schedule_value, status, last_supervisor_task_id]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{16}$' }
+        prompt: { type: string }
+        schedule_type: { type: string, enum: [once, interval, cron] }
+        schedule_value: { type: string }
+        timezone: { type: [string, 'null'] }
+        status: { type: string, enum: [active, paused, completed, cancelled] }
+        next_run: { type: [string, 'null'], format: date-time }
+        last_run: { type: [string, 'null'], format: date-time }
+        last_supervisor_task_id: { type: [string, 'null'], pattern: '^[0-9a-f]{32}$' }
+    WebAutomationDetail:
+      type: object
+      required: [automation, latest_supervisor_task]
+      properties:
+        automation: { $ref: '#/components/schemas/WebAutomation' }
+        latest_supervisor_task: { type: [object, 'null'], additionalProperties: true }
+    WebAutomationCapabilities:
+      type: object
+      required: [status, operations, unavailable_reasons]
+      properties:
+        status: { type: string, const: available }
+        operations: { type: object, additionalProperties: { type: boolean } }
+        unavailable_reasons: { type: object, additionalProperties: { type: string } }
+    WebAutomationRun:
+      type: object
+      required: [started_at, finished_at, success, state, result, error, supervisor_task]
+      properties:
+        started_at: { type: string, format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time }
+        success: { type: boolean }
+        state: { type: string }
+        supervisor_task_id: { type: [string, 'null'], pattern: '^[0-9a-f]{32}$' }
+        idempotency_key: { type: [string, 'null'] }
+        result: { type: string }
+        error: { type: string }
+        supervisor_task: { type: [object, 'null'], additionalProperties: true }
+    MacSystemInfo:
+      type: object
+      required: [online, uptime]
+      properties:
+        online: { type: boolean, const: true }
+        battery_percent: { type: [integer, 'null'], minimum: 0, maximum: 100 }
+        charging: { type: [boolean, 'null'] }
+        uptime_seconds: { type: integer, minimum: 0 }
+        uptime: { type: string }
+        checked_at: { type: string, format: date-time }
+    Task:
+      type: object
+      required: [id, state]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        state: { type: string }
+        title: { type: string }
+        current_step: { type: string }
+        created_at: { type: string }
+        updated_at: { type: string }
+        events: { type: array, items: { $ref: '#/components/schemas/TaskEvent' } }
+      additionalProperties: true
+    TaskEvent:
+      type: object
+      properties:
+        seq: { type: integer }
+        event_type: { type: string }
+        created_at: { type: string, format: date-time }
+        payload: { type: object, additionalProperties: true }
+    TaskEventPage:
+      type: object
+      required: [task_id, events, next_seq]
+      properties:
+        task_id: { type: string }
+        events: { type: array, items: { $ref: '#/components/schemas/TaskEvent' } }
+        next_seq: { type: integer, minimum: 0 }
+    LinkTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [objective, capability_scope, idempotency_key, requester_device_id]
+      properties:
+        objective: { type: string, minLength: 1, maxLength: 20000 }
+        capability_scope:
+          type: array
+          items: { type: string, enum: [read_only, mac_read, assistant, development] }
+        idempotency_key: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' }
+        requester_device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+    LinkTaskResult:
+      type: object
+      required: [task_id, state, summary]
+      properties:
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        state: { type: string }
+        summary: { type: string }
+        result_text: { type: [string, 'null'] }
+        result_digest: { type: [string, 'null'], pattern: '^[0-9a-f]{64}$' }
+        idempotent_replay: { type: boolean }
+    Approval:
+      type: object
+      required: [id, task_id, operation, target_resource, operation_digest, status, created_at, expires_at, requester_device_id]
+      properties:
+        id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        operation: { type: string }
+        target_resource: { type: string }
+        canonical_arguments: { type: object, additionalProperties: true }
+        arguments: { type: object, additionalProperties: true }
+        operation_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        reason: { type: string }
+        risk: { type: string, const: requires_user_approval }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        requester_device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+    ApprovalDecision:
+      type: object
+      additionalProperties: false
+      required: [decision, expected_operation_digest]
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        expected_operation_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        requester_device_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        idempotency_key: { type: string, minLength: 1, maxLength: 128 }
+        continuation_objective: { type: string, maxLength: 4096 }
+    Artifact:
+      type: object
+      required: [artifact_id, task_id, file_name, size_bytes, archive_sha256, manifest_sha256, files, download_path]
+      properties:
+        artifact_id: { type: string, pattern: '^[0-9a-f]{64}$' }
+        task_id: { type: string, pattern: '^[0-9a-f]{32}$' }
+        file_name: { type: string }
+        size_bytes: { type: integer, minimum: 1 }
+        archive_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        manifest_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        files: { type: array, items: { type: object, additionalProperties: true } }
+        download_path: { type: string }
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model: { type: string }
+        messages:
+          type: array
+          items:
+            type: object
+            required: [role]
+            properties:
+              role: { type: string }
+              content: { type: string }
+              name: { type: [string, 'null'] }
+              tool_calls: { type: [array, 'null'], items: { type: object } }
+              tool_call_id: { type: [string, 'null'] }
+        temperature: { type: number, default: 0.7 }
+        max_tokens: { type: integer, default: 1024 }
+        stream: { type: boolean, default: false }
+        tools: { type: [array, 'null'], items: { type: object } }
+    MemoryStoreRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+        metadata: { type: object, additionalProperties: true }
+    MemorySearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        top_k: { type: integer, default: 5 }
+  responses:
+    Unauthorized:
+      description: Missing, invalid, or expired credential
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Authenticated caller is not authorized for this resource
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: State, ownership, digest, expiry, or idempotency conflict
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InvalidRequest:
+      description: Request validation failure
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unavailable:
+      description: Backend, engine, or resource unavailable
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  x-thozha-not-implemented:
+    - semantic or embedding-backed Web memory retrieval
+    - image-native multimodal reasoning, handwriting recognition, and diagram/layout understanding
+    - Web automation scopes beyond read_only
+    - notification history/read state API
+    - FCM delivery through verified project credentials
+    - Trading Lab broker integration (paper-trading only remains the boundary)
+x-websocket:
+  /v1/chat/stream:
+    status: implemented in general OpenJarvis API; not companion-gateway allowlisted
+    auth: existing OpenJarvis WebSocket subprotocol/API-key check, not a browser session
+    request:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        model: { type: string, description: Optional configured model identifier. }
+        agent: { type: string, description: Optional configured agent identifier. }
+        transient: { type: boolean, default: false }
+    events:
+      - type: object
+        required: [type, content]
+        properties:
+          type: { type: string, const: chunk }
+          content: { type: string }
+      - type: object
+        required: [type, content]
+        properties:
+          type: { type: string, const: done }
+          content: { type: string }
+      - type: object
+        required: [type, detail]
+        properties:
+          type: { type: string, const: error }
+          detail: { type: string }
