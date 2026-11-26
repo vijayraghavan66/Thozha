@@ -27,6 +27,15 @@ the server stores only its password hash. Logs, tasks, configuration,
 certificates, and credentials are created under `data/` with owner-only
 permissions. Do not share or publish the `data/` directory.
 
+If the one-time Web password is lost, the server cannot recover it from the
+stored hash. Stop this portable instance, then run `./bin/reset-web-password.sh`
+from the same extracted bundle in an interactive Terminal. The command prompts
+for a replacement twice without echoing or saving it in plaintext, changes only
+this bundle's Web password hash, and invalidates this bundle's Web sessions.
+It does not alter device pairing, task history, the server identity, TLS
+certificate, or other Thozha installations. Restart with the same `start.sh`
+command and sign in using owner ID `owner` and the replacement password.
+
 ## Local-only and gateway
 
 For a loopback-only session, run `./bin/start.sh --local-only`. The raw API and

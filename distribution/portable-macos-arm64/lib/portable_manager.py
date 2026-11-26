@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import getpass
+import hmac
 import json
 import os
 import platform
 import secrets
 import signal
 import socket
+import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -188,6 +192,96 @@ def _web_auth() -> tuple[str, str, str | None]:
         {"owner_id": owner, "password_hash": password_hash, "created_at": datetime.now(timezone.utc).isoformat()},
     )
     return owner, password_hash, password
+
+
+def _require_private_owned_file(path: Path, label: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise PortableError(f"Portable {label} is unavailable.") from exc
+    if path.is_symlink() or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise PortableError(f"Portable {label} must be an owner-only regular file.")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise PortableError(f"Portable {label} must be an owner-only regular file.")
+
+
+def _rotate_web_password(
+    password: str,
+    confirmation: str,
+    *,
+    web_auth_path: Path,
+    session_db_path: Path,
+) -> None:
+    if not hmac.compare_digest(password.encode("utf-8"), confirmation.encode("utf-8")):
+        raise PortableError("The new passwords did not match; no change was made.")
+    if not web_auth_path.is_file() or web_auth_path.is_symlink():
+        raise PortableError("Portable Web login configuration is missing or unsafe.")
+    _require_private_owned_file(web_auth_path, "Web login configuration")
+    try:
+        current = _read_json(web_auth_path)
+    except PortableError:
+        raise
+    if (
+        not current
+        or not isinstance(current.get("owner_id"), str)
+        or not isinstance(current.get("password_hash"), str)
+    ):
+        raise PortableError("Portable Web login configuration is invalid; no change was made.")
+
+    sessions_exist = session_db_path.exists() or session_db_path.is_symlink()
+    if sessions_exist:
+        if session_db_path.is_symlink():
+            raise PortableError("Portable Web session database is unsafe; no change was made.")
+        _require_private_owned_file(session_db_path, "Web session database")
+        try:
+            with sqlite3.connect(f"file:{session_db_path}?mode=rw", uri=True, timeout=5) as connection:
+                exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='web_sessions'"
+                ).fetchone()
+                if not exists:
+                    raise PortableError("Portable Web session database has an unexpected schema; no change was made.")
+        except sqlite3.Error as exc:
+            raise PortableError("Portable Web sessions could not be checked; no change was made.") from exc
+
+    from openjarvis.server.thozha_web_auth import hash_password
+
+    try:
+        replacement = hash_password(password)
+    except ValueError as exc:
+        raise PortableError("New portable Web password must be 12–1024 characters; no change was made.") from exc
+    previous = current.copy()
+    updated = current.copy()
+    updated["password_hash"] = replacement
+    _atomic_private_json(web_auth_path, updated)
+    if sessions_exist:
+        try:
+            with sqlite3.connect(f"file:{session_db_path}?mode=rw", uri=True, timeout=5) as connection:
+                connection.execute("DELETE FROM web_sessions")
+                connection.commit()
+        except sqlite3.Error as exc:
+            _atomic_private_json(web_auth_path, previous)
+            raise PortableError("Portable sessions could not be invalidated; the previous password was restored.") from exc
+
+
+def reset_web_password(_args) -> int:
+    """Rotate this bundle's Web password through an owner-controlled TTY prompt."""
+    if STATE.exists() or LOCK.exists():
+        raise PortableError("Stop this portable server first; no credential was changed.")
+    if not sys.stdin.isatty():
+        raise PortableError("Run ./bin/reset-web-password.sh in an interactive Terminal; no credential was changed.")
+    password = getpass.getpass("New portable Web password (12+ characters): ")
+    confirmation = getpass.getpass("Confirm new portable Web password: ")
+    _rotate_web_password(
+        password,
+        confirmation,
+        web_auth_path=WEB_AUTH,
+        session_db_path=DATA / "openjarvis" / "thozha_web_sessions.db",
+    )
+    print(
+        "Portable Web password updated; this bundle's Web sessions were invalidated. "
+        "Restart the portable server to sign in."
+    )
+    return 0
 
 
 def _wifi_interfaces(env: dict[str, str]) -> list[tuple[str, str, str]]:
@@ -692,6 +786,7 @@ def _build_parser():
     sub.add_parser("status")
     sub.add_parser("doctor")
     sub.add_parser("login")
+    sub.add_parser("reset-web-password")
     return parser
 
 
@@ -739,7 +834,14 @@ def _codex_cli_path() -> Path | None:
 def main() -> int:
     args = _build_parser().parse_args()
     try:
-        return {"start": start, "stop": stop, "status": status, "doctor": doctor, "login": login}[args.command](args)
+        return {
+            "start": start,
+            "stop": stop,
+            "status": status,
+            "doctor": doctor,
+            "login": login,
+            "reset-web-password": reset_web_password,
+        }[args.command](args)
     except PortableError as exc:
         print(f"Thozha: {exc}", file=sys.stderr)
         return 2

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import portable_manager as manager
+from openjarvis.server.thozha_web_auth import hash_password, verify_password
 
 
 class PortableManagerTests(unittest.TestCase):
@@ -18,6 +20,10 @@ class PortableManagerTests(unittest.TestCase):
     def test_default_start_does_not_enable_local_only(self):
         args = manager._build_parser().parse_args(["start"])
         self.assertFalse(args.local_only)
+
+    def test_password_recovery_command_is_explicit(self):
+        args = manager._build_parser().parse_args(["reset-web-password"])
+        self.assertEqual(args.command, "reset-web-password")
 
     def test_private_json_is_atomic_shape_and_mode(self):
         with tempfile.TemporaryDirectory() as root:
@@ -106,6 +112,70 @@ class PortableManagerTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertNotIn("OTHER_TOKEN", env)
         self.assertEqual(env["JARVIS_MCP_OPEN_APP_ENABLED"], "0")
+
+    def test_reset_web_password_updates_only_portable_web_auth_and_sessions(self):
+        with tempfile.TemporaryDirectory() as root:
+            data = Path(root)
+            auth = data / "config" / "web-auth.json"
+            auth.parent.mkdir(mode=0o700)
+            auth.write_text(json.dumps({"owner_id": "owner", "password_hash": hash_password("old-password-long")}), encoding="utf-8")
+            auth.chmod(0o600)
+            sessions = data / "openjarvis" / "thozha_web_sessions.db"
+            sessions.parent.mkdir(mode=0o700)
+            with sqlite3.connect(sessions) as connection:
+                connection.execute(
+                    "CREATE TABLE web_sessions(session_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, csrf_hash BLOB NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER)"
+                )
+                connection.execute("INSERT INTO web_sessions VALUES('session1','owner',X'00',1,9999999999,NULL)")
+                connection.execute("INSERT INTO web_sessions VALUES('session2','owner',X'00',1,9999999999,NULL)")
+            sessions.chmod(0o600)
+            supervisor = data / "openjarvis" / "supervisor.db"
+            with sqlite3.connect(supervisor) as connection:
+                connection.execute("CREATE TABLE pairing_marker(value TEXT)")
+                connection.execute("INSERT INTO pairing_marker VALUES('preserved')")
+            supervisor.chmod(0o600)
+
+            manager._rotate_web_password(
+                "new-portable-password-2026",
+                "new-portable-password-2026",
+                web_auth_path=auth,
+                session_db_path=sessions,
+            )
+
+            updated = json.loads(auth.read_text(encoding="utf-8"))
+            self.assertEqual(updated["owner_id"], "owner")
+            self.assertTrue(verify_password("new-portable-password-2026", updated["password_hash"]))
+            self.assertFalse(verify_password("old-password-long", updated["password_hash"]))
+            self.assertEqual(auth.stat().st_mode & 0o777, 0o600)
+            with sqlite3.connect(sessions) as connection:
+                self.assertEqual(connection.execute("SELECT count(*) FROM web_sessions").fetchone()[0], 0)
+            with sqlite3.connect(supervisor) as connection:
+                self.assertEqual(connection.execute("SELECT value FROM pairing_marker").fetchone()[0], "preserved")
+
+    def test_password_mismatch_does_not_change_auth_or_sessions(self):
+        with tempfile.TemporaryDirectory() as root:
+            auth = Path(root) / "web-auth.json"
+            original = {"owner_id": "owner", "password_hash": hash_password("old-password-long")}
+            auth.write_text(json.dumps(original), encoding="utf-8")
+            auth.chmod(0o600)
+            with self.assertRaisesRegex(manager.PortableError, "did not match"):
+                manager._rotate_web_password(
+                    "new-password-long", "different-password-long",
+                    web_auth_path=auth,
+                    session_db_path=Path(root) / "missing-sessions.db",
+                )
+            self.assertEqual(json.loads(auth.read_text(encoding="utf-8")), original)
+
+    def test_password_reset_command_refuses_running_server_before_prompt(self):
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root) / "server.json"
+            lock = Path(root) / "server.lock"
+            state.write_text("{}", encoding="utf-8")
+            with patch.object(manager, "STATE", state), patch.object(manager, "LOCK", lock), \
+                 patch.object(manager.getpass, "getpass") as prompt:
+                with self.assertRaisesRegex(manager.PortableError, "Stop this portable server first"):
+                    manager.reset_web_password(None)
+            prompt.assert_not_called()
 
 
 if __name__ == "__main__":
