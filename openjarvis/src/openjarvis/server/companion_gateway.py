@@ -720,13 +720,21 @@ def create_gateway_app(
 
     @app.post("/v1/jarvis/approvals/{approval_id}/decision")
     async def decide_approval(approval_id: str, request: Request):
-        _device_id_for_request(request, request.app.state.supervisor_store)
+        authenticated_device_id, _ = _device_id_for_request(request, request.app.state.supervisor_store)
         if not _ID_RE.fullmatch(approval_id):
             raise HTTPException(status_code=404, detail="Approval not found")
         body = await _read_json_body(request)
-        allowed = {"decision", "task_id", "expected_operation_digest", "idempotency_key", "continuation_objective"}
+        allowed = {
+            "decision", "task_id", "expected_operation_digest", "idempotency_key",
+            "continuation_objective", "requester_device_id",
+        }
         if set(body) - allowed:
             raise HTTPException(status_code=422, detail="Unexpected decision field")
+        requester_device_id = body.get("requester_device_id")
+        if not isinstance(requester_device_id, str) or not _ID_RE.fullmatch(requester_device_id):
+            raise HTTPException(status_code=422, detail="Invalid requester device ID")
+        if requester_device_id != authenticated_device_id:
+            raise HTTPException(status_code=403, detail="Authenticated device does not match the approval requester")
         if body.get("decision") not in {"approve", "reject"}:
             raise HTTPException(status_code=422, detail="decision must be approve or reject")
         if not isinstance(body.get("expected_operation_digest"), str) or not _DIGEST_RE.fullmatch(body["expected_operation_digest"]):

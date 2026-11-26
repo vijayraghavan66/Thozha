@@ -607,13 +607,28 @@ def test_gateway_wss_preserves_backend_owner_binding(gateway):
 
 
 def test_decision_body_is_bounded_and_allowlisted(gateway):
-    client, _, token, _, _, upstream = gateway
+    client, _, token, device_id, _, upstream = gateway
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     approval_id = uuid.uuid4().hex
-    base = {"decision": "approve", "expected_operation_digest": "a" * 64, "idempotency_key": "request-123"}
+    base = {
+        "decision": "approve",
+        "expected_operation_digest": "a" * 64,
+        "idempotency_key": "request-123",
+        "requester_device_id": device_id,
+    }
 
     bad = client.post(f"/v1/jarvis/approvals/{approval_id}/decision", headers=headers, json={**base, "tool": "shell_exec"})
     assert bad.status_code == 422
+    before_mismatch = len(upstream)
+    assert client.post(
+        f"/v1/jarvis/approvals/{approval_id}/decision", headers=headers,
+        json={**base, "requester_device_id": "a" * 32},
+    ).status_code == 403
+    assert len(upstream) == before_mismatch
+    assert client.post(
+        f"/v1/jarvis/approvals/{approval_id}/decision", headers=headers,
+        json={key: value for key, value in base.items() if key != "requester_device_id"},
+    ).status_code == 422
     assert client.post(f"/v1/jarvis/approvals/{approval_id}/decision", headers={"Authorization": headers["Authorization"]}, content=json.dumps(base)).status_code == 415
     ok = client.post(f"/v1/jarvis/approvals/{approval_id}/decision", headers=headers, json=base)
     assert ok.status_code == 200
