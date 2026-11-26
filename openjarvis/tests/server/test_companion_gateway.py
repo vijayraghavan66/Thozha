@@ -328,6 +328,19 @@ def test_gateway_allows_only_read_only_link_task_envelopes(gateway):
     assert upstream[-1].url.params.get("mode") == "async"
     assert json.loads(upstream[-1].content) == async_body
 
+    development_body = {
+        **body,
+        "capability_scope": ["development"],
+        "idempotency_key": "jarvis-link-task-development-01",
+        "conversation_id": "d" * 32,
+    }
+    development_accepted = client.post(
+        "/v1/jarvis/link/tasks?mode=async", headers=headers, json=development_body,
+    )
+    assert development_accepted.status_code == 202
+    assert upstream[-1].url.params.get("mode") == "async"
+    assert json.loads(upstream[-1].content) == development_body
+
     conversation_body = {
         **body,
         "idempotency_key": "jarvis-link-task-conversation-01",
@@ -350,6 +363,10 @@ def test_gateway_allows_only_read_only_link_task_envelopes(gateway):
     assert client.post(
         "/v1/jarvis/link/tasks", headers=headers,
         json={**body, "capability_scope": ["system_admin"]},
+    ).status_code == 403
+    assert client.post(
+        "/v1/jarvis/link/tasks", headers=headers,
+        json={**body, "capability_scope": ["shell"]},
     ).status_code == 403
     assert client.post(
         "/v1/jarvis/link/tasks", headers=headers,

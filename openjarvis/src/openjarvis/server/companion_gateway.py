@@ -363,8 +363,11 @@ def create_gateway_app(
             raise HTTPException(status_code=422, detail="Invalid conversation ID")
         if not isinstance(objective, str) or not objective.strip() or len(objective.encode("utf-8")) > 4096:
             raise HTTPException(status_code=422, detail="objective must be non-empty and under 4096 bytes")
-        if scope not in (["read_only"], ["assistant"]):
-            raise HTTPException(status_code=403, detail="Only read_only or supervisor-gated assistant scope is enabled")
+        if scope not in (["read_only"], ["assistant"], ["development"]):
+            raise HTTPException(
+                status_code=403,
+                detail="Only read_only, supervisor-gated assistant, or plan-gated development scope is enabled",
+            )
         if not isinstance(key, str) or not _IDEMPOTENCY_RE.fullmatch(key):
             raise HTTPException(status_code=422, detail="Invalid idempotency key")
         if not isinstance(requester_device_id, str) or not _ID_RE.fullmatch(requester_device_id):
