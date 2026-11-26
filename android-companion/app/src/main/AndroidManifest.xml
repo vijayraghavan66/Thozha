@@ -26,9 +26,6 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:usesCleartextTraffic="false">
         <meta-data
-            android:name="com.google.mlkit.vision.DEPENDENCIES"
-            android:value="barcode_ui" />
-        <meta-data
             android:name="firebase_messaging_auto_init_enabled"
             android:value="false" />
         <service
@@ -64,6 +61,14 @@
             android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".PairingQrCaptureActivity"
+            android:clearTaskOnLaunch="true"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:stateNotNeeded="true"
+            android:theme="@style/AppTheme"
+            android:windowSoftInputMode="stateAlwaysHidden" />
+        <activity
+            android:name=".PairingZxingCaptureActivity"
             android:clearTaskOnLaunch="true"
             android:exported="false"
             android:screenOrientation="portrait"

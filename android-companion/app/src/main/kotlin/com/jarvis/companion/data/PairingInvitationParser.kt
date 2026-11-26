@@ -22,9 +22,14 @@ internal object PairingInvitationParser {
     private val supportedWifiPorts = setOf(8443, 8444)
     private val localHostname = Regex("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.local")
 
-    fun parse(rawPayload: String): PairingInvitation {
-        if (rawPayload.length > 8192) throw ApiException("This QR is too large to be a Jarvis pairing invitation.")
-        val json = try { JSONObject(rawPayload) } catch (_: Exception) {
+    fun parse(rawPayload: String, now: Instant = Instant.now()): PairingInvitation {
+        val expandedPayload = try {
+            if (rawPayload.startsWith(CompactPairingQr.PREFIX)) CompactPairingQr.expand(rawPayload) else rawPayload
+        } catch (failure: Exception) {
+            throw ApiException(failure.message ?: "This QR is not a valid Jarvis pairing invitation.")
+        }
+        if (expandedPayload.length > 8192) throw ApiException("This QR is too large to be a Jarvis pairing invitation.")
+        val json = try { JSONObject(expandedPayload) } catch (_: Exception) {
             throw ApiException("This QR is not a Jarvis pairing invitation.")
         }
         val actualKeys = buildSet {
@@ -63,7 +68,7 @@ internal object PairingInvitationParser {
         val expiry = requiredString(json, "expires_at")
         val expiryInstant = runCatching { OffsetDateTime.parse(expiry).toInstant() }
             .getOrElse { throw ApiException("The invitation expiry time is invalid.") }
-        val remaining = java.time.Duration.between(Instant.now(), expiryInstant)
+        val remaining = java.time.Duration.between(now, expiryInstant)
         if (remaining.isNegative || remaining.isZero) {
             throw ApiException("This pairing invitation has expired. Create a new QR on the Mac.")
         }

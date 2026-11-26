@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { QRCodeSVG } from 'qrcode.react';
+import { encodeCompactPairingQr } from '../lib/compactPairingQr';
 import type {
   PairingDecision,
   PairingInvitation,
@@ -424,21 +425,21 @@ export default function DevicePairing({
                 <div className="grid justify-items-center gap-3">
                   <div className="rounded-2xl bg-white p-3">
                     <QRCodeSVG
-                      value={JSON.stringify(invitation.qr_payload)}
+                      value={encodeCompactPairingQr(invitation.qr_payload)}
                       size={288}
                       className="th-pairing-qr"
                       level="L"
                       marginSize={2}
                       role="img"
-                      aria-label="Signed Wi-Fi pairing invitation QR code"
+                    aria-label="Signed Wi-Fi pairing invitation QR code"
                     />
                   </div>
                   <p className="text-sm font-medium">
                     Expires in <span>{remainingText(remaining)}</span>
                   </p>
                   <p className={`max-w-lg text-center text-xs ${muted}`}>
-                    Scan inside Thozha. This private .local server has no verified Android App Link;
-                    a normal camera may send raw JSON to a search app.
+                    Scan this compact signed code inside Thozha. The private .local host has no verified Android App Link;
+                    don’t send the code to search or another app.
                   </p>
                   <p className={`max-w-full break-all text-center font-mono text-[10px] ${muted}`}>
                     Host fingerprint: {invitation.server_fingerprint}

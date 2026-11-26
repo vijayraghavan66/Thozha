@@ -76,6 +76,11 @@ dependencies {
     }
     // QR decoding happens on-device with ZXing; first pairing does not depend on a Play services model download.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // Bundled QR-only ML Kit model gives a stable CameraX analyzer and does not require a first-run model download.
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
     // Pinned to 0.16.1: official LiteRT-LM docs confirm this metadata is compatible with Kotlin 2.2.x.
     // We ship no model weights; users must explicitly import an eligible local model.
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")

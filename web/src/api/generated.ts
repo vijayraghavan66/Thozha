@@ -1,4 +1,4 @@
-// Generated from openapi/thozha-v1.yaml at release branch OpenAPI.
+// Generated from openapi/thozha-v1.yaml at supplied OpenAPI file.
 // Do not edit. Run npm run contract:generate.
 
 export interface paths {

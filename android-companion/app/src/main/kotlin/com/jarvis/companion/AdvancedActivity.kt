@@ -24,6 +24,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import com.jarvis.companion.data.JarvisApi
@@ -70,12 +71,31 @@ class AdvancedActivity : ComponentActivity() {
     private val qrScanner = registerForActivityResult(ScanContract()) { result ->
         val payload = result.contents
         if (payload.isNullOrBlank()) {
-            android.util.Log.i("ThozhaPairingQr", "scan_finished_without_result")
+            android.util.Log.i("ThozhaPairingQr", "scan_finished_without_result engine=ZXING attempt=$scanAttemptId total_ms=${android.os.SystemClock.elapsedRealtime() - scanAttemptStartedMs}")
             statusMessage = "QR scan canceled or no code was read."
             render()
         } else {
-            android.util.Log.i("ThozhaPairingQr", "decode_callback chars=${payload.length}")
+            android.util.Log.i("ThozhaPairingQr", "decode_callback engine=ZXING attempt=$scanAttemptId total_ms=${android.os.SystemClock.elapsedRealtime() - scanAttemptStartedMs} chars=${payload.length}")
             handleInvitationQr(payload)
+        }
+    }
+    private var scanAttemptId: String = ""
+    private var scanAttemptStartedMs: Long = 0L
+    private val cameraXPairingScanner = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val payload = result.data?.getStringExtra(PairingQrCaptureActivity.EXTRA_QR_PAYLOAD)
+            if (payload.isNullOrBlank()) {
+                statusMessage = "The scanner returned no invitation. No pairing request was sent."
+                render()
+            } else {
+                android.util.Log.i("ThozhaPairingQr", "decode_callback engine=MLKIT attempt=$scanAttemptId chars=${payload.length}")
+                handleInvitationQr(payload)
+            }
+        } else if (result.data?.getBooleanExtra(PairingQrCaptureActivity.EXTRA_USE_ZXING, false) == true) {
+            startZxingQrScanner()
+        } else {
+            statusMessage = "QR scan canceled. No pairing request was sent."
+            render()
         }
     }
     private var screen = Screen.TASKS
@@ -1243,15 +1263,28 @@ class AdvancedActivity : ComponentActivity() {
     private fun startQrScanner() {
         statusMessage = "Opening the on-device QR scanner…"
         render()
+        scanAttemptId = java.util.UUID.randomUUID().toString().take(8)
+        scanAttemptStartedMs = android.os.SystemClock.elapsedRealtime()
+        android.util.Log.i("ThozhaPairingQr", "scan_started engine=MLKIT attempt=$scanAttemptId mono_ms=$scanAttemptStartedMs")
+        cameraXPairingScanner.launch(Intent(this, PairingQrCaptureActivity::class.java))
+    }
+
+    private fun startZxingQrScanner() {
+        scanAttemptId = java.util.UUID.randomUUID().toString().take(8)
+        scanAttemptStartedMs = android.os.SystemClock.elapsedRealtime()
+        android.util.Log.i("ThozhaPairingQr", "scan_started engine=ZXING attempt=$scanAttemptId mono_ms=$scanAttemptStartedMs")
         qrScanner.launch(
             ScanOptions()
                 .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                .setCaptureActivity(PairingQrCaptureActivity::class.java)
+                .setCaptureActivity(PairingZxingCaptureActivity::class.java)
                 .setPrompt("Scan the short-lived QR shown by Thozha on your Mac")
                 .setBeepEnabled(false)
                 .setBarcodeImageEnabled(false)
                 .setOrientationLocked(true)
-                .addExtra(DecodeHintType.TRY_HARDER.name, true),
+                .addExtra(DecodeHintType.TRY_HARDER.name, true)
+                .addExtra(PairingZxingCaptureActivity.EXTRA_ATTEMPT_ID, scanAttemptId)
+                .addExtra(PairingZxingCaptureActivity.EXTRA_STARTED_MS, scanAttemptStartedMs)
+                .setTimeout(30_000),
         )
     }
 

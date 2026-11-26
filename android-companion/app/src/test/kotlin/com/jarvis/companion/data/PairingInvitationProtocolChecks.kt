@@ -25,6 +25,7 @@ import java.util.Base64
 object PairingInvitationProtocolChecks {
     private const val PUBLIC_KEY = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q=="
     private const val SERVER_FINGERPRINT = "sha256:5cd252fb0ce8932436faf8ccd1040981b89ee4ad6b9fe9e2a2b7e71aacb27cd3"
+    private const val COMPACT_V2_CROSS_LANGUAGE = "thozha-pair-v2:VFpQMgARdGhvemhhLXRlc3QubG9jYWzAqAEsIPuqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqlzSUvsM6JMkNvr4zNEECYG4nuSta5_p4qK35xqssnzTWzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfUQASNFZ4mrze8BI0VniavN7yhjcm9zcy1sYW5ndWFnZS1wYWlyaW5nLXYyLXRlc3QtY2hhbGxlbmdlGTIwMzAtMDEtMDJUMDM6MDQ6MDUrMDA6MDAARzBFAiB434rjh6n0aAdlt7T-m1ThiookDLP8uYJuCy1zNJccAgIhANU6pQk9cGdOAwwE00NJ2n5Teg4FbdFdyRZZe7lTmMv4"
 
     @JvmStatic
     fun main(args: Array<String>) {
@@ -40,6 +41,25 @@ object PairingInvitationProtocolChecks {
         check(parsedV2.gatewayPort == 8443)
         check(parsedV2.gatewayCertificateSha256 == "sha256:" + "a".repeat(64))
         check(parsedV2.loopbackBaseUrl == "http://127.0.0.1:18000")
+
+        val compactParsed = PairingInvitationParser.parse(
+            COMPACT_V2_CROSS_LANGUAGE,
+            now = Instant.parse("2030-01-02T03:00:00Z"),
+        )
+        check(compactParsed.serverUrl == "https://thozha-test.local:8443")
+        check(compactParsed.gatewayAddress == "192.168.1.44")
+        check(compactParsed.serverFingerprint == SERVER_FINGERPRINT)
+        check(compactParsed.invitationId == "0123456789abcdef0123456789abcdef")
+        check(compactParsed.challenge == "cross-language-pairing-v2-test-challenge")
+        check(COMPACT_V2_CROSS_LANGUAGE.length < 500) { "Compact signed invitation did not reduce QR content size" }
+        val compactModules = QRCodeWriter().encode(COMPACT_V2_CROSS_LANGUAGE, BarcodeFormat.QR_CODE, 1, 1).width
+        val fullModules = QRCodeWriter().encode(
+            JSONObject(invitation("openjarvis-pairing-v2", challenge = "a".repeat(64))).toString(),
+            BarcodeFormat.QR_CODE,
+            1,
+            1,
+        ).width
+        check(compactModules < fullModules) { "Compact signed QR did not reduce module density" }
 
         val legacyV2 = PairingInvitationParser.parse(invitation("openjarvis-pairing-v2", includeLoopback = false))
         check(legacyV2.loopbackBaseUrl == "http://127.0.0.1:8000")
@@ -89,7 +109,7 @@ object PairingInvitationProtocolChecks {
             "Long decoded invitation did not reach the production signature/parser path"
         }
 
-        println("Pairing invitation protocol checks passed: v1/v2 validation, tamper/expiry rejection, and ZXing round-trip for a >1KB signed QR payload.")
+        println("Pairing invitation protocol checks passed: v1/v2 validation, compact cross-language signature verification, tamper/expiry rejection, and ZXing long-payload round-trip.")
     }
 
     private fun invitation(
