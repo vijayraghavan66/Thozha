@@ -25,6 +25,7 @@ import {
   type Instrument,
   type PaperLedger,
 } from './paperLedger';
+import { moneyPilotInstruments, moneyPilotProvider } from './moneyPilotData';
 
 function readLedger() {
   try {
@@ -36,6 +37,8 @@ function readLedger() {
     };
   }
 }
+
+type DataSource = 'demo' | 'moneyPilot' | 'offline';
 
 function EquityLine({ values }: { values: number[] }) {
   if (values.length < 2)
@@ -74,7 +77,7 @@ export default function TradingLab() {
   const [instrument, setInstrument] = useState<MarketInstrument>(demoInstruments[0]);
   const [interval, setInterval] = useState<MarketInterval>('1d');
   const [data, setData] = useState(() => missingMarketData(demoInstruments[0], '1d'));
-  const [demo, setDemo] = useState(false);
+  const [dataSource, setDataSource] = useState<DataSource>('offline');
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [side, setSide] = useState<'Buy' | 'Sell'>('Buy');
@@ -93,27 +96,72 @@ export default function TradingLab() {
   const portfolio = replayLedger(store.ledger, marks);
   const openOrders = store.ledger.orders.filter(order => order.status === 'Open');
   const marketSignals = useMemo(() => signals(data.candles), [data.candles]);
-  const filtered = demoInstruments.filter(item =>
+  
+  // Combine demo and MoneyPilot instruments
+  const allInstruments = useMemo(() => {
+    const combined = [...demoInstruments];
+    for (const mp of moneyPilotInstruments) {
+      if (!combined.find(i => i.symbol === mp.symbol)) {
+        combined.push(mp);
+      }
+    }
+    return combined;
+  }, []);
+  
+  const filtered = allInstruments.filter(item =>
     `${item.symbol} ${item.name}`.toLowerCase().includes(search.toLowerCase())
   );
+  
   const volumeTrend = volumeAverage(data.candles);
   const latestAverageVolume = volumeTrend.at(-1);
+  
+  const marketStatus = moneyPilotProvider.getMarketStatus();
 
-  async function choose(next: MarketInstrument, nextInterval = interval, explicitDemo = demo) {
+  async function choose(next: MarketInstrument, nextInterval = interval, source: DataSource = dataSource) {
     setInstrument(next);
     setInterval(nextInterval);
-    if (!explicitDemo) {
+    
+    if (source === 'offline') {
       setData(missingMarketData(next, nextInterval));
       return;
     }
+    
     const id = ++request.current;
     setLoading(true);
     try {
-      const series = await demoProvider.candles(next, nextInterval);
+      let series;
+      if (source === 'moneyPilot') {
+        // Try MoneyPilot first, fall back to demo if unavailable
+        series = await moneyPilotProvider.getHistoricalSeries(next, nextInterval);
+        if (!series.available) {
+          series = await demoProvider.candles(next, nextInterval);
+          setFeedback({ text: 'MoneyPilot data unavailable, showing demo data', error: false });
+        }
+      } else {
+        series = await demoProvider.candles(next, nextInterval);
+      }
+      
       if (id !== request.current) return;
       const refreshed = refreshLimitOrders(store.ledger, series);
       if (refreshed !== store.ledger) persist(refreshed);
       setData(series);
+    } finally {
+      if (id === request.current) setLoading(false);
+    }
+  }
+  
+  async function loadLiveQuote() {
+    const id = ++request.current;
+    setLoading(true);
+    try {
+      const series = await moneyPilotProvider.getLiveSeries(instrument);
+      if (id !== request.current) return;
+      if (series.available) {
+        setData(series);
+        setDataSource('moneyPilot');
+      } else {
+        setFeedback({ text: 'Live quote unavailable for this instrument', error: true });
+      }
     } finally {
       if (id === request.current) setLoading(false);
     }
@@ -171,13 +219,16 @@ export default function TradingLab() {
         title="Trading Lab"
         desc="Inspect price history, transparent signals and a virtual ledger. No real-money execution is available."
         action={
-          <Chip>
-            {data.available
-              ? data.mode === 'demo'
-                ? 'SYNTHETIC DEMO'
-                : data.mode.toUpperCase()
-              : 'OFFLINE'}
-          </Chip>
+          <div className="flex gap-2">
+            <Chip>
+              {data.available
+                ? data.mode === 'demo'
+                  ? 'SYNTHETIC DEMO'
+                  : data.mode.toUpperCase()
+                : 'OFFLINE'}
+            </Chip>
+            <Chip>{marketStatus.toUpperCase()}</Chip>
+          </div>
         }
       />
       {store.error && (
@@ -223,33 +274,49 @@ export default function TradingLab() {
                 </li>
               ))}
             </ul>
-            {!demo && (
-              <div className="mt-3 border-t border-white/10 pt-3">
-                <p className={muted}>No market-data contract is available in Web v1.</p>
+            <div className="mt-3 border-t border-white/10 pt-3">
+              <p className={muted}>Market: {marketStatus}</p>
+              <div className="mt-2 flex flex-col gap-2">
                 <button
                   type="button"
-                  className={`${outline} mt-3 w-full`}
+                  className={`${outline} w-full ${dataSource === 'moneyPilot' ? 'bg-white/15' : ''}`}
                   onClick={() => {
-                    setDemo(true);
-                    void choose(instrument, interval, true);
+                    setDataSource('moneyPilot');
+                    void choose(instrument, interval, 'moneyPilot');
                   }}
                 >
-                  Load synthetic demo
+                  MoneyPilot Historical
+                </button>
+                <button
+                  type="button"
+                  className={`${outline} w-full ${dataSource === 'demo' ? 'bg-white/15' : ''}`}
+                  onClick={() => {
+                    setDataSource('demo');
+                    void choose(instrument, interval, 'demo');
+                  }}
+                >
+                  Synthetic Demo
+                </button>
+                <button
+                  type="button"
+                  className={`${outline} w-full`}
+                  onClick={() => void loadLiveQuote()}
+                  disabled={loading}
+                >
+                  Load Live Quote
+                </button>
+                <button
+                  type="button"
+                  className={`${outline} w-full`}
+                  onClick={() => {
+                    setDataSource('offline');
+                    setData(missingMarketData(instrument, interval));
+                  }}
+                >
+                  Offline
                 </button>
               </div>
-            )}
-            {demo && (
-              <button
-                type="button"
-                className={`${outline} mt-3 w-full`}
-                onClick={() => {
-                  setDemo(false);
-                  setData(missingMarketData(instrument, interval));
-                }}
-              >
-                Return to offline
-              </button>
-            )}
+            </div>
           </Panel>
         </aside>
 
@@ -288,7 +355,7 @@ export default function TradingLab() {
                     ? data.mode
                     : 'Unavailable'}
               </span>
-              <span>Market state: unavailable</span>
+              <span>Market: {marketStatus}</span>
               <span>Zone: {data.timezone}</span>
               <span>Updated: {data.available ? formatDate(data.updatedAt) : 'Never'}</span>
             </div>
