@@ -32,6 +32,7 @@ import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.ZoomSuggestionOptions
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
@@ -40,8 +41,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /** CameraX + bundled, on-device ML Kit QR path. No image or decoded text is persisted. */
 class PairingQrCaptureActivity : ComponentActivity() {
-    private val attemptId = java.util.UUID.randomUUID().toString().take(8)
-    private val attemptStartedMs = SystemClock.elapsedRealtime()
+    private var attemptId = ""
+    private var attemptStartedMs = 0L
     private val finished = AtomicBoolean(false)
     private val analyzerExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -53,6 +54,8 @@ class PairingQrCaptureActivity : ComponentActivity() {
     private var analysisUseCase: ImageAnalysis? = null
     private var camera: Camera? = null
     private var previewReadyMs: Long? = null
+    private var firstQrCandidateMs: Long? = null
+    private var analyzerConfigured = false
     private var firstFrameLogged = false
     private var failureLogged = false
     private val slowScanRunnable = Runnable {
@@ -64,11 +67,10 @@ class PairingQrCaptureActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        attemptId = intent.getStringExtra(EXTRA_ATTEMPT_ID) ?: java.util.UUID.randomUUID().toString().take(8)
+        attemptStartedMs = intent.getLongExtra(EXTRA_STARTED_MS, SystemClock.elapsedRealtime())
         window.statusBarColor = Color.BLACK
         window.navigationBarColor = Color.BLACK
-        scanner = BarcodeScanning.getClient(
-            BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build(),
-        )
         buildScannerUi()
         Log.i(TAG, "scan_started engine=MLKIT attempt=$attemptId mono_ms=$attemptStartedMs")
         mainHandler.postDelayed(slowScanRunnable, 5_000)
@@ -156,6 +158,7 @@ class PairingQrCaptureActivity : ComponentActivity() {
                         Log.i(TAG, "preview_ready engine=MLKIT attempt=$attemptId since_start_ms=${previewReadyMs!! - attemptStartedMs}")
                         status.text = "Camera ready · keep the signed QR in view"
                         focusAt(previewView.width / 2f, previewView.height / 2f)
+                        analysisUseCase?.let(::configureAnalyzer)
                     }
                 }
 
@@ -174,49 +177,6 @@ class PairingQrCaptureActivity : ComponentActivity() {
                     .setResolutionSelector(resolution)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
-                analysis.setAnalyzer(analyzerExecutor) { proxy ->
-                    val mediaImage = proxy.image
-                    if (mediaImage == null || finished.get()) {
-                        proxy.close()
-                        return@setAnalyzer
-                    }
-                    if (!firstFrameLogged) {
-                        firstFrameLogged = true
-                        Log.i(
-                            TAG,
-                            "first_frame engine=MLKIT attempt=$attemptId since_start_ms=${SystemClock.elapsedRealtime() - attemptStartedMs} size=${proxy.width}x${proxy.height} rotation=${proxy.imageInfo.rotationDegrees}",
-                        )
-                    }
-                    val input = InputImage.fromMediaImage(mediaImage, proxy.imageInfo.rotationDegrees)
-                    scanner.process(input)
-                        .addOnSuccessListener(analyzerExecutor) { barcodes ->
-                            val decoded = barcodes.asSequence()
-                                .filter { it.format == Barcode.FORMAT_QR_CODE }
-                                .mapNotNull { it.rawValue }
-                                .firstOrNull { it.isNotBlank() && it.length <= MAX_QR_CHARS }
-                            if (decoded != null && finished.compareAndSet(false, true)) {
-                                val now = SystemClock.elapsedRealtime()
-                                val ready = previewReadyMs ?: attemptStartedMs
-                                Log.i(
-                                    TAG,
-                                    "decode_success engine=MLKIT attempt=$attemptId from_preview_ms=${now - ready} total_ms=${now - attemptStartedMs} chars=${decoded.length}",
-                                )
-                                runOnUiThread {
-                                    setResult(RESULT_OK, Intent().putExtra(EXTRA_QR_PAYLOAD, decoded))
-                                    finish()
-                                }
-                            }
-                        }
-                        .addOnFailureListener(analyzerExecutor) { error ->
-                            if (!failureLogged) {
-                                failureLogged = true
-                                Log.w(TAG, "decode_error engine=MLKIT attempt=$attemptId type=${error.javaClass.simpleName}")
-                                runOnUiThread { status.text = "Scanner error · use ZXing fallback or paste the invitation" }
-                            }
-                        }
-                        .addOnCompleteListener(analyzerExecutor) { proxy.close() }
-                }
-                provider?.unbindAll()
                 camera = provider?.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                 previewUseCase = preview
                 analysisUseCase = analysis
@@ -228,6 +188,87 @@ class PairingQrCaptureActivity : ComponentActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
+    private fun configureAnalyzer(analysis: ImageAnalysis) {
+        if (analyzerConfigured || finished.get()) return
+        val boundCamera = camera ?: return
+        analyzerConfigured = true
+        val maxZoom = boundCamera.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
+        val options = BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .enableAllPotentialBarcodes()
+        if (maxZoom > 1f) {
+            val zoom = ZoomSuggestionOptions.Builder(ZoomSuggestionOptions.ZoomCallback { ratio ->
+                if (ratio <= 1f || ratio > maxZoom) {
+                    false
+                } else {
+                    val requestedAt = SystemClock.elapsedRealtime()
+                    boundCamera.cameraControl.setZoomRatio(ratio).addListener({
+                        Log.i(TAG, "auto_zoom engine=MLKIT attempt=$attemptId ratio=$ratio elapsed_ms=${SystemClock.elapsedRealtime() - requestedAt}")
+                    }, ContextCompat.getMainExecutor(this))
+                    true
+                }
+            }).setMaxSupportedZoomRatio(maxZoom).build()
+            options.setZoomSuggestionOptions(zoom)
+        }
+        scanner = BarcodeScanning.getClient(options.build())
+        analysis.setAnalyzer(analyzerExecutor, ::analyzeFrame)
+        Log.i(TAG, "decoder_ready engine=MLKIT attempt=$attemptId max_zoom=$maxZoom auto_zoom=${maxZoom > 1f} formats=QR")
+    }
+
+    private fun analyzeFrame(proxy: androidx.camera.core.ImageProxy) {
+        val mediaImage = proxy.image
+        if (mediaImage == null || finished.get()) {
+            proxy.close()
+            return
+        }
+        if (!firstFrameLogged) {
+            firstFrameLogged = true
+            val luma = sampleLuma(proxy)
+            Log.i(
+                TAG,
+                "first_frame engine=MLKIT attempt=$attemptId since_start_ms=${SystemClock.elapsedRealtime() - attemptStartedMs} size=${proxy.width}x${proxy.height} rotation=${proxy.imageInfo.rotationDegrees} y_mean=${luma.mean} y_range=${luma.min}-${luma.max}",
+            )
+        }
+        val input = InputImage.fromMediaImage(mediaImage, proxy.imageInfo.rotationDegrees)
+        scanner.process(input)
+            .addOnSuccessListener(analyzerExecutor) { barcodes ->
+                val candidate = barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE && it.boundingBox != null }
+                if (candidate != null && firstQrCandidateMs == null) {
+                    val now = SystemClock.elapsedRealtime()
+                    firstQrCandidateMs = now
+                    val ready = previewReadyMs ?: attemptStartedMs
+                    val box = candidate.boundingBox
+                    Log.i(TAG, "qr_candidate engine=MLKIT attempt=$attemptId from_preview_ms=${now - ready} bbox=${box?.width() ?: 0}x${box?.height() ?: 0} decoded=${!candidate.rawValue.isNullOrBlank()}")
+                    runOnUiThread { if (!finished.get()) status.text = "QR detected · hold steady" }
+                }
+                val detected = barcodes.asSequence()
+                    .filter { it.format == Barcode.FORMAT_QR_CODE }
+                    .mapNotNull { it.rawValue }
+                    .firstOrNull { it.isNotBlank() && it.length <= MAX_QR_CHARS }
+                if (detected != null && finished.compareAndSet(false, true)) {
+                    val now = SystemClock.elapsedRealtime()
+                    val ready = previewReadyMs ?: attemptStartedMs
+                    val box = candidate?.boundingBox
+                    Log.i(
+                        TAG,
+                        "decode_success engine=MLKIT attempt=$attemptId from_preview_ms=${now - ready} from_candidate_ms=${firstQrCandidateMs?.let { now - it } ?: -1} total_ms=${now - attemptStartedMs} chars=${detected.length} bbox=${box?.width() ?: 0}x${box?.height() ?: 0}",
+                    )
+                    runOnUiThread {
+                        setResult(RESULT_OK, Intent().putExtra(EXTRA_QR_PAYLOAD, detected))
+                        finish()
+                    }
+                }
+            }
+            .addOnFailureListener(analyzerExecutor) { error ->
+                if (!failureLogged) {
+                    failureLogged = true
+                    Log.w(TAG, "decode_error engine=MLKIT attempt=$attemptId type=${error.javaClass.simpleName}")
+                    runOnUiThread { status.text = "Scanner error · use ZXing fallback or paste the invitation" }
+                }
+            }
+            .addOnCompleteListener(analyzerExecutor) { proxy.close() }
+    }
+
     private fun focusAt(x: Float, y: Float) {
         val activeCamera = camera ?: return
         if (previewView.width <= 0 || previewView.height <= 0) return
@@ -236,8 +277,40 @@ class PairingQrCaptureActivity : ComponentActivity() {
             point,
             FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
         ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
-        activeCamera.cameraControl.startFocusAndMetering(action)
+        val focusStartedMs = SystemClock.elapsedRealtime()
+        val focusFuture = activeCamera.cameraControl.startFocusAndMetering(action)
+        focusFuture.addListener({
+            runCatching { focusFuture.get() }
+                .onSuccess { Log.i(TAG, "autofocus_result engine=MLKIT attempt=$attemptId elapsed_ms=${SystemClock.elapsedRealtime() - focusStartedMs} success=${it.isFocusSuccessful}") }
+                .onFailure { Log.w(TAG, "autofocus_error engine=MLKIT attempt=$attemptId type=${it.javaClass.simpleName}") }
+        }, ContextCompat.getMainExecutor(this))
     }
+
+    /** Log only coarse brightness statistics so a black feed can be distinguished from a decoder miss. */
+    private fun sampleLuma(proxy: androidx.camera.core.ImageProxy): LumaStats {
+        val buffer = proxy.planes.firstOrNull()?.buffer?.duplicate() ?: return LumaStats(0, 0, 0)
+        if (!buffer.hasRemaining()) return LumaStats(0, 0, 0)
+        val size = buffer.remaining()
+        val targetSamples = 512
+        val step = maxOf(1, size / targetSamples)
+        var min = 255
+        var max = 0
+        var sum = 0L
+        var count = 0
+        while (buffer.hasRemaining()) {
+            val value = buffer.get().toInt() and 0xff
+            if (count % step == 0) {
+                min = minOf(min, value)
+                max = maxOf(max, value)
+                sum += value
+            }
+            count++
+        }
+        val samples = (count + step - 1) / step
+        return LumaStats((sum / maxOf(1, samples)).toInt(), min, max)
+    }
+
+    private data class LumaStats(val mean: Int, val min: Int, val max: Int)
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(slowScanRunnable)
@@ -245,7 +318,7 @@ class PairingQrCaptureActivity : ComponentActivity() {
             Log.i(TAG, "scan_ended engine=MLKIT attempt=$attemptId outcome=CANCELED total_ms=${SystemClock.elapsedRealtime() - attemptStartedMs}")
         }
         provider?.unbind(*listOfNotNull(previewUseCase, analysisUseCase).toTypedArray())
-        runCatching { scanner.close() }
+        if (::scanner.isInitialized) runCatching { scanner.close() }
         analyzerExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -280,6 +353,8 @@ class PairingQrCaptureActivity : ComponentActivity() {
     companion object {
         const val EXTRA_QR_PAYLOAD = "com.jarvis.companion.extra.PAIRING_QR_PAYLOAD"
         const val EXTRA_USE_ZXING = "com.jarvis.companion.extra.PAIRING_USE_ZXING"
+        const val EXTRA_ATTEMPT_ID = "com.jarvis.companion.extra.QR_ATTEMPT_ID"
+        const val EXTRA_STARTED_MS = "com.jarvis.companion.extra.QR_STARTED_MS"
         private const val MAX_QR_CHARS = 8192
         private const val TAG = "ThozhaPairingQr"
     }

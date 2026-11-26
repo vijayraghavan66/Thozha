@@ -40,6 +40,7 @@ android {
         targetSdk = 37
         versionCode = 2
         versionName = "0.1.1"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("boolean", "FCM_CONFIGURED", hasFirebaseConfig.toString())
         manifestPlaceholders["fcmMessagingServiceEnabled"] = hasFirebaseConfig.toString()
         // Vivo V2514 is arm64-v8a. TDLib is built for this ABI only (official source build, see PROGRESS.md).
@@ -68,6 +69,9 @@ android {
 
 dependencies {
     testImplementation("org.json:json:20250517")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
     // Firebase is optional: its artifacts and FCM service are compiled only when google-services.json exists.
     // Firebase artifacts are not in the offline Gradle cache, so they must not be required for other builds.
     if (hasFirebaseConfig) {

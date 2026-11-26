@@ -1265,8 +1265,12 @@ class AdvancedActivity : ComponentActivity() {
         render()
         scanAttemptId = java.util.UUID.randomUUID().toString().take(8)
         scanAttemptStartedMs = android.os.SystemClock.elapsedRealtime()
-        android.util.Log.i("ThozhaPairingQr", "scan_started engine=MLKIT attempt=$scanAttemptId mono_ms=$scanAttemptStartedMs")
-        cameraXPairingScanner.launch(Intent(this, PairingQrCaptureActivity::class.java))
+        android.util.Log.i("ThozhaPairingQr", "scan_launch engine=MLKIT attempt=$scanAttemptId mono_ms=$scanAttemptStartedMs")
+        cameraXPairingScanner.launch(
+            Intent(this, PairingQrCaptureActivity::class.java)
+                .putExtra(PairingQrCaptureActivity.EXTRA_ATTEMPT_ID, scanAttemptId)
+                .putExtra(PairingQrCaptureActivity.EXTRA_STARTED_MS, scanAttemptStartedMs),
+        )
     }
 
     private fun startZxingQrScanner() {
