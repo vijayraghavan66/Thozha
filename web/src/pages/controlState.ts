@@ -39,7 +39,7 @@ export function httpStatus(error: unknown) {
   return error instanceof WebApiError ? error.status : undefined;
 }
 
-export function controlError(error: unknown, action: string) {
+export function controlError(error: unknown, action: string): string {
   if (error instanceof WebApiError && error.detail) return error.detail;
   if (httpStatus(error) === 503)
     return `The backend could not ${action}. The service may be disabled or unavailable.`;
