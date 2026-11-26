@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Database } from 'better-sqlite3';
+import type { Database } from './db/sqlAdapter';
 
 // ============================================================================
 // Core Domain Types
@@ -26,7 +26,7 @@ export type InstrumentId = z.infer<typeof instrumentIdSchema>;
 
 export const quoteSchema = z.object({
   instrument: instrumentIdSchema,
-  timestamp: z.iso.datetime(),
+  timestamp: z.coerce.date(),
   bid: z.number().positive(),
   ask: z.number().positive(),
   last: z.number().positive(),
@@ -68,15 +68,15 @@ export const orderSchema = z.object({
   status: orderStatusSchema,
   filledQuantity: z.number().int().nonnegative(),
   averageFillPrice: z.number().positive().optional(),
-  createdAt: z.iso.datetime(),
-  updatedAt: z.iso.datetime(),
-  submittedAt: z.iso.datetime().optional(),
-  filledAt: z.iso.datetime().optional(),
-  canceledAt: z.iso.datetime().optional(),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
+  submittedAt: z.coerce.date().optional(),
+  filledAt: z.coerce.date().optional(),
+  canceledAt: z.coerce.date().optional(),
   rejectedReason: z.string().optional(),
   idempotencyKey: z.string(),
   timeInForce: z.enum(['DAY', 'GTC']).default('DAY'),
-  expireAt: z.iso.datetime().optional(),
+  expireAt: z.coerce.date().optional(),
 });
 export type Order = z.infer<typeof orderSchema>;
 
@@ -89,7 +89,7 @@ export const fillSchema = z.object({
   fillPrice: z.number().positive(),
   commission: currencySchema,
   taxes: currencySchema,
-  timestamp: z.iso.datetime(),
+  timestamp: z.coerce.date(),
   exchangeFillId: z.string().optional(),
 });
 export type Fill = z.infer<typeof fillSchema>;
@@ -102,7 +102,7 @@ export const positionSchema = z.object({
   marketValue: z.number(), // Current market value
   unrealizedPnl: z.number(), // In minor units (paise)
   realizedPnl: z.number(), // In minor units (paise)
-  lastUpdated: z.iso.datetime(),
+  lastUpdated: z.coerce.date(),
 });
 export type Position = z.infer<typeof positionSchema>;
 
@@ -112,7 +112,7 @@ export const cashTransactionSchema = z.object({
   type: z.enum(['DEPOSIT', 'WITHDRAWAL', 'DIVIDEND', 'COMMISSION', 'TAX', 'FILL']),
   amount: z.number().int(), // Can be negative
   balanceAfter: z.number().int(),
-  timestamp: z.iso.datetime(),
+  timestamp: z.coerce.date(),
   description: z.string(),
   referenceId: z.string().optional(),
 });
@@ -125,8 +125,8 @@ export const portfolioSchema = z.object({
   initialCash: z.number().int(),
   currentCash: z.number().int(),
   totalEquity: z.number(),
-  createdAt: z.iso.datetime(),
-  updatedAt: z.iso.datetime(),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
   status: z.enum(['ACTIVE', 'PAUSED', 'CLOSED']),
 });
 export type Portfolio = z.infer<typeof portfolioSchema>;
@@ -180,15 +180,15 @@ export const strategySchema = z.object({
   strategyId: z.string().uuid(),
   portfolioId: z.string().uuid(),
   name: z.string().max(100),
-  parameters: z.record(z.unknown()),
+  parameters: z.record(z.string(), z.unknown()),
   status: strategyStatusSchema,
   riskLimits: riskLimitsSchema,
-  createdAt: z.iso.datetime(),
-  updatedAt: z.iso.datetime(),
-  startedAt: z.iso.datetime().optional(),
-  pausedAt: z.iso.datetime().optional(),
-  stoppedAt: z.iso.datetime().optional(),
-  failedAt: z.iso.datetime().optional(),
+  createdAt: z.coerce.date(),
+  updatedAt: z.coerce.date(),
+  startedAt: z.coerce.date().optional(),
+  pausedAt: z.coerce.date().optional(),
+  stoppedAt: z.coerce.date().optional(),
+  failedAt: z.coerce.date().optional(),
   failureReason: z.string().optional(),
 });
 export type Strategy = z.infer<typeof strategySchema>;
@@ -200,7 +200,7 @@ export const signalSchema = z.object({
   side: orderSideSchema,
   quantity: z.number().int().positive(),
   reason: z.string(),
-  timestamp: z.iso.datetime(),
+  timestamp: z.coerce.date(),
   confidence: z.number().min(0).max(1).optional(),
 });
 export type Signal = z.infer<typeof signalSchema>;
@@ -212,8 +212,8 @@ export type Signal = z.infer<typeof signalSchema>;
 export const backtestConfigSchema = z.object({
   configId: z.string().uuid(),
   strategyId: z.string().uuid(),
-  startDate: z.iso.datetime(),
-  endDate: z.iso.datetime(),
+  startDate: z.string().datetime(),
+  endDate: z.string().datetime(),
   initialCash: z.number().int(),
   commissionRate: z.number().min(0).max(1), // As decimal (e.g., 0.001 = 0.1%)
   slippageBps: z.number().min(0), // Basis points
@@ -247,7 +247,7 @@ export type BacktestResult = z.infer<typeof backtestResultSchema>;
 // ============================================================================
 
 export function initDatabase(db: Database) {
-  db.exec(`
+  const sql = `
     CREATE TABLE IF NOT EXISTS portfolios (
       portfolio_id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -437,5 +437,6 @@ export function initDatabase(db: Database) {
 
     CREATE INDEX IF NOT EXISTS idx_violations_strategy ON risk_violations(strategy_id);
     CREATE INDEX IF NOT EXISTS idx_violations_timestamp ON risk_violations(timestamp);
-  `);
+  `;
+  db.exec(sql);
 }

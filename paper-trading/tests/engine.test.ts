@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import Database from 'better-sqlite3';
-import { initDatabase } from '../types';
-import { PortfolioRepository, OrderRepository, FillRepository, PositionRepository, CashTransactionRepository } from '../db/repositories';
-import { VirtualTradingEngine } from '../engine/virtualEngine';
+import Database from '../src/db/sqlAdapter';
+import { initDatabase } from '../src/types';
+import { PortfolioRepository, OrderRepository, FillRepository, PositionRepository, CashTransactionRepository } from '../src/db/repositories';
+import { VirtualTradingEngine } from '../src/engine/virtualEngine';
 import { v4 as uuidv4 } from 'uuid';
 
 describe('Virtual Trading Engine', () => {
@@ -10,8 +10,8 @@ describe('Virtual Trading Engine', () => {
   let engine: VirtualTradingEngine;
   let portfolioId: string;
 
-  beforeEach(() => {
-    db = new Database(':memory:');
+  beforeEach(async () => {
+    db = await Database.create(':memory:');
     initDatabase(db);
     engine = new VirtualTradingEngine(db, {
       commissionRate: 0.001,
@@ -27,9 +27,9 @@ describe('Virtual Trading Engine', () => {
       portfolioId,
       name: 'Test Portfolio',
       baseCurrency: 'INR',
-      initialCash: 10000000, // ₹1,00,000 in paise
-      currentCash: 10000000,
-      totalEquity: 10000000,
+      initialCash: 50000000, // ₹5,00,000 in paise (enough for 100 shares @ ~2500)
+      currentCash: 50000000,
+      totalEquity: 50000000,
       status: 'ACTIVE',
       createdAt: now,
       updatedAt: now,
@@ -425,7 +425,7 @@ describe('Virtual Trading Engine', () => {
         instrumentType: 'EQUITY' as const,
       };
 
-      const initialCash = 10000000; // ₹1,00,000
+      const initialCash = 50000000; // ₹5,00,000
 
       const orderResult = engine.submitOrder(
         portfolioId,

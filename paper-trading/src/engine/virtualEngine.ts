@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { Database } from 'better-sqlite3';
+import type { Database } from '../db/sqlAdapter';
 import {
   OrderRepository,
   FillRepository,
@@ -165,16 +165,20 @@ export class VirtualTradingEngine {
     const fillQty = order.quantity - order.filledQuantity;
     const portfolio = this.portfolioRepo.findById(order.portfolioId)!;
 
-    // Calculate costs
-    const grossValue = executionPrice * fillQty;
-    const commission = Math.round(grossValue * this.config.commissionRate * 100); // Convert to paise
-    const taxes = Math.round(grossValue * 0.0001 * 100); // Simplified STT at 0.01%
+    // Calculate costs (all in paise to avoid floating point issues)
+    // executionPrice is in INR, fillQty is number of shares
+    // grossValuePaise = price * qty * 100 (converting INR to paise)
+    const grossValuePaise = Math.round(executionPrice * fillQty * 100);
+    const commissionPaise = Math.round(grossValuePaise * this.config.commissionRate);
+    const taxesPaise = Math.round(grossValuePaise * 0.0001); // Simplified STT at 0.01%
 
-    const totalCost = grossValue + (commission + taxes) / 100; // Convert paise back to INR
+    const totalCostPaise = grossValuePaise + commissionPaise + taxesPaise;
 
     // Validate cash for buys
     if (order.side === 'BUY') {
-      if (portfolio.currentCash < Math.floor(totalCost * 100)) {
+      const cashNeeded = totalCostPaise;
+      const cashAvailable = portfolio.currentCash;
+      if (cashAvailable < cashNeeded) {
         return { notFilled: { reason: 'Insufficient cash', code: 'INSUFFICIENT_CASH' } };
       }
     }
@@ -200,8 +204,8 @@ export class VirtualTradingEngine {
       side: order.side,
       quantity: fillQty,
       fillPrice: executionPrice,
-      commission: { minorUnits: commission },
-      taxes: { minorUnits: taxes },
+      commission: { minorUnits: commissionPaise },
+      taxes: { minorUnits: taxesPaise },
       timestamp: now,
       exchangeFillId,
     };
@@ -222,8 +226,8 @@ export class VirtualTradingEngine {
     // Update position
     this.updatePosition(order.portfolioId, order.instrument, order.side, fillQty, executionPrice);
 
-    // Update cash
-    const cashChange = order.side === 'BUY' ? -Math.floor(totalCost * 100) : Math.floor((grossValue - commission / 100 - taxes / 100) * 100);
+    // Update cash (all values already in paise)
+    const cashChange = order.side === 'BUY' ? -totalCostPaise : (grossValuePaise - commissionPaise - taxesPaise);
     const cashTx: CashTransaction = {
       transactionId: uuidv4(),
       portfolioId: order.portfolioId,
@@ -247,8 +251,8 @@ export class VirtualTradingEngine {
         fills: [fill],
         remainingQuantity: 0,
         averageFillPrice: executionPrice,
-        totalCommission: { minorUnits: commission },
-        totalTaxes: { minorUnits: taxes },
+        totalCommission: { minorUnits: commissionPaise },
+        totalTaxes: { minorUnits: taxesPaise },
       },
     };
   }
@@ -403,10 +407,11 @@ export class VirtualTradingEngine {
 
       // If filled but order not updated, fix it
       if (order.filledQuantity > 0 && order.status !== 'FILLED') {
+        const orderFills = this.fillRepo.findByOrderId(order.orderId);
         const updated = {
           ...order,
-          status: order.filledQuantity === order.quantity ? 'FILLED' : 'PARTIALLY_FILLED',
-          filledAt: order.fills?.[order.fills.length - 1]?.timestamp,
+          status: (order.filledQuantity === order.quantity ? 'FILLED' : 'PARTIALLY_FILLED') as Order['status'],
+          filledAt: orderFills[orderFills.length - 1]?.timestamp,
           updatedAt: new Date(),
         };
         this.orderRepo.update(updated);

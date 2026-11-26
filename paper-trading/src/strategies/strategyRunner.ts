@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
-import type { Database } from 'better-sqlite3';
+import type { Database } from '../db/sqlAdapter';
 import { StrategyRepository, SignalRepository } from '../db/repositories';
 import { RiskEngine } from '../risk/riskEngine';
 import { VirtualTradingEngine } from '../engine/virtualEngine';
@@ -276,8 +276,8 @@ export class StrategyRunner {
     const config: BacktestConfig = {
       configId: uuidv4(),
       strategyId,
-      startDate,
-      endDate,
+      startDate: startDate.toISOString(),
+      endDate: endDate.toISOString(),
       initialCash,
       commissionRate,
       slippageBps,
@@ -285,12 +285,29 @@ export class StrategyRunner {
     };
 
     // Save config
-    this.strategyRepo.db.exec(`
-      INSERT INTO backtest_configs (
-        config_id, strategy_id, start_date, end_date, initial_cash,
-        commission_rate, slippage_bps, data_sources
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `.replace(/\?/g, () => '?')); // Placeholder - would use proper bindings
+    const backtestRepo = new (class {
+      constructor(private db: Database) {}
+      saveConfig(config: BacktestConfig): BacktestConfig {
+        const stmt = this.db.prepare(`
+          INSERT INTO backtest_configs (
+            config_id, strategy_id, start_date, end_date, initial_cash,
+            commission_rate, slippage_bps, data_sources
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        stmt.run(
+          config.configId,
+          config.strategyId,
+          config.startDate,
+          config.endDate,
+          config.initialCash,
+          config.commissionRate,
+          config.slippageBps,
+          JSON.stringify(config.dataSources)
+        );
+        return config;
+      }
+    })(this.db);
+    backtestRepo.saveConfig(config);
 
     // Would run actual backtest logic here
     const result: BacktestResult = {
@@ -303,8 +320,8 @@ export class StrategyRunner {
       losingTrades: 0,
       equityCurve: [],
       trades: [],
-      startedAt: new Date(),
-      completedAt: new Date(),
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
     };
 
     return result;
@@ -321,7 +338,7 @@ export class StrategyRunner {
    * List strategies by status
    */
   listByStatus(status: StrategyStatus): Strategy[] {
-    const stmt = this.strategyRepo.db.prepare('SELECT * FROM strategies WHERE status = ?');
+    const stmt = this.db.prepare('SELECT * FROM strategies WHERE status = ?');
     const rows = stmt.all(status) as any[];
     return rows.map((row) => ({
       ...row,

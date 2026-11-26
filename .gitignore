@@ -35,3 +35,9 @@ PROGRESS.md
 .idea/
 .DS_Store
 .migration-staging/
+
+# Node / TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+

@@ -1,7 +1,13 @@
 import { z } from 'zod';
-import Database from 'better-sqlite3';
+import type { Database } from '../db/sqlAdapter';
 import { initDatabase } from '../types';
 import type { Portfolio, Order, Fill, Position, CashTransaction, Strategy, Signal, BacktestConfig, BacktestResult } from '../types';
+
+function toISOString(date: Date | string | undefined | null): string | null {
+  if (date == null) return null;
+  if (typeof date === 'string') return date;
+  return date.toISOString();
+}
 
 // ============================================================================
 // Portfolio Repository
@@ -34,7 +40,13 @@ export class PortfolioRepository {
     const row = stmt.get(portfolioId) as any;
     if (!row) return null;
     return {
-      ...row,
+      portfolioId: row.portfolio_id,
+      name: row.name,
+      baseCurrency: row.base_currency,
+      initialCash: row.initial_cash,
+      currentCash: row.current_cash,
+      totalEquity: row.total_equity,
+      status: row.status,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
     };
@@ -60,7 +72,13 @@ export class PortfolioRepository {
     const stmt = this.db.prepare(`SELECT * FROM portfolios WHERE status = ?`);
     const rows = stmt.all(status) as any[];
     return rows.map((row) => ({
-      ...row,
+      portfolioId: row.portfolio_id,
+      name: row.name,
+      baseCurrency: row.base_currency,
+      initialCash: row.initial_cash,
+      currentCash: row.current_cash,
+      totalEquity: row.total_equity,
+      status: row.status,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
     }));
@@ -151,17 +169,28 @@ export class OrderRepository {
 
   private mapRow(row: any): Order {
     return {
-      ...row,
+      orderId: row.order_id,
+      portfolioId: row.portfolio_id,
       instrument: {
         exchange: row.exchange as 'NSE' | 'BSE',
         symbol: row.symbol,
         instrumentType: row.instrument_type as 'EQUITY' | 'ETF' | 'INDEX',
       },
+      side: row.side,
+      orderType: row.order_type,
+      quantity: row.quantity,
+      limitPrice: row.limit_price ?? undefined,
+      status: row.status,
+      filledQuantity: row.filled_quantity,
+      averageFillPrice: row.average_fill_price ?? undefined,
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
       submittedAt: row.submitted_at ? new Date(row.submitted_at) : undefined,
       filledAt: row.filled_at ? new Date(row.filled_at) : undefined,
       canceledAt: row.canceled_at ? new Date(row.canceled_at) : undefined,
+      rejectedReason: row.rejected_reason ?? undefined,
+      idempotencyKey: row.idempotency_key,
+      timeInForce: row.time_in_force,
       expireAt: row.expire_at ? new Date(row.expire_at) : undefined,
     };
   }
@@ -202,15 +231,20 @@ export class FillRepository {
     const stmt = this.db.prepare(`SELECT * FROM fills WHERE order_id = ? ORDER BY timestamp ASC`);
     const rows = stmt.all(orderId) as any[];
     return rows.map((row) => ({
-      ...row,
+      fillId: row.fill_id,
+      orderId: row.order_id,
       instrument: {
         exchange: row.exchange as 'NSE' | 'BSE',
         symbol: row.symbol,
         instrumentType: row.instrument_type as 'EQUITY' | 'ETF' | 'INDEX',
       },
+      side: row.side,
+      quantity: row.quantity,
+      fillPrice: row.fill_price,
       commission: { minorUnits: row.commission },
       taxes: { minorUnits: row.taxes },
       timestamp: new Date(row.timestamp),
+      exchangeFillId: row.exchange_fill_id ?? undefined,
     }));
   }
 
@@ -261,12 +295,17 @@ export class PositionRepository {
     const stmt = this.db.prepare(`SELECT * FROM positions WHERE portfolio_id = ?`);
     const rows = stmt.all(portfolioId) as any[];
     return rows.map((row) => ({
-      ...row,
+      portfolioId: row.portfolio_id,
       instrument: {
         exchange: row.exchange as 'NSE' | 'BSE',
         symbol: row.symbol,
         instrumentType: row.instrument_type as 'EQUITY' | 'ETF' | 'INDEX',
       },
+      quantity: row.quantity,
+      averageCost: row.average_cost,
+      marketValue: row.market_value,
+      unrealizedPnl: row.unrealized_pnl,
+      realizedPnl: row.realized_pnl,
       lastUpdated: new Date(row.last_updated),
     }));
   }
@@ -278,12 +317,17 @@ export class PositionRepository {
     const row = stmt.get(portfolioId, instrument.exchange, instrument.symbol, instrument.instrumentType) as any;
     if (!row) return null;
     return {
-      ...row,
+      portfolioId: row.portfolio_id,
       instrument: {
         exchange: row.exchange as 'NSE' | 'BSE',
         symbol: row.symbol,
         instrumentType: row.instrument_type as 'EQUITY' | 'ETF' | 'INDEX',
       },
+      quantity: row.quantity,
+      averageCost: row.average_cost,
+      marketValue: row.market_value,
+      unrealizedPnl: row.unrealized_pnl,
+      realizedPnl: row.realized_pnl,
       lastUpdated: new Date(row.last_updated),
     };
   }
@@ -326,8 +370,14 @@ export class CashTransactionRepository {
     const stmt = this.db.prepare(`SELECT * FROM cash_transactions WHERE portfolio_id = ? ORDER BY timestamp DESC`);
     const rows = stmt.all(portfolioId) as any[];
     return rows.map((row) => ({
-      ...row,
+      transactionId: row.transaction_id,
+      portfolioId: row.portfolio_id,
+      type: row.type,
+      amount: row.amount,
+      balanceAfter: row.balance_after,
       timestamp: new Date(row.timestamp),
+      description: row.description,
+      referenceId: row.reference_id ?? undefined,
     }));
   }
 
@@ -363,12 +413,12 @@ export class StrategyRepository {
       JSON.stringify(strategy.parameters),
       strategy.status,
       JSON.stringify(strategy.riskLimits),
-      strategy.createdAt.toISOString(),
-      strategy.updatedAt.toISOString(),
-      strategy.startedAt?.toISOString() ?? null,
-      strategy.pausedAt?.toISOString() ?? null,
-      strategy.stoppedAt?.toISOString() ?? null,
-      strategy.failedAt?.toISOString() ?? null,
+      toISOString(strategy.createdAt)!,
+      toISOString(strategy.updatedAt)!,
+      toISOString(strategy.startedAt),
+      toISOString(strategy.pausedAt),
+      toISOString(strategy.stoppedAt),
+      toISOString(strategy.failedAt),
       strategy.failureReason ?? null
     );
     return strategy;
@@ -379,8 +429,11 @@ export class StrategyRepository {
     const row = stmt.get(strategyId) as any;
     if (!row) return null;
     return {
-      ...row,
+      strategyId: row.strategy_id,
+      portfolioId: row.portfolio_id,
+      name: row.name,
       parameters: JSON.parse(row.parameters),
+      status: row.status,
       riskLimits: JSON.parse(row.risk_limits),
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
@@ -388,6 +441,7 @@ export class StrategyRepository {
       pausedAt: row.paused_at ? new Date(row.paused_at) : undefined,
       stoppedAt: row.stopped_at ? new Date(row.stopped_at) : undefined,
       failedAt: row.failed_at ? new Date(row.failed_at) : undefined,
+      failureReason: row.failure_reason ?? undefined,
     };
   }
 
@@ -395,8 +449,11 @@ export class StrategyRepository {
     const stmt = this.db.prepare(`SELECT * FROM strategies WHERE portfolio_id = ?`);
     const rows = stmt.all(portfolioId) as any[];
     return rows.map((row) => ({
-      ...row,
+      strategyId: row.strategy_id,
+      portfolioId: row.portfolio_id,
+      name: row.name,
       parameters: JSON.parse(row.parameters),
+      status: row.status,
       riskLimits: JSON.parse(row.risk_limits),
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
@@ -404,6 +461,7 @@ export class StrategyRepository {
       pausedAt: row.paused_at ? new Date(row.paused_at) : undefined,
       stoppedAt: row.stopped_at ? new Date(row.stopped_at) : undefined,
       failedAt: row.failed_at ? new Date(row.failed_at) : undefined,
+      failureReason: row.failure_reason ?? undefined,
     }));
   }
 
@@ -419,7 +477,7 @@ export class StrategyRepository {
       JSON.stringify(strategy.parameters),
       strategy.status,
       JSON.stringify(strategy.riskLimits),
-      strategy.updatedAt.toISOString(),
+      typeof strategy.updatedAt === 'string' ? strategy.updatedAt : strategy.updatedAt.toISOString(),
       strategy.startedAt?.toISOString() ?? null,
       strategy.pausedAt?.toISOString() ?? null,
       strategy.stoppedAt?.toISOString() ?? null,
@@ -427,6 +485,26 @@ export class StrategyRepository {
       strategy.failureReason ?? null,
       strategy.strategyId
     );
+  }
+
+  listByStatus(status: Strategy['status']): Strategy[] {
+    const stmt = this.db.prepare(`SELECT * FROM strategies WHERE status = ?`);
+    const rows = stmt.all(status) as any[];
+    return rows.map((row) => ({
+      strategyId: row.strategy_id,
+      portfolioId: row.portfolio_id,
+      name: row.name,
+      parameters: JSON.parse(row.parameters),
+      status: row.status,
+      riskLimits: JSON.parse(row.risk_limits),
+      createdAt: new Date(row.created_at),
+      updatedAt: new Date(row.updated_at),
+      startedAt: row.started_at ? new Date(row.started_at) : undefined,
+      pausedAt: row.paused_at ? new Date(row.paused_at) : undefined,
+      stoppedAt: row.stopped_at ? new Date(row.stopped_at) : undefined,
+      failedAt: row.failed_at ? new Date(row.failed_at) : undefined,
+      failureReason: row.failure_reason ?? undefined,
+    }));
   }
 }
 
@@ -463,13 +541,18 @@ export class SignalRepository {
     const stmt = this.db.prepare(`SELECT * FROM signals WHERE strategy_id = ? ORDER BY timestamp DESC`);
     const rows = stmt.all(strategyId) as any[];
     return rows.map((row) => ({
-      ...row,
+      signalId: row.signal_id,
+      strategyId: row.strategy_id,
       instrument: {
         exchange: row.exchange as 'NSE' | 'BSE',
         symbol: row.symbol,
         instrumentType: row.instrument_type as 'EQUITY' | 'ETF' | 'INDEX',
       },
+      side: row.side,
+      quantity: row.quantity,
+      reason: row.reason,
       timestamp: new Date(row.timestamp),
+      confidence: row.confidence ?? undefined,
     }));
   }
 }
@@ -491,8 +574,8 @@ export class BacktestRepository {
     stmt.run(
       config.configId,
       config.strategyId,
-      config.startDate.toISOString(),
-      config.endDate.toISOString(),
+      toISOString(config.startDate)!,
+      toISOString(config.endDate)!,
       config.initialCash,
       config.commissionRate,
       config.slippageBps,
@@ -526,8 +609,8 @@ export class BacktestRepository {
       result.averageLoss ?? null,
       JSON.stringify(result.equityCurve),
       JSON.stringify(result.trades),
-      result.startedAt.toISOString(),
-      result.completedAt.toISOString()
+      toISOString(result.startedAt)!,
+      toISOString(result.completedAt)!
     );
     return result;
   }

@@ -1,22 +1,49 @@
-import { initSqlJs, Database as SqlDatabase } from 'sql.js';
+import initSqlJs, { Database as SqlDatabase } from 'sql.js';
+import fs from 'fs';
+import path from 'path';
 
 // ============================================================================
 // SQL.js Database Adapter
-// Replaces better-sqlite3 for better Node.js compatibility
+// Provides a better-sqlite3-compatible API using sql.js for in-memory/file DB
 // ============================================================================
+
+export interface Statement {
+  run(...params: any[]): void;
+  get(...params: any[]): any;
+  all(...params: any[]): any[];
+}
 
 export class Database {
   private db: SqlDatabase;
   private statements = new Map<string, Statement>();
+  private filePath: string | null = null;
 
-  constructor(sqlDb: SqlDatabase) {
+  constructor(sqlDb: SqlDatabase, filePath: string | null = null) {
     this.db = sqlDb;
+    this.filePath = filePath;
   }
 
-  static async create(): Promise<Database> {
+  static async create(filePath?: string): Promise<Database> {
     const SQL = await initSqlJs();
-    const db = new SQL.Database();
-    return new Database(db);
+    
+    if (filePath && fs.existsSync(filePath)) {
+      // Load existing database from file
+      const buffer = fs.readFileSync(filePath);
+      const db = new SQL.Database(buffer);
+      return new Database(db, filePath);
+    } else {
+      // Create in-memory database
+      const db = new SQL.Database();
+      return new Database(db, filePath || null);
+    }
+  }
+
+  async save(): Promise<void> {
+    if (this.filePath) {
+      const data = this.db.export();
+      const buffer = Buffer.from(data);
+      fs.writeFileSync(this.filePath, buffer);
+    }
   }
 
   exec(sql: string): void {
@@ -27,7 +54,7 @@ export class Database {
     if (this.statements.has(sql)) {
       return this.statements.get(sql)!;
     }
-    const stmt = new Statement(this.db, sql);
+    const stmt = new SqlStatement(this.db, sql);
     this.statements.set(sql, stmt);
     return stmt;
   }
@@ -37,7 +64,7 @@ export class Database {
   }
 }
 
-export class Statement {
+class SqlStatement implements Statement {
   private stmt: any;
 
   constructor(private db: SqlDatabase, private sql: string) {
@@ -45,21 +72,30 @@ export class Statement {
   }
 
   run(...params: any[]): void {
-    this.stmt.bind(params);
+    const cleanParams = params.map((p) => (p === undefined ? null : p));
+    this.stmt.bind(cleanParams);
     this.stmt.step();
     this.stmt.reset();
   }
 
   get(...params: any[]): any {
-    this.stmt.bind(params);
-    this.stmt.step();
+    const cleanParams = params.map((p) => (p === undefined ? null : p));
+    this.stmt.bind(cleanParams);
+    const hasRow = this.stmt.step();
+    if (!hasRow) {
+      this.stmt.reset();
+      return undefined;
+    }
     const row = this.stmt.getAsObject();
     this.stmt.reset();
+    // sql.js returns {} for empty results on getAsObject
+    if (Object.keys(row).length === 0) return undefined;
     return row;
   }
 
   all(...params: any[]): any[] {
-    this.stmt.bind(params);
+    const cleanParams = params.map((p) => (p === undefined ? null : p));
+    this.stmt.bind(cleanParams);
     const results: any[] = [];
     while (this.stmt.step()) {
       results.push(this.stmt.getAsObject());
@@ -67,11 +103,6 @@ export class Statement {
     this.stmt.reset();
     return results;
   }
-
-  free(): boolean {
-    return this.stmt.free();
-  }
 }
 
-// Mock for testing compatibility
 export default Database;
