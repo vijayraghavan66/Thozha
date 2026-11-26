@@ -8,11 +8,12 @@ import uuid
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from openjarvis.core.types import ToolCall, ToolResult
 from starlette.requests import Request
 
 import openjarvis.tasks.supervisor as supervisor
 from openjarvis.agents._stubs import AgentResult
+from openjarvis.core.paths import get_config_dir
+from openjarvis.core.types import ToolCall, ToolResult
 from openjarvis.server.routes import _begin_supervised_request
 from openjarvis.server.supervisor_routes import router
 from openjarvis.tasks.supervisor import SupervisorStore, bind_task, current_task_context
@@ -651,7 +652,7 @@ def test_development_codex_cwd_and_registered_mcp_are_workspace_scoped(tmp_path,
         scope="assistant",
         allowed_capabilities=supervisor.LINK_SCOPE_CAPABILITIES["assistant"],
     ):
-        assert Path(_working_directory_for_current_task()) == Path.home() / ".openjarvis"
+        assert Path(_working_directory_for_current_task()) == get_config_dir()
         assistant_overrides = _config_overrides("control")
         assert "features.shell_tool=false" not in assistant_overrides
 
