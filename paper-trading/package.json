@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@types/node": "^22.13.9",
-    "sql.js": "^1.12.0",
+    "better-sqlite3": "^13.2.0",
     "csv-parse": "^5.6.0",
     "luxon": "^3.5.0",
     "uuid": "^11.1.0",
@@ -25,5 +25,8 @@
     "tsx": "^4.19.2",
     "typescript": "~5.9.0",
     "vitest": "^4.1.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.2.0": true
   }
 }

@@ -30,6 +30,8 @@ export interface EngineConfig {
   commissionRate: number; // As decimal (e.g., 0.001 = 0.1%)
   slippageBps: number; // Basis points (e.g., 10 = 0.1%)
   minTick: number; // Minimum price increment
+  stalenessThresholdMs?: number; // Max age for quote to be considered fresh
+  requireMarketHours?: boolean; // Whether to enforce market hours
 }
 
 export interface FillResult {
@@ -62,6 +64,10 @@ export class VirtualTradingEngine {
     this.positionRepo = new PositionRepository(db);
     this.cashRepo = new CashTransactionRepository(db);
     this.portfolioRepo = new PortfolioRepository(db);
+    
+    // Set defaults for market data safeguards
+    this.config.stalenessThresholdMs = config.stalenessThresholdMs ?? 60_000; // 1 minute
+    this.config.requireMarketHours = config.requireMarketHours ?? false;
   }
 
   /**
@@ -151,6 +157,26 @@ export class VirtualTradingEngine {
       order.instrument.instrumentType !== quote.instrument.instrumentType
     ) {
       return { notFilled: { reason: 'Instrument mismatch', code: 'INSTRUMENT_MISMATCH' } };
+    }
+
+    // Market data freshness check
+    const quoteTimestamp = quote.timestamp instanceof Date ? quote.timestamp : new Date(quote.timestamp);
+    const quoteAgeMs = Date.now() - quoteTimestamp.getTime();
+    const freshness = quote.freshness as string;
+    
+    if (freshness !== 'fixture' && freshness !== 'live' && freshness !== 'delayed') {
+      return { notFilled: { reason: 'Quote is historical, not suitable for execution', code: 'STALE_QUOTE' } };
+    }
+    if (freshness !== 'fixture' && quoteAgeMs > (this.config.stalenessThresholdMs || 60_000)) {
+      return { notFilled: { reason: 'Quote is stale', code: 'STALE_QUOTE' } };
+    }
+
+    // Market hours check (if enabled)
+    if (this.config.requireMarketHours) {
+      const marketHours = this.getMarketHours(new Date());
+      if (marketHours !== 'open') {
+        return { notFilled: { reason: 'Market is closed', code: 'MARKET_CLOSED' } };
+      }
     }
 
     // Calculate execution price with slippage
@@ -390,6 +416,31 @@ export class VirtualTradingEngine {
    */
   private applyTickSize(price: number): number {
     return Math.round(price / this.config.minTick) * this.config.minTick;
+  }
+
+  /**
+   * Get current market hours status
+   */
+  private getMarketHours(date: Date): 'open' | 'closed' | 'pre-market' | 'post-market' {
+    const istDate = new Date(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const minutes = istDate.getHours() * 60 + istDate.getMinutes();
+    const day = istDate.getDay();
+
+    // Weekend check
+    if (day === 0 || day === 6) {
+      return 'closed';
+    }
+
+    const NSE_MARKET_OPEN = 9 * 60 + 15; // 9:15 AM
+    const NSE_MARKET_CLOSE = 15 * 60 + 30; // 3:30 PM
+
+    if (minutes >= NSE_MARKET_OPEN && minutes <= NSE_MARKET_CLOSE) {
+      return 'open';
+    } else if (minutes < NSE_MARKET_OPEN) {
+      return 'pre-market';
+    } else {
+      return 'post-market';
+    }
   }
 
   /**

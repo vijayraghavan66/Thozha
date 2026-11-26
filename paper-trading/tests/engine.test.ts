@@ -11,7 +11,7 @@ describe('Virtual Trading Engine', () => {
   let portfolioId: string;
 
   beforeEach(async () => {
-    db = await Database.create(':memory:');
+    db = Database.createMemory();
     initDatabase(db);
     engine = new VirtualTradingEngine(db, {
       commissionRate: 0.001,
