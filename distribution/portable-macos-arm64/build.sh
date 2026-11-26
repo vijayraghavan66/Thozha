@@ -45,7 +45,6 @@ mkdir -p "$WORK/source/openjarvis/src/openjarvis/server/static"
 git -C "$SOURCE_ROOT" archive HEAD openjarvis | tar -x -C "$WORK/source"
 cp -R "$SOURCE_ROOT/web/dist/." "$WORK/source/openjarvis/src/openjarvis/server/static/"
 
-export UV_CACHE_DIR="$WORK/uv-cache"
 export UV_PYTHON_INSTALL_DIR="$STAGE/runtime/managed-python"
 export UV_NO_PROGRESS=1
 uv python install --install-dir "$UV_PYTHON_INSTALL_DIR" 3.13.15
@@ -116,10 +115,16 @@ if find "$STAGE" -type f \( -name 'auth.json' -o -name '*.db' -o -name '*.sqlite
   echo "Refusing to package credentials, private keys, databases, or logs." >&2
   exit 2
 fi
-if rg -n --hidden --glob '!*.so' --glob '!*.dylib' --glob '!*.onnx' \
+SECRET_MATCHES="$(rg -n --hidden --glob '!*.so' --glob '!*.dylib' --glob '!*.onnx' \
   '(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----)' \
-  "$STAGE" >/dev/null 2>&1; then
-  echo "Refusing to package a file that matches a credential/private-key pattern." >&2
+  "$STAGE" 2>/dev/null || true)"
+# OpenJarvis ships a documented synthetic credential string in its security
+# scanner benchmark fixture. Exempt only that exact source line; all other
+# matches remain fail-closed and are printed for investigation.
+SECRET_MATCHES="$(printf '%s\n' "$SECRET_MATCHES" | rg -v 'security_scanner\.py:.*sk-proj-abc123def456ghi789' || true)"
+if [[ -n "$SECRET_MATCHES" ]]; then
+  echo "Refusing to package a file that matches a credential/private-key pattern:" >&2
+  printf '%s\n' "$SECRET_MATCHES" >&2
   exit 2
 fi
 (
