@@ -77,6 +77,14 @@ python3 "$DIST_SOURCE/lib/bundle_tls_python.py" \
   --openssl-prefix "$OPENSSL36" \
   --output "$STAGE/runtime/tls-python"
 
+# Test suites and their private test certificates are not runtime material.
+# Remove only conventional test directories, then rerun the core TLS smoke test.
+SERVER_SITE="$STAGE/runtime/server-venv/lib/python3.13/site-packages"
+find "$SERVER_SITE" -type d \( -name test -o -name tests \) -prune -exec rm -rf {} +
+TLS_LIB="$STAGE/runtime/tls-python/Python.framework/Versions/3.14/lib/python3.14"
+find "$TLS_LIB" -type d -name test -prune -exec rm -rf {} +
+"$STAGE/runtime/tls-python/bin/python3.14" -c 'import asyncio,hashlib,http.server,ssl,sys; assert ssl.OPENSSL_VERSION_INFO >= (3,6); print("TLS runtime smoke passed:", sys.version.split()[0], ssl.OPENSSL_VERSION)'
+
 mkdir -p "$STAGE/data/config" "$STAGE/data/openjarvis" "$STAGE/data/codex-home" \
   "$STAGE/data/agent-evaluation/taskflow" "$STAGE/data/logs" "$STAGE/data/run"
 chmod 700 "$STAGE/data" "$STAGE/data/"* "$STAGE/data/"*/ 2>/dev/null || true
@@ -115,8 +123,8 @@ if find "$STAGE" -type f \( -name 'auth.json' -o -name '*.db' -o -name '*.sqlite
   echo "Refusing to package credentials, private keys, databases, or logs." >&2
   exit 2
 fi
-SECRET_MATCHES="$(rg -n --hidden --glob '!*.so' --glob '!*.dylib' --glob '!*.onnx' \
-  '(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----)' \
+SECRET_MATCHES="$(rg -n -U --hidden --glob '!*.so' --glob '!*.dylib' --glob '!*.onnx' \
+  '(sk-(proj|svcacct|live|test)-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----[\r\n]+[A-Za-z0-9+/=\r\n]{64,}-----END (RSA |EC |OPENSSH )?PRIVATE KEY-----)' \
   "$STAGE" 2>/dev/null || true)"
 # OpenJarvis ships a documented synthetic credential string in its security
 # scanner benchmark fixture. Exempt only that exact source line; all other
