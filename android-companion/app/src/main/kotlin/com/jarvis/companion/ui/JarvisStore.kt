@@ -1123,7 +1123,13 @@ class JarvisStore(private val app: Context) {
                             finalResultAvailable = true,
                         )
                     } else {
-                        jarvisApi.submitLinkTask(text, requestId, capabilityScope, requestTrace)
+                        jarvisApi.submitLinkTask(
+                            text,
+                            requestId,
+                            capabilityScope,
+                            requestTrace,
+                            conversationId = conversation.id,
+                        )
                     }
                 }
                     .onSuccess { result ->

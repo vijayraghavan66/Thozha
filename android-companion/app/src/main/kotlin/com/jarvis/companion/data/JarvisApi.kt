@@ -67,6 +67,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         idempotencyKey: String,
         capabilityScope: String = "assistant",
         traceId: String? = null,
+        conversationId: String? = null,
     ): LinkTaskResult {
         val cleaned = objective.trim()
         if (cleaned.isEmpty() || cleaned.toByteArray(Charsets.UTF_8).size > 4096) {
@@ -87,6 +88,12 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             .put("capability_scope", JSONArray().put(capabilityScope))
             .put("idempotency_key", idempotencyKey)
             .put("requester_device_id", requesterDeviceId)
+        if (!conversationId.isNullOrBlank()) {
+            if (!conversationId.matches(Regex("[0-9a-f]{32}"))) {
+                throw ApiException("This conversation could not be identified safely.")
+            }
+            body.put("conversation_id", conversationId)
+        }
         val json = request(
             requireLoopbackBaseUrl(),
             "/v1/jarvis/link/tasks?mode=async",
