@@ -56,6 +56,12 @@ def gateway(tmp_path):
 
     async def upstream_handler(request: httpx.Request) -> httpx.Response:
         upstream_requests.append(request)
+        if request.url.path == "/v1/jarvis/link/tasks" and request.url.params.get("mode") == "async":
+            return httpx.Response(202, json={
+                "task_id": "f" * 32,
+                "state": "CREATED",
+                "summary": "Queued for execution.",
+            })
         if request.url.path.endswith("/events"):
             if "deviceowner-denied0001" in request.url.path:
                 return httpx.Response(403, json={"detail": "Task belongs to another paired device"})
@@ -314,6 +320,33 @@ def test_gateway_allows_only_read_only_link_task_envelopes(gateway):
     assert upstream[-1].url.path == "/v1/jarvis/link/tasks"
     assert json.loads(upstream[-1].content) == body
 
+    async_body = {**body, "idempotency_key": "jarvis-link-task-20261126-async"}
+    async_accepted = client.post(
+        "/v1/jarvis/link/tasks?mode=async", headers=headers, json=async_body,
+    )
+    assert async_accepted.status_code == 202
+    assert upstream[-1].url.params.get("mode") == "async"
+    assert json.loads(upstream[-1].content) == async_body
+
+    conversation_body = {
+        **body,
+        "idempotency_key": "jarvis-link-task-conversation-01",
+        "conversation_id": "c" * 32,
+    }
+    conversation_accepted = client.post(
+        "/v1/jarvis/link/tasks?mode=async", headers=headers, json=conversation_body,
+    )
+    assert conversation_accepted.status_code == 202
+    assert upstream[-1].url.params.get("mode") == "async"
+    assert json.loads(upstream[-1].content) == conversation_body
+
+    upstream_count = len(upstream)
+    assert client.post(
+        "/v1/jarvis/link/tasks?mode=async", headers=headers,
+        json={**body, "conversation_id": "not-a-conversation-id"},
+    ).status_code == 422
+    assert len(upstream) == upstream_count
+
     assert client.post(
         "/v1/jarvis/link/tasks", headers=headers,
         json={**body, "capability_scope": ["system_admin"]},
@@ -329,6 +362,12 @@ def test_gateway_allows_only_read_only_link_task_envelopes(gateway):
     assert client.post(
         "/v1/jarvis/link/tasks", headers=headers,
         json={**body, "command": "rm -rf /"},
+    ).status_code == 422
+    assert client.post(
+        "/v1/jarvis/link/tasks?mode=sync", headers=headers, json=body,
+    ).status_code == 422
+    assert client.post(
+        "/v1/jarvis/link/tasks?mode=async&unexpected=1", headers=headers, json=body,
     ).status_code == 422
     assert client.get("/v1/jarvis/link/tasks/invalid", headers=headers).status_code == 404
     assert client.get(

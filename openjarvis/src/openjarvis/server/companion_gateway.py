@@ -341,15 +341,26 @@ def create_gateway_app(
         return await _proxy(request, backend_path="/v1/jarvis/system/info")
 
     @app.post("/v1/jarvis/link/tasks")
-    async def submit_link_task(request: Request):
+    async def submit_link_task(request: Request, mode: str = ""):
         authenticated_device_id, _ = _device_id_for_request(request, request.app.state.supervisor_store)
+        if set(request.query_params.keys()) - {"mode"} or len(request.query_params.getlist("mode")) > 1:
+            raise HTTPException(status_code=422, detail="Only one mode query parameter is supported")
+        if mode not in {"", "async"}:
+            raise HTTPException(status_code=422, detail="mode must be async when supplied")
         body = await _read_json_body(request)
-        if set(body) != {"objective", "capability_scope", "idempotency_key", "requester_device_id"}:
+        required_fields = {"objective", "capability_scope", "idempotency_key", "requester_device_id"}
+        optional_fields = {"conversation_id"}
+        if not required_fields.issubset(body) or set(body) - required_fields - optional_fields:
             raise HTTPException(status_code=422, detail="Unexpected Link task fields")
         objective = body.get("objective")
         scope = body.get("capability_scope")
         key = body.get("idempotency_key")
         requester_device_id = body.get("requester_device_id")
+        conversation_id = body.get("conversation_id")
+        if conversation_id is not None and (
+            not isinstance(conversation_id, str) or not _ID_RE.fullmatch(conversation_id)
+        ):
+            raise HTTPException(status_code=422, detail="Invalid conversation ID")
         if not isinstance(objective, str) or not objective.strip() or len(objective.encode("utf-8")) > 4096:
             raise HTTPException(status_code=422, detail="objective must be non-empty and under 4096 bytes")
         if scope not in (["read_only"], ["assistant"]):
@@ -360,16 +371,20 @@ def create_gateway_app(
             raise HTTPException(status_code=422, detail="Invalid requester device ID")
         if requester_device_id != authenticated_device_id:
             raise HTTPException(status_code=403, detail="Authenticated device does not match the Link task requester")
+        forwarded_body = {
+            "objective": objective.strip(),
+            "capability_scope": scope,
+            "idempotency_key": key,
+            "requester_device_id": requester_device_id,
+        }
+        if conversation_id is not None:
+            forwarded_body["conversation_id"] = conversation_id
         raw = json.dumps(
-            {
-                "objective": objective.strip(),
-                "capability_scope": scope,
-                "idempotency_key": key,
-                "requester_device_id": requester_device_id,
-            },
+            forwarded_body,
             separators=(",", ":"), ensure_ascii=False,
         ).encode("utf-8")
-        return await _proxy(request, backend_path="/v1/jarvis/link/tasks", body=raw)
+        params = {"mode": "async"} if mode == "async" else None
+        return await _proxy(request, backend_path="/v1/jarvis/link/tasks", params=params, body=raw)
 
     @app.get("/v1/jarvis/link/tasks/{idempotency_key}")
     async def get_link_task(idempotency_key: str, request: Request):
