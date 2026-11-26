@@ -48,9 +48,9 @@ cp -R "$SOURCE_ROOT/web/dist/." "$WORK/source/openjarvis/src/openjarvis/server/s
 export UV_PYTHON_INSTALL_DIR="$STAGE/runtime/managed-python"
 export UV_NO_PROGRESS=1
 uv python install --install-dir "$UV_PYTHON_INSTALL_DIR" 3.13.15
-SERVER_PYTHON="$(find "$UV_PYTHON_INSTALL_DIR" -type f -path '*/bin/python3.13' -print -quit)"
-if [[ -z "$SERVER_PYTHON" ]]; then
-  echo "uv did not install the expected managed Python 3.13 runtime." >&2
+SERVER_PYTHON="$UV_PYTHON_INSTALL_DIR/cpython-3.13.15-macos-aarch64-none/bin/python3.13"
+if [[ ! -x "$SERVER_PYTHON" ]]; then
+  echo "uv did not install Python at the versioned portable runtime path." >&2
   exit 2
 fi
 uv venv --relocatable --python "$SERVER_PYTHON" "$STAGE/runtime/server-venv"
@@ -65,6 +65,10 @@ if [[ -z "$WHEEL" ]]; then
 fi
 uv pip install --python "$STAGE/runtime/server-venv/bin/python" "$WHEEL"
 rm -rf "$STAGE/wheels"
+# uv creates an unversioned alias alongside the pinned interpreter. The venv
+# references the exact versioned path; discard the duplicate to keep the ZIP
+# smaller and ensure relocation always targets one explicit runtime.
+rm -rf "$STAGE/runtime/managed-python/cpython-3.13-macos-aarch64-none"
 
 PYTHON314="$(brew --prefix python@3.14 2>/dev/null)/Frameworks/Python.framework/Versions/3.14"
 OPENSSL36="$(brew --prefix openssl@3.6 2>/dev/null)"
