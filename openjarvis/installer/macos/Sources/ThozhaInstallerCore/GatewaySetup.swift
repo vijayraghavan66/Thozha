@@ -272,14 +272,17 @@ public struct GatewayRuntime: Equatable, Sendable {
     public let tlsPython: URL
     public let tlsIdentity: GatewayTLSIdentity
     public let shutdownSupervisor: URL
+    /// The foreground-authorized Setup app executable used only for SSID reads.
+    public let ssidHelper: URL
     public let launchdPath: String
 
     public init(openJarvisPython: URL, tlsPython: URL, tlsIdentity: GatewayTLSIdentity,
-                shutdownSupervisor: URL, launchdPath: String) {
+                shutdownSupervisor: URL, ssidHelper: URL, launchdPath: String) {
         self.openJarvisPython = openJarvisPython
         self.tlsPython = tlsPython
         self.tlsIdentity = tlsIdentity
         self.shutdownSupervisor = shutdownSupervisor
+        self.ssidHelper = ssidHelper
         self.launchdPath = launchdPath
     }
 }
@@ -290,6 +293,7 @@ public enum GatewayRuntimeError: Error, Equatable, LocalizedError {
     case tlsIdentityUnavailable
     case tlsIdentityChanged
     case shutdownSupervisorUnavailable
+    case ssidHelperUnavailable
     case setupAppMustBeInstalled
 
     public var errorDescription: String? {
@@ -299,6 +303,7 @@ public enum GatewayRuntimeError: Error, Equatable, LocalizedError {
         case .tlsIdentityUnavailable: "The existing paired-Mac TLS certificate/key identity could not be verified. No new identity was generated."
         case .tlsIdentityChanged: "The existing paired-Mac TLS identity changed after review. The gateway plan was not applied."
         case .shutdownSupervisorUnavailable: "The signed Thozha gateway shutdown supervisor is missing. It is required to stop the gateway and clean up its TLS and DNS-SD children safely."
+        case .ssidHelperUnavailable: "The authorized Thozha Setup SSID reader is unavailable. The gateway cannot verify its network safely."
         case .setupAppMustBeInstalled: "Install Thozha Setup in /Applications before enabling a login-time gateway. A LaunchAgent must not reference a movable app bundle."
         }
     }
@@ -328,9 +333,12 @@ public struct GatewayRuntimeDetector: Sendable {
         self.tlsIdentityReader = tlsIdentityReader
     }
 
-    public func detect(shutdownSupervisor: URL) throws -> GatewayRuntime {
+    public func detect(shutdownSupervisor: URL, ssidHelper: URL) throws -> GatewayRuntime {
         guard shutdownSupervisor.isFileURL, FileManager.default.isExecutableFile(atPath: shutdownSupervisor.path) else {
             throw GatewayRuntimeError.shutdownSupervisorUnavailable
+        }
+        guard ssidHelper.isFileURL, FileManager.default.isExecutableFile(atPath: ssidHelper.path) else {
+            throw GatewayRuntimeError.ssidHelperUnavailable
         }
         let importCheck = ["-B", "-I", "-c", "import openjarvis.server.companion_wifi_gateway"]
         guard let python = locateOpenJarvisPython(), pythonVerifier(python, importCheck) else {
@@ -352,7 +360,8 @@ public struct GatewayRuntimeDetector: Sendable {
         identity.certificateSHA256.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
             throw GatewayRuntimeError.tlsIdentityUnavailable
         }
-        return GatewayRuntime(openJarvisPython: python, tlsPython: tlsPython, tlsIdentity: identity, shutdownSupervisor: shutdownSupervisor,
+        return GatewayRuntime(openJarvisPython: python, tlsPython: tlsPython, tlsIdentity: identity,
+                              shutdownSupervisor: shutdownSupervisor, ssidHelper: ssidHelper,
                               launchdPath: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     }
 
@@ -533,6 +542,7 @@ public enum GatewayLaunchAgentPlanner {
         guard runtime.openJarvisPython.isFileURL, runtime.openJarvisPython.path.hasPrefix("/"),
               runtime.tlsPython.isFileURL, runtime.tlsPython.path.hasPrefix("/"),
               runtime.shutdownSupervisor.isFileURL, runtime.shutdownSupervisor.path.hasPrefix("/"),
+              runtime.ssidHelper.isFileURL, runtime.ssidHelper.path.hasPrefix("/"),
               configuration.port == 8443,
               configuration.hostname == runtime.tlsIdentity.hostname,
               configuration.tlsCertificateSHA256 == runtime.tlsIdentity.certificateSHA256,
@@ -552,7 +562,7 @@ public enum GatewayLaunchAgentPlanner {
             "JARVIS_COMPANION_WIFI_HOSTNAME": configuration.hostname,
             "JARVIS_COMPANION_WIFI_TLS_CERT_SHA256": configuration.tlsCertificateSHA256,
             "JARVIS_COMPANION_TLS_PROXY_PYTHON": runtime.tlsPython.path,
-            "JARVIS_COMPANION_WIFI_SSID_HELPER": runtime.shutdownSupervisor.path,
+            "JARVIS_COMPANION_WIFI_SSID_HELPER": runtime.ssidHelper.path,
             "PATH": runtime.launchdPath,
         ]
         let plist: [String: Any] = [

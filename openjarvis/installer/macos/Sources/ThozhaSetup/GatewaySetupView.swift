@@ -166,8 +166,11 @@ struct GatewaySetupView: View {
             }
             let shutdownSupervisor = Bundle.main.bundleURL
                 .appendingPathComponent("Contents/Helpers/ThozhaGatewaySupervisor")
+            guard let ssidHelper = Bundle.main.executableURL else {
+                throw GatewayRuntimeError.ssidHelperUnavailable
+            }
             let detectedRuntime = try await Task.detached(priority: .utility) {
-                try GatewayRuntimeDetector().detect(shutdownSupervisor: shutdownSupervisor)
+                try GatewayRuntimeDetector().detect(shutdownSupervisor: shutdownSupervisor, ssidHelper: ssidHelper)
             }.value
             let detectedConfiguration = try GatewayPreflight.evaluate(
                 snapshot: detectedSnapshot,
@@ -230,8 +233,14 @@ struct GatewaySetupView: View {
         isChecking = true
         let freshSnapshot = wifiProvider.snapshot()
         let shutdownSupervisor = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/ThozhaGatewaySupervisor")
+        guard let ssidHelper = Bundle.main.executableURL else {
+            errorMessage = GatewayRuntimeError.ssidHelperUnavailable.localizedDescription
+            isChecking = false
+            activeEnablePlan = nil
+            return
+        }
         let latestRuntime = try? await Task.detached(priority: .utility) {
-            try GatewayRuntimeDetector().detect(shutdownSupervisor: shutdownSupervisor)
+            try GatewayRuntimeDetector().detect(shutdownSupervisor: shutdownSupervisor, ssidHelper: ssidHelper)
         }.value
         guard let latestRuntime,
               latestRuntime.tlsIdentity == reviewedRuntime.tlsIdentity,

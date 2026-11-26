@@ -91,6 +91,7 @@ final class GatewaySetupTests: XCTestCase {
         tlsPython: URL(fileURLWithPath: "/opt/homebrew/bin/python3.14"),
         tlsIdentity: GatewayTLSIdentity(hostname: "mac.local", certificateSHA256: "sha256:" + String(repeating: "a", count: 64)),
         shutdownSupervisor: URL(fileURLWithPath: "/Applications/Thozha Setup.app/Contents/Helpers/ThozhaGatewaySupervisor"),
+        ssidHelper: URL(fileURLWithPath: "/Applications/Thozha Setup.app/Contents/MacOS/ThozhaSetup"),
         launchdPath: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     )
 
@@ -194,7 +195,7 @@ final class GatewaySetupTests: XCTestCase {
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_HOSTNAME"], "mac.local")
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_TLS_CERT_SHA256"], tlsIdentity.certificateSHA256)
         XCTAssertEqual(environment["JARVIS_COMPANION_TLS_PROXY_PYTHON"], runtime.tlsPython.path)
-        XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_SSID_HELPER"], runtime.shutdownSupervisor.path)
+        XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_SSID_HELPER"], runtime.ssidHelper.path)
         XCTAssertNil(environment["OPENJARVIS_API_KEY"])
         XCTAssertNil(environment["SUPERVISOR_API_KEY"])
         XCTAssertNil(environment["JARVIS_DEV_WORKER_CONFIG"])
@@ -331,10 +332,11 @@ final class GatewaySetupTests: XCTestCase {
             }
         )
 
-        let runtime = try detector.detect(shutdownSupervisor: helper)
+        let runtime = try detector.detect(shutdownSupervisor: helper, ssidHelper: helper)
         XCTAssertEqual(runtime.openJarvisPython.path, python.path)
         XCTAssertEqual(runtime.tlsPython.path, tlsPython.path)
         XCTAssertEqual(runtime.tlsIdentity, expectedIdentity)
+        XCTAssertEqual(runtime.ssidHelper.path, helper.path)
     }
 
     func testRuntimeDetectorDoesNotAcceptSystemPythonAsOpenJarvisRuntime() throws {
@@ -352,8 +354,27 @@ final class GatewaySetupTests: XCTestCase {
             pythonVerifier: { _, _ in true },
             tlsIdentityReader: { _, _, _ in GatewayTLSIdentity(hostname: "mac.local", certificateSHA256: "sha256:" + String(repeating: "a", count: 64)) }
         )
-        XCTAssertThrowsError(try detector.detect(shutdownSupervisor: helper)) {
+        XCTAssertThrowsError(try detector.detect(shutdownSupervisor: helper, ssidHelper: helper)) {
             XCTAssertEqual($0 as? GatewayRuntimeError, .openJarvisRuntimeUnavailable)
+        }
+    }
+
+    func testRuntimeDetectorFailsClosedWhenAuthorizedSSIDHelperIsMissing() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("thozha-runtime-ssid-helper-\(UUID().uuidString)", isDirectory: true)
+        let supervisor = root.appendingPathComponent("ThozhaGatewaySupervisor")
+        let ssidHelper = root.appendingPathComponent("MissingThozhaSetup")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data().write(to: supervisor)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: supervisor.path)
+        let detector = GatewayRuntimeDetector(
+            home: root,
+            path: "/missing",
+            pythonVerifier: { _, _ in true },
+            tlsIdentityReader: { _, _, _ in nil }
+        )
+
+        XCTAssertThrowsError(try detector.detect(shutdownSupervisor: supervisor, ssidHelper: ssidHelper)) {
+            XCTAssertEqual($0 as? GatewayRuntimeError, .ssidHelperUnavailable)
         }
     }
 
@@ -361,16 +382,19 @@ final class GatewaySetupTests: XCTestCase {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let launchAgent = home.appendingPathComponent("Library/LaunchAgents/com.openjarvis.jarvis.plist")
         let helper = URL(fileURLWithPath: "/Applications/Thozha Setup.app/Contents/Helpers/ThozhaGatewaySupervisor")
+        let ssidHelper = URL(fileURLWithPath: "/Applications/Thozha Setup.app/Contents/MacOS/ThozhaSetup")
         guard FileManager.default.fileExists(atPath: launchAgent.path),
-              FileManager.default.isExecutableFile(atPath: helper.path) else {
-            throw XCTSkip("The approved OpenJarvis LaunchAgent or installed Thozha helper is not present on this test machine.")
+              FileManager.default.isExecutableFile(atPath: helper.path),
+              FileManager.default.isExecutableFile(atPath: ssidHelper.path) else {
+            throw XCTSkip("The approved OpenJarvis LaunchAgent or installed Thozha helpers are not present on this test machine.")
         }
 
-        let runtime = try GatewayRuntimeDetector().detect(shutdownSupervisor: helper)
+        let runtime = try GatewayRuntimeDetector().detect(shutdownSupervisor: helper, ssidHelper: ssidHelper)
         XCTAssertTrue(runtime.openJarvisPython.path.hasPrefix(home.appendingPathComponent(".openjarvis/src/.venv/bin").path + "/"))
         XCTAssertTrue(runtime.tlsPython.lastPathComponent.hasPrefix("python3.14"))
         XCTAssertEqual(runtime.tlsIdentity.hostname, "vijay-25589.local")
         XCTAssertEqual(runtime.tlsIdentity.certificateSHA256, "sha256:5140c8e0cae7382d029069c8b78195a651ff5901de4993d6323e0f686f699456")
+        XCTAssertEqual(runtime.ssidHelper, ssidHelper)
     }
 
     private func tryResult(_ result: Result<GatewayNetworkConfiguration, GatewayPreflightError>) -> GatewayNetworkConfiguration? {
