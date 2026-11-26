@@ -1,0 +1,1858 @@
+[
+  {
+    "route": "overview",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 876,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 874,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 804,
+        "scrollHeight": 977,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "ai-workspace",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 876,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 874,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 804,
+        "scrollHeight": 804,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "trading-lab",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 876,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 874,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 804,
+        "scrollHeight": 804,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "device-hub",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 876,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 874,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 804,
+        "scrollHeight": 804,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "automations",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 876,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 874,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 804,
+        "scrollHeight": 804,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "memory-center",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 876,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 874,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 804,
+        "scrollHeight": 804,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "developer-studio",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 876,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 874,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 804,
+        "scrollHeight": 804,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "settings",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 876,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 874,
+        "scrollHeight": 874,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 804,
+        "scrollHeight": 804,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "overview",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      800
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 800,
+        "scrollHeight": 800,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 776,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 774,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 704,
+        "scrollHeight": 1010,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "ai-workspace",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      800
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 800,
+        "scrollHeight": 800,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 776,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 774,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 704,
+        "scrollHeight": 776,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "trading-lab",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      800
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 800,
+        "scrollHeight": 800,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 776,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 774,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 704,
+        "scrollHeight": 704,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "device-hub",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      800
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 800,
+        "scrollHeight": 800,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 776,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 774,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 704,
+        "scrollHeight": 704,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "automations",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      800
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 800,
+        "scrollHeight": 800,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 776,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 774,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 704,
+        "scrollHeight": 704,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "memory-center",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      800
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 800,
+        "scrollHeight": 800,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 776,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 774,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 704,
+        "scrollHeight": 898,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "developer-studio",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      800
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 800,
+        "scrollHeight": 800,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 776,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 774,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 704,
+        "scrollHeight": 704,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "settings",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      800
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 800,
+        "scrollHeight": 800,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 776,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 774,
+        "scrollHeight": 774,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 704,
+        "scrollHeight": 829,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "overview",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      844
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844,
+        "scrollHeight": 844,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 820,
+        "scrollHeight": 818,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 748,
+        "scrollHeight": 1636,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "ai-workspace",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      844
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844,
+        "scrollHeight": 844,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 820,
+        "scrollHeight": 818,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 748,
+        "scrollHeight": 1274,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "trading-lab",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      844
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844,
+        "scrollHeight": 844,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 820,
+        "scrollHeight": 818,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 748,
+        "scrollHeight": 1344,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "device-hub",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      844
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844,
+        "scrollHeight": 844,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 820,
+        "scrollHeight": 818,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 748,
+        "scrollHeight": 748,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "automations",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      844
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844,
+        "scrollHeight": 844,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 820,
+        "scrollHeight": 818,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 748,
+        "scrollHeight": 748,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "memory-center",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      844
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844,
+        "scrollHeight": 844,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 820,
+        "scrollHeight": 818,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 748,
+        "scrollHeight": 1381,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "developer-studio",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      844
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844,
+        "scrollHeight": 844,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 820,
+        "scrollHeight": 818,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 748,
+        "scrollHeight": 1100,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "settings",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      844
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844,
+        "scrollHeight": 844,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 820,
+        "scrollHeight": 818,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 748,
+        "scrollHeight": 1316,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "overview",
+    "viewport": [
+      720,
+      450
+    ],
+    "document": [
+      720,
+      450
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 720,
+        "h": 450,
+        "scrollHeight": 450,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 696,
+        "h": 426,
+        "scrollHeight": 424,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 694,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 694,
+        "h": 354,
+        "scrollHeight": 1335,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "ai-workspace",
+    "viewport": [
+      720,
+      450
+    ],
+    "document": [
+      720,
+      450
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 720,
+        "h": 450,
+        "scrollHeight": 450,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 696,
+        "h": 426,
+        "scrollHeight": 424,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 694,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 694,
+        "h": 354,
+        "scrollHeight": 1103,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "trading-lab",
+    "viewport": [
+      720,
+      450
+    ],
+    "document": [
+      720,
+      450
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 720,
+        "h": 450,
+        "scrollHeight": 450,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 696,
+        "h": 426,
+        "scrollHeight": 424,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 694,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 694,
+        "h": 354,
+        "scrollHeight": 1202,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "device-hub",
+    "viewport": [
+      720,
+      450
+    ],
+    "document": [
+      720,
+      450
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 720,
+        "h": 450,
+        "scrollHeight": 450,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 696,
+        "h": 426,
+        "scrollHeight": 424,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 694,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 694,
+        "h": 354,
+        "scrollHeight": 371,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "automations",
+    "viewport": [
+      720,
+      450
+    ],
+    "document": [
+      720,
+      450
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 720,
+        "h": 450,
+        "scrollHeight": 450,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 696,
+        "h": 426,
+        "scrollHeight": 424,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 694,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 694,
+        "h": 354,
+        "scrollHeight": 515,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "memory-center",
+    "viewport": [
+      720,
+      450
+    ],
+    "document": [
+      720,
+      450
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 720,
+        "h": 450,
+        "scrollHeight": 450,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 696,
+        "h": 426,
+        "scrollHeight": 424,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 694,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 694,
+        "h": 354,
+        "scrollHeight": 1217,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "developer-studio",
+    "viewport": [
+      720,
+      450
+    ],
+    "document": [
+      720,
+      450
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 720,
+        "h": 450,
+        "scrollHeight": 450,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 696,
+        "h": 426,
+        "scrollHeight": 424,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 694,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 694,
+        "h": 354,
+        "scrollHeight": 948,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  },
+  {
+    "route": "settings",
+    "viewport": [
+      720,
+      450
+    ],
+    "document": [
+      720,
+      450
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 720,
+        "h": 450,
+        "scrollHeight": 450,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 696,
+        "h": 426,
+        "scrollHeight": 424,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 694,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 694,
+        "h": 354,
+        "scrollHeight": 1066,
+        "scrollTop": 0,
+        "overflowY": "auto"
+      }
+    }
+  }
+]

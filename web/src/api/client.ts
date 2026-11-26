@@ -1,0 +1,560 @@
+import { z } from 'zod';
+import type { components, paths } from './generated';
+import type { WebConversationSseEvent } from '../../../contracts/web-api/v1';
+import { readConversationStream } from './sse';
+import { WebApiError } from './errors';
+import { createControlApi } from './control';
+
+export { WebApiError } from './errors';
+
+type Schemas = components['schemas'];
+export type LoginInput = Schemas['WebLoginRequest'];
+export type ConversationInput = Schemas['WebConversationCreate'];
+export type MemoryInput = Schemas['WebMemoryCreate'];
+const dateTime = z.iso.datetime({ offset: true });
+
+const sessionContract = z.object({
+  user_id: z.string().min(1),
+  expires_at: z.number().int().positive(),
+  csrf_token: z.string().min(1),
+}) satisfies z.ZodType<Schemas['WebSession']>;
+const conversationContract = z.object({
+  id: z.uuid(),
+  title: z.string(),
+  created_at: dateTime,
+  updated_at: dateTime,
+  archived_at: dateTime.nullable(),
+}) satisfies z.ZodType<Schemas['WebConversation']>;
+const attachmentContract = z.object({
+  id: z.string().regex(/^[0-9a-f]{32}$/),
+  file_name: z.string().max(120),
+  media_type: z.enum(['image/png', 'image/jpeg', 'application/pdf']),
+  size_bytes: z
+    .number()
+    .int()
+    .positive()
+    .max(8 * 1024 * 1024),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  page_count: z.number().int().min(1).max(10),
+  created_at: dateTime,
+}) satisfies z.ZodType<Schemas['WebAttachmentMetadata']>;
+const responseStatus = z.enum(['queued', 'running', 'completed', 'failed', 'cancelled']);
+const messageContract = z.object({
+  id: z.uuid(),
+  conversation_id: z.uuid(),
+  role: z.enum(['user', 'assistant']),
+  content: z.string(),
+  status: z.union([z.literal('accepted'), responseStatus]),
+  response_to: z.uuid().nullable(),
+  error_code: z.string().nullable(),
+  created_at: dateTime,
+  updated_at: dateTime,
+  attachment_ids: z
+    .array(z.string().regex(/^[0-9a-f]{32}$/))
+    .max(5)
+    .optional(),
+  attachments: z.array(attachmentContract).max(5).optional(),
+}) satisfies z.ZodType<Schemas['WebMessage']>;
+const eventContract = z.object({
+  sequence: z.number().int(),
+  message_id: z.uuid(),
+  created_at: dateTime,
+  event_type: z.enum([
+    'accepted',
+    'queued',
+    'started',
+    'completed',
+    'failed',
+    'cancelled',
+    'cancellation_requested',
+  ]),
+  details: z.record(z.string(), z.unknown()),
+}) satisfies z.ZodType<Schemas['WebConversationEvent']>;
+const detailContract = conversationContract.extend({
+  messages: z.array(messageContract),
+  events: z.array(eventContract),
+}) satisfies z.ZodType<Schemas['WebConversationDetail']>;
+const acceptedContract = z.object({
+  conversation_id: z.uuid(),
+  message_id: z.uuid(),
+  response_id: z.uuid(),
+  status: responseStatus,
+  replayed: z.boolean(),
+}) satisfies z.ZodType<Schemas['WebMessageAccepted']>;
+const cancelledContract = z.object({
+  conversation_id: z.uuid(),
+  message_id: z.uuid(),
+  status: z.union([responseStatus, z.literal('cancellation_requested')]),
+}) satisfies z.ZodType<Schemas['WebMessageCancelResult']>;
+const memoryContract = z.object({
+  id: z.string().regex(/^[0-9a-f]{32}$/),
+  title: z.string(),
+  content: z.string(),
+  tags: z.array(z.string()),
+  created_at: dateTime,
+  updated_at: dateTime,
+}) satisfies z.ZodType<Schemas['WebMemory']>;
+const memoryList = z.object({
+  items: z.array(memoryContract),
+  search_mode: z.literal('substring'),
+}) satisfies z.ZodType<Schemas['WebMemoryList']>;
+const memoryCreated = z.object({
+  memory: memoryContract,
+  replayed: z.boolean(),
+}) satisfies z.ZodType<Schemas['WebMemoryCreateResult']>;
+const attachmentUpload = z.object({
+  attachment: attachmentContract,
+  replayed: z.boolean(),
+}) satisfies z.ZodType<Schemas['WebAttachmentUploadResult']>;
+
+function uploadWithProgress(
+  path: string,
+  file: File,
+  mediaType: WebAttachmentMediaType,
+  fileName: string,
+  csrf: string,
+  key: string,
+  signal: AbortSignal | undefined,
+  onProgress: (sent: number, total: number) => void
+): Promise<z.infer<typeof attachmentUpload>> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    const done = (result: z.infer<typeof attachmentUpload> | undefined, error?: unknown) => {
+      signal?.removeEventListener('abort', abort);
+      if (error !== undefined) reject(error);
+      else if (result) resolve(result);
+    };
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    xhr.open('POST', path);
+    xhr.withCredentials = false;
+    xhr.timeout = 60_000;
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('Content-Type', mediaType);
+    xhr.setRequestHeader('X-Thozha-CSRF', csrf);
+    xhr.setRequestHeader('Idempotency-Key', key);
+    if (fileName) xhr.setRequestHeader('X-File-Name', fileName);
+    xhr.upload.onprogress = event => {
+      if (event.lengthComputable && event.total) onProgress(event.loaded, event.total);
+    };
+    xhr.onerror = () => done(undefined, new WebApiError('connection'));
+    xhr.ontimeout = () => done(undefined, new WebApiError('timeout'));
+    xhr.onabort = () =>
+      done(undefined, signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+    xhr.onload = () => {
+      void (async () => {
+        const responseUrl = new URL(xhr.responseURL);
+        if (responseUrl.origin !== location.origin || responseUrl.pathname !== path)
+          throw new WebApiError('protocol');
+        const contentType = xhr.getResponseHeader('Content-Type')?.toLowerCase() ?? '';
+        if (xhr.status < 200 || xhr.status >= 300) {
+          const response = new Response(xhr.responseText, {
+            status: xhr.status,
+            headers: { 'Content-Type': contentType },
+          });
+          throw new WebApiError(
+            'http',
+            xhr.status,
+            await readControlError(response, signal ?? new AbortController().signal)
+          );
+        }
+        if (contentType.startsWith('text/html')) throw new WebApiError('html');
+        if (xhr.status !== 201 || !contentType.startsWith('application/json'))
+          throw new WebApiError('protocol');
+        let body: unknown;
+        try {
+          body = JSON.parse(xhr.responseText);
+        } catch {
+          throw new WebApiError('protocol');
+        }
+        const parsed = attachmentUpload.safeParse(body);
+        if (!parsed.success) throw new WebApiError('protocol');
+        return parsed.data;
+      })().then(
+        result => done(result),
+        error => done(undefined, error)
+      );
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    xhr.send(file);
+  });
+}
+
+export type WebSession = z.infer<typeof sessionContract>;
+export type Conversation = z.infer<typeof conversationContract>;
+export type ConversationDetail = z.infer<typeof detailContract>;
+export type WebMessage = z.infer<typeof messageContract>;
+export type ConversationEvent = z.infer<typeof eventContract>;
+export type WebMemory = z.infer<typeof memoryContract>;
+export type WebAttachmentMetadata = z.infer<typeof attachmentContract>;
+export type WebAttachmentMediaType = WebAttachmentMetadata['media_type'];
+
+export function isUnauthorized(error: unknown) {
+  return error instanceof WebApiError && error.status === 401;
+}
+
+export function mayHaveBeenAccepted(error: unknown) {
+  return error instanceof WebApiError && (error.kind !== 'http' || (error.status ?? 0) >= 500);
+}
+
+export function errorText(error: unknown, action = 'complete this request'): string {
+  if (!(error instanceof WebApiError)) return `Could not ${action}. Please try again.`;
+  if (error.kind === 'html')
+    return 'The workspace API returned a web page instead of JSON. Point THOZHA_WEB_UPSTREAM at an OpenJarvis instance with Web v1 enabled, then restart Vite.';
+  if (error.kind === 'protocol')
+    return 'The server returned an unexpected response. Check the Web v1 proxy and backend version.';
+  if (error.kind === 'timeout') return `The server took too long to ${action}.`;
+  if (error.kind === 'connection')
+    return 'The browser could not reach the workspace API. Check your connection and retry.';
+  if (error.kind === 'integrity') return 'The data did not pass its integrity check.';
+  switch (error.status) {
+    case 401:
+      return 'Your Web session is no longer valid. Sign in again.';
+    case 403:
+      return 'The server rejected the request. Check your session and the configured Web origin.';
+    case 404:
+      return 'This resource is no longer available, or the Web route is not mounted.';
+    case 409:
+      return 'The request conflicts with server state. Refresh the saved data before continuing.';
+    case 413:
+      return action.includes('upload')
+        ? 'The file exceeds the upload limit or a conversation/owner storage quota.'
+        : 'A configured storage limit was reached.';
+    case 415:
+      return 'Only valid PNG, JPEG, and PDF files are accepted.';
+    case 422:
+      return action.includes('upload')
+        ? 'The host could not extract readable text from this file. Try a readable image or text-based PDF.'
+        : 'The server did not accept the input. Review it and try again.';
+    case 429:
+      return action.includes('upload')
+        ? 'Document processing is busy. Wait a moment, then retry the upload.'
+        : 'Too many attempts. Wait a few minutes before trying again.';
+    case 503:
+      return action.includes('upload')
+        ? 'The host could not process the attachment because the upload service is unavailable. Retry later or check host configuration.'
+        : 'The Web API is unavailable. Confirm browser authentication is configured on the backend.';
+    default:
+      return `Could not ${action} (HTTP ${error.status}). Please try again.`;
+  }
+}
+
+const loginPath: keyof paths = '/v1/web/session/login';
+const sessionPath: keyof paths = '/v1/web/session';
+const logoutPath: keyof paths = '/v1/web/session/logout';
+const conversationsPath: keyof paths = '/v1/web/conversations';
+const memoryPath: keyof paths = '/v1/web/memory';
+const memorySearchPath: keyof paths = '/v1/web/memory/search';
+const detailPath = (id: string) => `${conversationsPath}/${encodeURIComponent(id)}`;
+const requestTimeout = 15_000;
+export type Options = {
+  method?: 'POST' | 'PATCH' | 'DELETE';
+  body?: object;
+  rawBody?: BodyInit;
+  headers?: HeadersInit;
+  csrf?: string;
+  key?: string;
+  signal?: AbortSignal;
+  stream?: boolean;
+  cursor?: number;
+  accept?: 'application/zip';
+  explain?: boolean;
+  timeoutMs?: number;
+};
+type ExpectedStatus = number | readonly number[];
+export type JsonRequest = <S extends z.ZodType>(
+  path: string,
+  status: ExpectedStatus,
+  schema: S,
+  options?: Options
+) => Promise<z.output<S>>;
+export type Exchange = <T>(
+  path: string,
+  status: ExpectedStatus,
+  options: Options,
+  consume: (response: Response, signal: AbortSignal) => Promise<T>
+) => Promise<T>;
+
+async function readControlError(response: Response, signal: AbortSignal) {
+  if (
+    ![400, 403, 404, 409, 413, 415, 422, 429, 500, 501, 503].includes(response.status) ||
+    !response.headers.get('content-type')?.toLowerCase().startsWith('application/json')
+  )
+    return undefined;
+  const json: unknown = await response.json().catch(() => {
+    if (signal.aborted) throw signal.reason;
+    return undefined;
+  });
+  const parsed = z
+    .object({
+      detail: z.union([z.string(), z.record(z.string(), z.unknown()), z.array(z.unknown())]),
+    })
+    .safeParse(json);
+  const detail = parsed.data?.detail;
+  if (Array.isArray(detail)) return 'The host rejected one or more request fields.';
+  const message = typeof detail === 'string' ? detail : detail?.reason;
+  return typeof message === 'string' && message.length <= 300 && !/[\r\n]/.test(message)
+    ? message
+    : undefined;
+}
+
+export function createWebApi(fetcher: typeof fetch = globalThis.fetch.bind(globalThis)) {
+  async function exchange<T>(
+    path: string,
+    expectedStatus: ExpectedStatus,
+    options: Options,
+    consume: (response: Response, signal: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    const {
+      signal,
+      method = 'GET',
+      body,
+      rawBody,
+      headers: additionalHeaders,
+      csrf,
+      key,
+      stream = false,
+      cursor,
+      accept,
+      explain,
+      timeoutMs = requestTimeout,
+    } = options;
+    if (body !== undefined && rawBody !== undefined) throw new WebApiError('protocol');
+    const headers = new Headers({
+      Accept: accept ?? (stream ? 'text/event-stream' : 'application/json'),
+    });
+    new Headers(additionalHeaders).forEach((value, name) => headers.set(name, value));
+    if (body !== undefined) headers.set('Content-Type', 'application/json');
+    if (csrf) headers.set('X-Thozha-CSRF', csrf);
+    if (key) headers.set('Idempotency-Key', key);
+    if (cursor) headers.set('Last-Event-ID', String(cursor));
+    const controller = new AbortController();
+    const abort = () => controller.abort(signal?.reason);
+    if (signal?.aborted) abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const timeout = setTimeout(() => controller.abort(new WebApiError('timeout')), timeoutMs);
+    try {
+      const response = await fetcher(path, {
+        method,
+        headers,
+        signal: controller.signal,
+        credentials: 'same-origin',
+        mode: 'same-origin',
+        cache: 'no-store',
+        redirect: 'error',
+        body: body !== undefined ? JSON.stringify(body) : rawBody,
+      }).catch(() => {
+        throw controller.signal.aborted ? controller.signal.reason : new WebApiError('connection');
+      });
+      if (!response.ok)
+        throw new WebApiError(
+          'http',
+          response.status,
+          explain ? await readControlError(response, controller.signal) : undefined
+        );
+      if (response.headers.get('content-type')?.toLowerCase().startsWith('text/html')) {
+        throw new WebApiError('html');
+      }
+      if (
+        typeof expectedStatus === 'number'
+          ? response.status !== expectedStatus
+          : !expectedStatus.includes(response.status)
+      )
+        throw new WebApiError('protocol');
+      if (stream) clearTimeout(timeout);
+      return await consume(response, controller.signal);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
+    }
+  }
+
+  function request<S extends z.ZodType>(
+    path: string,
+    expectedStatus: ExpectedStatus,
+    schema: S,
+    options: Options = {}
+  ): Promise<z.output<S>> {
+    return exchange(path, expectedStatus, options, async (response, signal) => {
+      if (schema instanceof z.ZodVoid) return schema.parse(undefined);
+      if (!response.headers.get('content-type')?.toLowerCase().startsWith('application/json')) {
+        throw new WebApiError('protocol');
+      }
+      const json: unknown = await response.json().catch(() => {
+        throw signal.aborted ? signal.reason : new WebApiError('protocol');
+      });
+      const parsed = schema.safeParse(json);
+      if (!parsed.success) throw new WebApiError('protocol');
+      return parsed.data;
+    });
+  }
+
+  return {
+    login: (body: LoginInput, signal?: AbortSignal) =>
+      request(loginPath, 200, sessionContract, { method: 'POST', body, signal }),
+    session: (signal?: AbortSignal) => request(sessionPath, 200, sessionContract, { signal }),
+    authorized(csrf: string, onUnauthorized: () => void) {
+      async function auth<T>(operation: Promise<T>) {
+        try {
+          return await operation;
+        } catch (error) {
+          if (isUnauthorized(error)) onUnauthorized();
+          throw error;
+        }
+      }
+      const mutation = { method: 'POST', csrf, body: {} } as const;
+      return {
+        ...createControlApi(
+          (path, status, schema, options) =>
+            auth(request(path, status, schema, { ...options, explain: true })),
+          (path, status, options, consume) =>
+            auth(exchange(path, status, { ...options, explain: true }, consume)),
+          csrf
+        ),
+        logout: () => request(logoutPath, 204, z.void(), mutation),
+        list: (signal?: AbortSignal) =>
+          auth(
+            request(
+              `${conversationsPath}?include_archived=true`,
+              200,
+              z.object({ items: z.array(conversationContract) }),
+              { signal }
+            )
+          ),
+        create: (body: ConversationInput) =>
+          auth(request(conversationsPath, 201, conversationContract, { ...mutation, body })),
+        get: (id: string, signal?: AbortSignal) =>
+          auth(request(detailPath(id), 200, detailContract, { signal })),
+        rename: (id: string, title: string) =>
+          auth(
+            request(detailPath(id), 200, conversationContract, {
+              ...mutation,
+              method: 'PATCH',
+              body: { title } satisfies Schemas['WebConversationRename'],
+            })
+          ),
+        archive: (id: string) =>
+          auth(request(`${detailPath(id)}/archive`, 200, z.void(), mutation)),
+        delete: (id: string) =>
+          auth(request(detailPath(id), 204, z.void(), { ...mutation, method: 'DELETE' })),
+        submit: (id: string, body: Schemas['WebMessageCreate'], key: string) =>
+          auth(
+            request(`${detailPath(id)}/messages`, 202, acceptedContract, { ...mutation, body, key })
+          ),
+        stream: (
+          id: string,
+          body: Schemas['WebMessageCreate'],
+          key: string,
+          signal: AbortSignal,
+          onEvent: (event: WebConversationSseEvent) => void
+        ) =>
+          auth(
+            exchange(
+              `${detailPath(id)}/messages/stream`,
+              200,
+              { ...mutation, body, key, signal, stream: true },
+              async (response, streamSignal) => {
+                if (
+                  !response.body ||
+                  !response.headers
+                    .get('content-type')
+                    ?.toLowerCase()
+                    .startsWith('text/event-stream')
+                ) {
+                  throw new WebApiError('protocol');
+                }
+                await readConversationStream(response.body, id, onEvent).catch(() => {
+                  throw streamSignal.aborted ? streamSignal.reason : new WebApiError('connection');
+                });
+              }
+            )
+          ),
+        cancel: (id: string, responseId: string) =>
+          auth(
+            request(
+              `${detailPath(id)}/messages/${encodeURIComponent(responseId)}/cancel`,
+              200,
+              cancelledContract,
+              mutation
+            )
+          ),
+        listMemories: (limit: number, offset: number, signal?: AbortSignal) =>
+          auth(
+            request(
+              `${memoryPath}?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`,
+              200,
+              memoryList,
+              { signal }
+            )
+          ),
+        searchMemories: (query: string, limit: number, signal?: AbortSignal) =>
+          auth(
+            request(
+              `${memorySearchPath}?${new URLSearchParams({ q: query, limit: String(limit) })}`,
+              200,
+              memoryList,
+              { signal }
+            )
+          ),
+        getMemory: (id: string, signal?: AbortSignal) =>
+          auth(request(`${memoryPath}/${encodeURIComponent(id)}`, 200, memoryContract, { signal })),
+        createMemory: (body: MemoryInput, key: string) =>
+          auth(request(memoryPath, 201, memoryCreated, { ...mutation, body, key })),
+        uploadAttachment: (
+          conversationId: string,
+          file: File,
+          mediaType: WebAttachmentMediaType,
+          key: string,
+          signal?: AbortSignal,
+          onProgress?: (sent: number, total: number) => void
+        ) => {
+          const safeName = file.name
+            .replace(/[^\x20-\x7e]/g, '_')
+            .replace(/[\r\n]/g, '_')
+            .slice(0, 256);
+          if (onProgress)
+            return auth(
+              uploadWithProgress(
+                `${detailPath(conversationId)}/attachments`,
+                file,
+                mediaType,
+                safeName,
+                csrf,
+                key,
+                signal,
+                onProgress
+              )
+            );
+          return auth(
+            request(`${detailPath(conversationId)}/attachments`, 201, attachmentUpload, {
+              method: 'POST',
+              rawBody: file,
+              headers: {
+                'Content-Type': mediaType,
+                ...(safeName ? { 'X-File-Name': safeName } : {}),
+              },
+              csrf,
+              key,
+              signal,
+              explain: true,
+              timeoutMs: 60_000,
+            })
+          );
+        },
+        deleteMemory: (id: string) =>
+          auth(
+            request(`${memoryPath}/${encodeURIComponent(id)}`, 204, z.void(), {
+              ...mutation,
+              method: 'DELETE',
+            })
+          ),
+      };
+    },
+  };
+}
+
+export type WebApi = ReturnType<typeof createWebApi>;
+export type WorkspaceApi = ReturnType<WebApi['authorized']>;
