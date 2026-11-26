@@ -539,7 +539,20 @@ def _run_supervised_agent(task_id: str, approval_id: str | None, agent, model, r
                     raise RuntimeError("Link task entered approval state without a pending approval record")
                 store.mark_link_task_waiting_approval(task_id, pending[-1]["id"])
             else:
-                store.finish_link_task(task_id, result_text=text)
+                conversation_user_text = next(
+                    (
+                        str(message.content)
+                        for message in reversed(getattr(req, "messages", []) or [])
+                        if getattr(message, "role", None) == "user"
+                        and isinstance(getattr(message, "content", None), str)
+                    ),
+                    "",
+                )
+                store.finish_link_task(
+                    task_id,
+                    result_text=text,
+                    conversation_user_text=conversation_user_text,
+                )
                 task = store.get_task(task_id)
         if task and task["state"] == "VERIFYING":
             store.transition(task_id, "COMPLETED", evidence={"response_returned": True})

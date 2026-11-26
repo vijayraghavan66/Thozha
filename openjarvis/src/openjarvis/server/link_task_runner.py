@@ -149,7 +149,10 @@ class LinkTaskExecutionRunner:
                 raise RuntimeError("Link task runner lost its configured agent")
             request = ChatCompletionRequest(
                 model=model,
-                messages=[ChatMessage(role="user", content=objective.strip())],
+                messages=[
+                    ChatMessage(role=message["role"], content=message["content"])
+                    for message in self.store.link_conversation_context(task_id, objective)
+                ],
                 stream=False,
             )
             model_started_ns = time.perf_counter_ns()

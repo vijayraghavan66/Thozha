@@ -24,12 +24,17 @@ class GateAgent:
 
     def __init__(self, *, fail: bool = False):
         self.calls: list[str] = []
+        self.contexts: list[list[tuple[str, str]]] = []
         self.started = threading.Event()
         self.release = threading.Event()
         self.fail = fail
 
     def run(self, text, *, context=None):
         self.calls.append(text)
+        self.contexts.append([
+            (message.role, message.content)
+            for message in (context.conversation.messages if context is not None else [])
+        ])
         self.started.set()
         self.release.wait(timeout=4)
         if self.fail:
@@ -61,13 +66,16 @@ def _client(tmp_path, monkeypatch, agent: GateAgent, *, workers: int = 2):
     return test_client, store, agent, runner
 
 
-def _body(key: str, objective: str | None = None):
-    return {
+def _body(key: str, objective: str | None = None, conversation_id: str | None = None):
+    body = {
         "objective": objective or f"Explain {key}",
         "capability_scope": ["read_only"],
         "idempotency_key": key,
         "requester_device_id": "a" * 32,
     }
+    if conversation_id is not None:
+        body["conversation_id"] = conversation_id
+    return body
 
 
 def test_async_acceptance_is_fast_concurrent_and_duplicate_safe(tmp_path, monkeypatch):
@@ -155,6 +163,87 @@ def test_async_worker_persists_failure_state(tmp_path, monkeypatch):
                 time.sleep(0.025)
             assert task["state"] == "FAILED"
             assert store.link_task_run(task_id)["status"] == "FAILED"
+    finally:
+        agent.release.set()
+        client.close()
+        store.close()
+        monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
+def test_android_follow_up_uses_persistent_owner_bound_context(tmp_path, monkeypatch):
+    agent = GateAgent()
+    client, store, _, _runner = _client(tmp_path, monkeypatch, agent, workers=1)
+    headers = {"Authorization": "Bearer async-link-test-admin"}
+    conversation_id = "c" * 32
+    first_key = "conversation-turn-000000001"
+    second_key = "conversation-turn-000000002"
+    try:
+        with client:
+            first = client.post(
+                "/v1/jarvis/link/tasks?mode=async",
+                headers=headers,
+                json=_body(first_key, "What is Java?", conversation_id),
+            )
+            assert first.status_code == 202
+            first_task_id = first.json()["task_id"]
+            assert agent.started.wait(timeout=2)
+            agent.release.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and store.get_task(first_task_id)["state"] != "COMPLETED":
+                time.sleep(0.01)
+            assert store.get_task(first_task_id)["state"] == "COMPLETED"
+            assert store.link_task_run(first_task_id)["conversation_id"] == conversation_id
+
+            agent.started.clear()
+            agent.release.clear()
+            follow_up = client.post(
+                "/v1/jarvis/link/tasks?mode=async",
+                headers=headers,
+                json=_body(second_key, "gimme some examples", conversation_id),
+            )
+            assert follow_up.status_code == 202
+            follow_up_task_id = follow_up.json()["task_id"]
+            assert agent.started.wait(timeout=2)
+            assert agent.calls[-1] == "gimme some examples"
+            assert agent.contexts[-1] == [
+                ("user", "What is Java?"),
+                ("assistant", "real fake answer: What is Java?"),
+            ]
+            agent.release.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and store.get_task(follow_up_task_id)["state"] != "COMPLETED":
+                time.sleep(0.01)
+            assert store.get_task(follow_up_task_id)["state"] == "COMPLETED"
+
+            duplicate = client.post(
+                "/v1/jarvis/link/tasks?mode=async",
+                headers=headers,
+                json=_body(second_key, "gimme some examples", conversation_id),
+            )
+            assert duplicate.status_code == 200
+            assert duplicate.json()["idempotent_replay"] is True
+            assert len(agent.calls) == 2
+    finally:
+        agent.release.set()
+        client.close()
+        store.close()
+        monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
+
+
+def test_invalid_conversation_reference_is_rejected_before_queueing(tmp_path, monkeypatch):
+    agent = GateAgent()
+    client, store, _, _runner = _client(tmp_path, monkeypatch, agent, workers=1)
+    headers = {"Authorization": "Bearer async-link-test-admin"}
+    try:
+        with client:
+            invalid = client.post(
+                "/v1/jarvis/link/tasks?mode=async",
+                headers=headers,
+                json=_body("conversation-invalid-0001", "Question", "NOT-A-DEVICE-ID"),
+            )
+            assert invalid.status_code == 422
+            assert not agent.calls
+            assert not store._db.execute("SELECT 1 FROM tasks").fetchone()
     finally:
         agent.release.set()
         client.close()

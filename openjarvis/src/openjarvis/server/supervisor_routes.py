@@ -821,7 +821,8 @@ async def run_link_task(request: Request) -> JSONResponse:
     required = {
         "objective", "capability_scope", "idempotency_key", "requester_device_id",
     }
-    if not isinstance(body, dict) or set(body) != required:
+    optional = {"conversation_id"}
+    if not isinstance(body, dict) or not required.issubset(body) or set(body) - required - optional:
         raise HTTPException(
             status_code=422,
             detail="objective, capability_scope, idempotency_key, and requester_device_id are required",
@@ -830,6 +831,11 @@ async def run_link_task(request: Request) -> JSONResponse:
     capability_scope = body.get("capability_scope")
     idempotency_key = body.get("idempotency_key")
     requester_device_id = body.get("requester_device_id")
+    conversation_id = body.get("conversation_id", "") or ""
+    if not isinstance(conversation_id, str) or (
+        conversation_id and not re.fullmatch(r"[0-9a-f]{32}", conversation_id)
+    ):
+        raise HTTPException(status_code=422, detail="conversation_id must be a 32-character lowercase conversation ID")
     if not isinstance(objective, str) or not objective.strip() or len(objective) > 20_000:
         raise HTTPException(status_code=422, detail="objective must be a non-empty string under 20000 characters")
     if not isinstance(capability_scope, list) or any(not isinstance(scope, str) for scope in capability_scope):
@@ -872,6 +878,7 @@ async def run_link_task(request: Request) -> JSONResponse:
             capability_scope=capability_scope,
             idempotency_key=idempotency_key,
             owner_actor="device:" + requester_device_id,
+            conversation_id=conversation_id,
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail="This task belongs to another paired device") from exc
@@ -959,7 +966,10 @@ async def run_link_task(request: Request) -> JSONResponse:
 
     chat_request = ChatCompletionRequest(
         model=model,
-        messages=[ChatMessage(role="user", content=objective.strip())],
+        messages=[
+            ChatMessage(role=message["role"], content=message["content"])
+            for message in store.link_conversation_context(task_id, objective)
+        ],
         stream=False,
     )
     try:

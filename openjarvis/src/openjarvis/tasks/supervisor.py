@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import sqlite3
 import threading
 import time
@@ -71,6 +72,8 @@ def utc_now() -> str:
 # character boundary and the cut is stated in the text itself, so a long answer is never silently shortened.
 MAX_RESULT_TEXT_BYTES = 256 * 1024
 RESULT_TEXT_CUT_NOTICE = "\n\n[Jarvis stopped this answer at 256 KiB on the Mac. The rest was not stored.]"
+MAX_LINK_CONVERSATION_MESSAGE_CHARS = 12_000
+MAX_LINK_CONVERSATION_MESSAGES = 100
 
 
 def bounded_result_text(text: str) -> str:
@@ -110,8 +113,43 @@ def _target(tool: str, args: dict[str, Any]) -> str:
     return tool
 
 
+_SAFE_READONLY_BINARIES = {
+    # Require PATH resolution to one of the expected system binaries; basename
+    # matching alone would let ./git or /tmp/diskutil inherit a safe verdict.
+    "df": ("/bin/df", "/usr/bin/df"),
+    "pwd": ("/bin/pwd", "/usr/bin/pwd"),
+    "ls": ("/bin/ls", "/usr/bin/ls"),
+    "stat": ("/usr/bin/stat", "/bin/stat"),
+    "du": ("/usr/bin/du", "/bin/du"),
+    "whoami": ("/usr/bin/whoami", "/bin/whoami"),
+    "uname": ("/usr/bin/uname", "/bin/uname"),
+    "system_profiler": ("/usr/sbin/system_profiler",),
+    "diskutil": ("/usr/sbin/diskutil",),
+    "date": ("/bin/date", "/usr/bin/date"),
+}
+
+
+def _trusted_readonly_executable(token: str) -> bool:
+    expected = _SAFE_READONLY_BINARIES.get(token)
+    if not expected or "/" in token or "\\" in token:
+        return False
+    resolved = shutil.which(token)
+    if not resolved:
+        return False
+    try:
+        actual = Path(resolved).resolve(strict=True)
+        expected_paths = {
+            Path(path).resolve(strict=True) for path in expected if Path(path).exists()
+        }
+    except (OSError, RuntimeError):
+        return False
+    return actual in expected_paths
+
+
 def requires_approval(tool: str, args: dict[str, Any], declared: bool = False) -> bool:
     """Classify from the registered tool and actual parameters, never its label."""
+    if not isinstance(tool, str) or not isinstance(args, dict):
+        return True
     name = tool.lower()
     # Read-only shell operations are safe by command semantics even though the
     # generic shell tool is marked confirmation-required. Never trust a
@@ -135,11 +173,26 @@ def requires_approval(tool: str, args: dict[str, Any], declared: bool = False) -
                 return True
             if not parts:
                 return True
-            executable = Path(parts[0]).name
-            readonly = {"df", "diskutil", "pwd", "ls", "stat", "du", "whoami", "date", "uname", "system_profiler"}
-            if executable in readonly:
-                return False
-            if executable == "git" and len(parts) > 1 and parts[1] in {"status", "diff", "log", "show", "branch", "rev-parse"}:
+            executable = parts[0]
+            # Generic Git invokes repository-controlled pagers, fsmonitor and
+            # external diff hooks. Use typed, separately reviewed Git adapters.
+            if executable == "git":
+                return True
+            if not _trusted_readonly_executable(executable):
+                return True
+            if executable == "diskutil":
+                if len(parts) == 2 and parts[1] == "list":
+                    return False
+                if (
+                    len(parts) == 3
+                    and parts[1] == "info"
+                    and re.fullmatch(r"disk[0-9]+(?:s[0-9]+)?", parts[2])
+                ):
+                    return False
+                return True
+            if executable == "date":
+                return len(parts) != 1
+            if executable in _SAFE_READONLY_BINARIES:
                 return False
             return True
         return True
@@ -248,7 +301,15 @@ class SupervisorStore:
               task_id TEXT PRIMARY KEY REFERENCES tasks(id), idempotency_key TEXT NOT NULL UNIQUE,
               objective_digest TEXT NOT NULL, scope TEXT NOT NULL, scope_digest TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
               objective_text TEXT, result_digest TEXT, result_summary TEXT, created_at TEXT NOT NULL,
+              conversation_id TEXT NOT NULL DEFAULT '', owner_actor TEXT NOT NULL DEFAULT '',
               started_at TEXT, completed_at TEXT, last_error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS link_conversation_messages(
+              seq INTEGER PRIMARY KEY AUTOINCREMENT,
+              owner_actor TEXT NOT NULL, conversation_id TEXT NOT NULL,
+              idempotency_key TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+              content TEXT NOT NULL, created_at TEXT NOT NULL,
+              UNIQUE(owner_actor,conversation_id,idempotency_key,role)
             );
             CREATE TABLE IF NOT EXISTS mcp_approval_dispatches(
               approval_id TEXT PRIMARY KEY REFERENCES operation_approvals(id),
@@ -270,6 +331,7 @@ class SupervisorStore:
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state, updated_at);
             CREATE INDEX IF NOT EXISTS idx_approvals_task ON operation_approvals(task_id, status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_link_conversation_messages ON link_conversation_messages(owner_actor,conversation_id,seq);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_decision_nonce ON operation_approvals(decision_nonce) WHERE decision_nonce IS NOT NULL;
             """)
             columns = {row["name"] for row in self._db.execute("PRAGMA table_info(operation_approvals)")}
@@ -283,6 +345,10 @@ class SupervisorStore:
             if link_columns and "result_text" not in link_columns:
                 # Canonical full answer. result_summary stays a 1000-character preview for Activity cards.
                 self._db.execute("ALTER TABLE link_task_runs ADD COLUMN result_text TEXT")
+            if link_columns and "conversation_id" not in link_columns:
+                self._db.execute("ALTER TABLE link_task_runs ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''")
+            if link_columns and "owner_actor" not in link_columns:
+                self._db.execute("ALTER TABLE link_task_runs ADD COLUMN owner_actor TEXT NOT NULL DEFAULT ''")
             pairing_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(device_pairings)")}
             pairing_migrations = {
                 "status": "TEXT NOT NULL DEFAULT 'INVITED'",
@@ -354,6 +420,7 @@ class SupervisorStore:
         capability_scope: list[str],
         idempotency_key: str,
         owner_actor: str | None = None,
+        conversation_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a one-shot Link task or return the prior run for a retry."""
         objective = objective.strip()
@@ -363,6 +430,12 @@ class SupervisorStore:
             raise ValueError("Only read_only, supervisor-gated assistant, or allowlisted development Link scope is enabled")
         if not re.fullmatch(r"[A-Za-z0-9._~-]{16,128}", idempotency_key or ""):
             raise ValueError("idempotency_key must be URL-safe and 16–128 characters")
+        if conversation_id is None:
+            conversation_id = ""
+        if not isinstance(conversation_id, str):
+            raise ValueError("conversation_id must be a string")
+        if conversation_id and not re.fullmatch(r"[0-9a-f]{32}", conversation_id):
+            raise ValueError("conversation_id must be a 32-character lowercase conversation ID")
         scope = capability_scope[0]
         scope_json = canonical_json(capability_scope)
         scope_digest = hashlib.sha256(scope_json.encode("utf-8")).hexdigest()
@@ -376,6 +449,8 @@ class SupervisorStore:
             if existing:
                 if existing["objective_digest"] != objective_digest or existing["scope"] != scope_json or existing["scope_digest"] != scope_digest:
                     raise ValueError("idempotency key was already used for a different Link request")
+                if str(existing["conversation_id"] or "") != conversation_id:
+                    raise ValueError("idempotency key was already used in a different conversation")
                 task_row = db.execute("SELECT recovery_json FROM tasks WHERE id=?", (existing["task_id"],)).fetchone()
                 prior_metadata = json.loads(task_row["recovery_json"] or "{}") if task_row else {}
                 prior_owner = prior_metadata.get("owner_actor")
@@ -390,6 +465,7 @@ class SupervisorStore:
                 "capability_scope": capability_scope,
                 "scope_digest": scope_digest,
                 "idempotency_key": idempotency_key,
+                "conversation_id": conversation_id,
             }
             if owner_actor:
                 metadata["owner_actor"] = owner_actor
@@ -398,8 +474,8 @@ class SupervisorStore:
                 (task_id, objective_digest, "CREATED", canonical_json(sorted(LINK_SCOPE_CAPABILITIES[scope])), canonical_json(metadata), now, now),
             )
             db.execute(
-                "INSERT INTO link_task_runs(task_id,idempotency_key,objective_digest,scope,scope_digest,status,objective_text,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (task_id, idempotency_key, objective_digest, scope_json, scope_digest, "CREATED", objective, now),
+                "INSERT INTO link_task_runs(task_id,idempotency_key,objective_digest,scope,scope_digest,status,objective_text,created_at,conversation_id,owner_actor) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (task_id, idempotency_key, objective_digest, scope_json, scope_digest, "CREATED", objective, now, conversation_id, owner_actor or ""),
             )
             self._event(db, task_id, "task.created", {"request_digest": objective_digest, "source": "jarvis_link", "scope": scope})
             self._event(db, task_id, "link_task.created", {"idempotency_key": idempotency_key, "scope": scope})
@@ -495,20 +571,61 @@ class SupervisorStore:
             self._event(db, task_id, "task.state", {"from": "CREATED", "to": "FAILED", "step": "dispatch_failed", "error": error_code})
         return True
 
-    def finish_link_task(self, task_id: str, *, result_text: str | None = None, error: str | None = None) -> None:
+    def finish_link_task(
+        self,
+        task_id: str,
+        *,
+        result_text: str | None = None,
+        error: str | None = None,
+        conversation_user_text: str | None = None,
+    ) -> None:
         now = utc_now()
         success = error is None
         digest = hashlib.sha256((result_text or "").encode("utf-8")).hexdigest() if success else None
         summary = (result_text or "")[:1000] if success else ""
         full_text = bounded_result_text(result_text or "") if success else None
         with self._tx() as db:
-            run = db.execute("SELECT status FROM link_task_runs WHERE task_id=?", (task_id,)).fetchone()
+            run = db.execute(
+                "SELECT status,idempotency_key,conversation_id,owner_actor FROM link_task_runs WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
             if run is None or run["status"] != "RUNNING":
                 raise RuntimeError("Link task is not running")
             db.execute(
                 "UPDATE link_task_runs SET status=?,result_digest=?,result_summary=?,result_text=?,completed_at=?,last_error=? WHERE task_id=?",
                 ("COMPLETED" if success else "FAILED", digest, summary, full_text, now, (error or "")[:200] or None, task_id),
             )
+            owner = str(run["owner_actor"] or "")
+            conversation_id = str(run["conversation_id"] or "")
+            if success and owner and conversation_id and conversation_user_text and full_text:
+                conversation_user_text = conversation_user_text.strip()
+                if conversation_user_text:
+                    db.execute(
+                        """INSERT OR IGNORE INTO link_conversation_messages
+                           (owner_actor,conversation_id,idempotency_key,role,content,created_at)
+                           VALUES(?,?,?,?,?,?)""",
+                        (
+                            owner, conversation_id, run["idempotency_key"], "user",
+                            conversation_user_text[:MAX_LINK_CONVERSATION_MESSAGE_CHARS], now,
+                        ),
+                    )
+                    db.execute(
+                        """INSERT OR IGNORE INTO link_conversation_messages
+                           (owner_actor,conversation_id,idempotency_key,role,content,created_at)
+                           VALUES(?,?,?,?,?,?)""",
+                        (
+                            owner, conversation_id, run["idempotency_key"], "assistant",
+                            (full_text or "")[:MAX_LINK_CONVERSATION_MESSAGE_CHARS], now,
+                        ),
+                    )
+                    db.execute(
+                        """DELETE FROM link_conversation_messages WHERE seq IN (
+                             SELECT seq FROM link_conversation_messages
+                             WHERE owner_actor=? AND conversation_id=?
+                             ORDER BY seq DESC LIMIT -1 OFFSET ?
+                           )""",
+                        (owner, conversation_id, MAX_LINK_CONVERSATION_MESSAGES),
+                    )
             self._event(db, task_id, "link_task.completed" if success else "link_task.failed", {"result_digest": digest, "error": (error or "")[:200] or None})
 
     def mark_link_task_waiting_approval(self, task_id: str, approval_id: str) -> None:
@@ -592,6 +709,67 @@ class SupervisorStore:
                 (idempotency_key,),
             ).fetchone()
         return dict(row) if row else None
+
+    def link_conversation_context(
+        self,
+        task_id: str,
+        current_objective: str,
+        *,
+        max_prior_turns: int = 6,
+        max_context_chars: int = 32_000,
+    ) -> list[dict[str, str]]:
+        """Return persisted owner-bound turns and the current prompt for a Link task.
+
+        Older API clients without a conversation ID remain isolated one-turn prompts.
+        Only completed turns for the exact owner and conversation are included.
+        """
+        current = current_objective.strip() if isinstance(current_objective, str) else ""
+        if not current:
+            raise ValueError("current conversation turn is required")
+        max_prior_turns = max(0, min(int(max_prior_turns), 8))
+        max_context_chars = max(1_024, min(int(max_context_chars), 64_000))
+        with self._lock:
+            task = self._db.execute(
+                "SELECT recovery_json FROM tasks WHERE id=?", (task_id,),
+            ).fetchone()
+            run = self._db.execute(
+                "SELECT conversation_id,owner_actor,idempotency_key FROM link_task_runs WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if task is None or run is None:
+                raise KeyError("Link conversation task is missing")
+            metadata = json.loads(task["recovery_json"] or "{}")
+            owner = str(run["owner_actor"] or "")
+            conversation_id = str(run["conversation_id"] or "")
+            if (
+                metadata.get("source") != "jarvis_link"
+                or not owner
+                or metadata.get("owner_actor") != owner
+                or metadata.get("conversation_id") != conversation_id
+                or not conversation_id
+                or max_prior_turns == 0
+            ):
+                return [{"role": "user", "content": current}]
+            rows = self._db.execute(
+                """SELECT role,content FROM link_conversation_messages
+                   WHERE owner_actor=? AND conversation_id=? AND idempotency_key<>?
+                   ORDER BY seq DESC LIMIT ?""",
+                (owner, conversation_id, run["idempotency_key"], max_prior_turns * 2),
+            ).fetchall()
+        prior = [
+            {"role": str(row["role"]), "content": str(row["content"])}
+            for row in reversed(rows)
+        ]
+        # The table commits user/assistant pairs atomically. If an old or
+        # partially migrated record violates that invariant, keep only complete pairs.
+        if len(prior) % 2:
+            prior = prior[1:]
+        pairs = [prior[index:index + 2] for index in range(0, len(prior), 2)]
+        while pairs and sum(len(message["content"]) for pair in pairs for message in pair) + len(current) > max_context_chars:
+            pairs.pop(0)
+        history = [message for pair in pairs for message in pair]
+        history.append({"role": "user", "content": current})
+        return history
 
     def cancel_link_task(self, task_id: str, *, actor: str) -> dict[str, Any]:
         """Cancel a Link task and revoke any not-yet-consumed approval atomically.

@@ -816,10 +816,9 @@ def errors():
 @click.option(
     "--yes/--no-yes",
     "auto_approve",
-    default=True,
-    help="Auto-approve tool execution that would otherwise need confirmation. "
-    "Default: on (suits non-interactive CLI use). Pass --no-yes to require a "
-    "TTY prompt for tools whose ToolSpec sets requires_confirmation=True.",
+    default=False,
+    help="Explicitly auto-approve tool execution. Default: off; privileged tool "
+    "calls require a separate confirmation or supervisor approval.",
 )
 def ask(agent_id, message, auto_approve):
     """Ask an agent a question (immediate response)."""

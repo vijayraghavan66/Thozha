@@ -439,7 +439,7 @@ def _run_agent(
                 capability_policy=capability_policy,
                 agent_id=getattr(agent_cls, "agent_id", agent_name),
                 interactive=True,
-                confirm_callback=lambda prompt: True,
+                confirm_callback=lambda _prompt: False,
             )
             skill_manager = SkillManager(
                 bus,
@@ -477,7 +477,7 @@ def _run_agent(
         agent_kwargs["tools"] = tools
         agent_kwargs["max_turns"] = config.agent.max_turns
         agent_kwargs["interactive"] = True
-        agent_kwargs["confirm_callback"] = lambda prompt: True
+        agent_kwargs["confirm_callback"] = lambda _prompt: False
         agent_kwargs["agent_id"] = agent_name
         if capability_policy is not None:
             agent_kwargs["capability_policy"] = capability_policy

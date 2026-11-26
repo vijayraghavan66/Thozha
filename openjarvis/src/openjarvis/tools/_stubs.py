@@ -14,6 +14,7 @@ import logging
 import queue
 import threading
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -459,25 +460,173 @@ class ToolExecutor:
         if isinstance(params, dict):
             params.pop("_taint", None)
 
-        # Confirmation check for sensitive tools
-        if tool.spec.requires_confirmation:
-            if not self._interactive or self._confirm_callback is None:
-                return ToolResult(
-                    tool_name=tool_call.name,
-                    content=(
-                        f"Tool '{tool_call.name}' requires"
-                        " confirmation but no confirmation"
-                        " callback is available."
-                    ),
-                    success=False,
-                )
-            prompt = f"Allow execution of tool '{tool_call.name}' with args {params}?"
-            if not self._confirm_callback(prompt):
-                return ToolResult(
-                    tool_name=tool_call.name,
-                    content=f"Tool '{tool_call.name}' execution denied by user.",
-                    success=False,
-                )
+        # The final operation gate is inside the executor, immediately before
+        # dispatch. The registered spec and parsed arguments are authoritative;
+        # model-authored safety labels are ignored. Link scope was already
+        # checked by _link_scope_denial above.
+        interactive_approval_consumed = False
+        try:
+            from openjarvis.tasks.supervisor import (
+                TaskContext,
+                current_task_context,
+                get_supervisor_store,
+                operation_target,
+                requires_approval,
+            )
+
+            context = current_task_context()
+            privileged_caps: set[Any] = set()
+            try:
+                from openjarvis.security.capabilities import canonical_tool_capabilities
+
+                privileged_caps = set(canonical_tool_capabilities(tool))
+            except Exception:
+                privileged_caps = set()
+            approval_capabilities = {
+                "file:write", "code:execute", "channel:send", "schedule:create",
+                "system:admin", "tool:invoke",
+            }
+            declared = bool(tool.spec.requires_confirmation) or any(
+                (cap.value if hasattr(cap, "value") else str(cap)) in approval_capabilities
+                for cap in privileged_caps
+            )
+            if requires_approval(tool_call.name, params, declared):
+                store = self._supervisor_store or get_supervisor_store()
+                if context is None and self._interactive and self._confirm_callback is not None:
+                    prompt = (
+                        f"Allow exact operation '{tool_call.name}' on "
+                        f"'{operation_target(tool_call.name, params)}' with args {params}?"
+                    )
+                    if not self._confirm_callback(prompt):
+                        return ToolResult(
+                            tool_name=tool_call.name,
+                            content="Authorization denied by user.",
+                            success=False,
+                            metadata={"error_code": "APPROVAL_REJECTED"},
+                        )
+                    task_id = store.create_task(f"Interactive approval for {tool_call.name}")
+                    store.transition(task_id, "RUNNING")
+                    target = operation_target(tool_call.name, params)
+                    approval_id, digest = store.create_approval(
+                        task_id, tool_call.name, target, params, "Interactive human confirmation",
+                    )
+                    if not store.decide_approval(
+                        approval_id,
+                        decision="approve",
+                        expected_digest=digest,
+                        task_id=task_id,
+                        actor="interactive_cli",
+                        nonce=uuid.uuid4().hex,
+                    ) or not store.consume_approval(
+                        approval_id,
+                        task_id=task_id,
+                        operation=tool_call.name,
+                        target=target,
+                        arguments=params,
+                    ):
+                        return ToolResult(
+                            tool_name=tool_call.name,
+                            content="Authorization denied: exact approval could not be recorded and consumed.",
+                            success=False,
+                            metadata={"error_code": "APPROVAL_INVALID"},
+                        )
+                    store.record_event(task_id, "tool.interactive_operation_authorized", {
+                        "tool": tool_call.name, "target": target, "approval_id": approval_id,
+                    })
+                    interactive_approval_consumed = True
+                else:
+                    if context is None:
+                        task_id = store.create_task(
+                            f"Approval required for {tool_call.name}",
+                            metadata={"source": "detached_tool_executor"},
+                        )
+                        store.transition(task_id, "RUNNING")
+                        context = TaskContext(task_id)
+                    elif not store.task_exists(context.task_id):
+                        return ToolResult(
+                            tool_name=tool_call.name,
+                            content="Authorization denied: the bound task no longer exists.",
+                            success=False,
+                            metadata={"error_code": "SUPERVISED_TASK_REQUIRED"},
+                        )
+                    target = operation_target(tool_call.name, params)
+                    if context.approval_id is None:
+                        approval_id, digest = store.create_approval(
+                            context.task_id,
+                            tool_call.name,
+                            target,
+                            params,
+                            "Sensitive operation requires explicit user approval.",
+                        )
+                        if context.source == "jarvis_link":
+                            store.mark_link_task_waiting_approval(context.task_id, approval_id)
+                        else:
+                            task = store.get_task(context.task_id) or {}
+                            if task.get("state") == "RUNNING":
+                                store.transition(context.task_id, "WAITING_APPROVAL", expected="RUNNING")
+                        store.record_event(context.task_id, "tool.authorization_required", {
+                            "tool": tool_call.name,
+                            "target": target,
+                            "approval_id": approval_id,
+                            "args_digest": digest,
+                        })
+                        return ToolResult(
+                            tool_name=tool_call.name,
+                            content="Approval required for this exact operation.",
+                            success=False,
+                            metadata={
+                                "error_code": "APPROVAL_REQUIRED",
+                                "approval_id": approval_id,
+                                "task_id": context.task_id,
+                                "args_digest": digest,
+                            },
+                        )
+                    if not store.consume_approval(
+                        context.approval_id,
+                        task_id=context.task_id,
+                        operation=tool_call.name,
+                        target=target,
+                        arguments=params,
+                    ):
+                        store.record_event(context.task_id, "tool.authorization_denied", {
+                            "tool": tool_call.name,
+                            "target": target,
+                            "approval_id": context.approval_id,
+                            "reason": "approval_missing_expired_rejected_modified_or_replayed",
+                        })
+                        return ToolResult(
+                            tool_name=tool_call.name,
+                            content=(
+                                "Authorization denied: approval is missing, expired, rejected, "
+                                "does not match these arguments, or was already used."
+                            ),
+                            success=False,
+                            metadata={"error_code": "APPROVAL_INVALID"},
+                        )
+                    interactive_approval_consumed = True
+        except Exception as exc:
+            logger.exception("Durable tool authorization failed")
+            return ToolResult(
+                tool_name=tool_call.name,
+                content=f"Authorization unavailable; operation blocked ({type(exc).__name__}).",
+                success=False,
+                metadata={"error_code": "AUTHORIZATION_STORE_ERROR"},
+            )
+
+        # `requires_approval` already handled every confirmation-required
+        # tool. This is retained only for legacy specs whose flag has no
+        # canonical classifier and therefore cannot auto-dispatch.
+        if (
+            tool.spec.requires_confirmation
+            and not interactive_approval_consumed
+            and tool_call.name != "shell_exec"
+        ):
+            return ToolResult(
+                tool_name=tool_call.name,
+                content="Tool requires an explicit supervisor approval.",
+                success=False,
+                metadata={"error_code": "APPROVAL_REQUIRED"},
+            )
 
         # Emit start event. ``agent`` carries the managed-agent UUID so the
         # AgentExecutor's trace subscriber (which filters by agent_id) can
