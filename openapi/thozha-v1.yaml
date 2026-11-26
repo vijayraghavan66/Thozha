@@ -891,7 +891,11 @@ paths:
       description: >
         Records the authenticated Mac installation owner's explicit decision.
         Approve permits only the invitation-scoped phone claim; it does not
-        itself issue a device credential. Reject never creates a paired device.
+        itself issue a device credential. After the phone completes its
+        invitation-bound key proof and claims its credential, the server creates
+        an owner-scoped Web device mapping for this approving Web owner. The
+        mapping is not active before claim. Reject never creates a paired device
+        or Web mapping.
       requestBody:
         required: true
         content:

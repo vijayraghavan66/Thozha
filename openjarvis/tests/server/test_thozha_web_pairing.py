@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import sqlite3
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import openjarvis.server.supervisor_routes as supervisor_routes
@@ -16,6 +17,11 @@ import openjarvis.tasks.supervisor as supervisor_module
 from openjarvis.server.companion_gateway import create_gateway_app
 from openjarvis.server.supervisor_routes import _canonical_pairing_payload, router
 from openjarvis.server.thozha_web_devices import create_web_devices_router
+from openjarvis.server.thozha_web_supervisor import (
+    is_web_device_active,
+    is_web_device_mapped,
+    resolve_web_device_ids,
+)
 from openjarvis.tasks.supervisor import SupervisorStore
 
 
@@ -28,6 +34,8 @@ ORIGIN = "https://thozha.test"
 def _pairing_app(tmp_path, monkeypatch):
     store = SupervisorStore(str(tmp_path / "web-pairing.db"), run_recovery=False)
     monkeypatch.setattr(supervisor_module, "_STORE_INSTANCE", store)
+    monkeypatch.setenv("THOZHA_WEB_OWNER_ID", OWNER)
+    monkeypatch.setenv("THOZHA_WEB_ALLOWED_DEVICE_IDS", "")
     app = FastAPI()
     from openjarvis.server.thozha_web_auth import (
         WebAuthConfig,
@@ -56,9 +64,9 @@ def _pairing_app(tmp_path, monkeypatch):
     app.include_router(
         create_web_devices_router(
             require_web_session,
-            lambda _principal, _store: set(),
-            lambda _owner, _device, _store: False,
-            lambda _principal, _device: False,
+            resolve_web_device_ids,
+            is_web_device_active,
+            is_web_device_mapped,
             store_provider=lambda _request: store,
         )
     )
@@ -95,6 +103,31 @@ def _new_device_proof(challenge: str):
     )
     signature = key.sign(challenge.encode("utf-8"), ec.ECDSA(hashes.SHA256()))
     return key, base64.b64encode(public_der).decode("ascii"), base64.b64encode(signature).decode("ascii")
+
+
+def test_supervisor_upgrade_adds_owner_mapping_state_without_changing_pairing_rows(tmp_path):
+    db_path = tmp_path / "older-supervisor.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "CREATE TABLE device_pairings(id TEXT PRIMARY KEY,challenge TEXT NOT NULL,"
+            "created_at TEXT NOT NULL,expires_at TEXT NOT NULL,used_at TEXT)"
+        )
+        db.execute(
+            "INSERT INTO device_pairings(id,challenge,created_at,expires_at) VALUES(?,?,?,?)",
+            ("a" * 32, "opaque-challenge", "2026-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00"),
+        )
+    store = SupervisorStore(str(db_path), run_recovery=False)
+    try:
+        columns = {row["name"] for row in store._db.execute("PRAGMA table_info(device_pairings)")}
+        assert "web_owner_id" in columns
+        row = store._db.execute(
+            "SELECT id,status,challenge,web_owner_id FROM device_pairings WHERE id=?",
+            ("a" * 32,),
+        ).fetchone()
+        assert tuple(row) == ("a" * 32, "INVITED", "opaque-challenge", None)
+        assert store.web_device_mapping_ids(OWNER) == set()
+    finally:
+        store.close()
 
 
 def _gateway_for_app(app, store):
@@ -201,6 +234,7 @@ def test_web_owner_creates_wifi_qr_and_android_pairs_through_real_gateway_routes
     )
     assert decision.status_code == 200
     assert decision.json()["status"] == "APPROVED"
+    assert store.web_device_mapping_ids(OWNER) == set()
     web_status = web.get(
         f"/v1/web/devices/pairing-invitations/{invitation_id}",
         headers={"Origin": ORIGIN},
@@ -224,6 +258,19 @@ def test_web_owner_creates_wifi_qr_and_android_pairs_through_real_gateway_routes
     token = claimed.json()["access_token"]
     device_id = claimed.json()["device_id"]
     assert store.authenticate_device_token(token) == device_id
+    assert store.web_device_mapping_ids(OWNER) == {device_id}
+    owner_devices = web.get("/v1/web/devices", headers=headers)
+    assert owner_devices.status_code == 200
+    assert [item["device_id"] for item in owner_devices.json()["devices"]] == [device_id]
+    try:
+        resolve_web_device_ids({"user_id": OTHER_OWNER}, store, environ={
+            "THOZHA_WEB_OWNER_ID": OWNER,
+            "THOZHA_WEB_ALLOWED_DEVICE_IDS": "",
+        })
+    except HTTPException as exc:
+        assert exc.status_code == 403
+    else:
+        raise AssertionError("a different Web owner must not resolve this paired device")
 
     # Web status remains safe after the phone consumes the one-time claim.
     terminal = web.get(
@@ -277,5 +324,6 @@ def test_web_pairing_owner_can_cancel_and_reject_without_claiming(tmp_path, monk
         headers={"Origin": ORIGIN},
     ).json()["status"] == "REJECTED"
     assert store._db.execute("SELECT COUNT(*) FROM paired_devices").fetchone()[0] == 0
+    assert store.web_device_mapping_ids(OWNER) == set()
     store.close()
     web_auth.store.close()

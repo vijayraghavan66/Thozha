@@ -1,6 +1,8 @@
 """Portable runtime path resolution for the Codex SDK adapter."""
 
 from pathlib import Path
+import sys
+import types
 
 from openjarvis.engine import codex_sdk
 
@@ -53,3 +55,33 @@ def test_non_link_working_directory_uses_configured_openjarvis_home(
     monkeypatch.setattr(codex_sdk, "get_config_dir", lambda: root)
 
     assert codex_sdk._working_directory_for_current_task() == str(root)
+
+
+def test_codex_cli_resolution_prefers_the_sdk_bundled_binary(tmp_path, monkeypatch):
+    binary = tmp_path / "codex"
+    binary.write_bytes(b"fixture executable")
+    binary.chmod(0o755)
+    package = types.ModuleType("codex_cli_bin")
+    package.bundled_codex_path = lambda: binary
+    monkeypatch.setitem(sys.modules, "codex_cli_bin", package)
+    monkeypatch.setattr(codex_sdk.shutil, "which", lambda _name: None)
+
+    assert codex_sdk._codex_cli_path() == binary.resolve()
+
+
+def test_readiness_reports_missing_auth_without_hiding_bundled_cli(
+    tmp_path, monkeypatch
+):
+    cli_package = types.ModuleType("openai_codex")
+    monkeypatch.setitem(sys.modules, "openai_codex", cli_package)
+    monkeypatch.setattr(codex_sdk, "CODEX_HOME", tmp_path / "empty-codex-home")
+    monkeypatch.setattr(
+        codex_sdk, "_codex_cli_path", lambda: tmp_path / "runtime/bin/codex"
+    )
+
+    readiness = codex_sdk.CodexSDKEngine().readiness()
+
+    assert readiness["cli_binary_present"] is True
+    assert readiness["authentication_state"] == "missing"
+    assert readiness["credential_file_present"] is False
+    assert readiness["state"] == "unavailable"

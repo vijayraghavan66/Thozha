@@ -322,12 +322,17 @@ class SupervisorStore:
               status TEXT NOT NULL DEFAULT 'INVITED', device_name TEXT NOT NULL DEFAULT '',
               public_key_b64 TEXT, device_fingerprint TEXT, requested_at TEXT,
               confirmed_at TEXT, claim_challenge TEXT, claim_expires_at TEXT,
-              claim_used_at TEXT, device_id TEXT
+              claim_used_at TEXT, device_id TEXT, web_owner_id TEXT
             );
             CREATE TABLE IF NOT EXISTS paired_devices(
               id TEXT PRIMARY KEY, public_key_b64 TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
               created_at TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT,
               device_name TEXT NOT NULL DEFAULT 'Android companion'
+            );
+            CREATE TABLE IF NOT EXISTS web_device_mappings(
+              web_owner_id TEXT NOT NULL, device_id TEXT NOT NULL,
+              pairing_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+              PRIMARY KEY(web_owner_id,device_id)
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_state ON tasks(state, updated_at);
             CREATE INDEX IF NOT EXISTS idx_approvals_task ON operation_approvals(task_id, status, created_at);
@@ -361,6 +366,7 @@ class SupervisorStore:
                 "claim_expires_at": "TEXT",
                 "claim_used_at": "TEXT",
                 "device_id": "TEXT",
+                "web_owner_id": "TEXT",
             }
             for name, definition in pairing_migrations.items():
                 if name not in pairing_columns:
@@ -1275,14 +1281,24 @@ class SupervisorStore:
                 raise RuntimeError("pairing changed before cancellation was recorded")
         return "CANCELLED"
 
-    def decide_device_pairing(self, pairing_id: str, decision: str) -> str:
+    def decide_device_pairing(
+        self, pairing_id: str, decision: str, *, web_owner_id: str | None = None
+    ) -> str:
         """Record the local Mac user's decision; approval only creates a claim challenge."""
         if decision not in {"approve", "reject"}:
             raise ValueError("decision must be approve or reject")
+        if web_owner_id is not None and (
+            not isinstance(web_owner_id, str)
+            or not web_owner_id.strip()
+            or len(web_owner_id) > 200
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in web_owner_id)
+        ):
+            raise ValueError("Web owner identifier is invalid")
         now = datetime.now(timezone.utc)
         status = "APPROVED" if decision == "approve" else "REJECTED"
         claim_challenge = None
         claim_expires = None
+        mapped_owner = web_owner_id.strip() if decision == "approve" and web_owner_id else None
         if decision == "approve":
             claim_challenge = f"openjarvis-device-claim:v1:{pairing_id}:{secrets.token_urlsafe(32)}"
             claim_expires = (now + timedelta(minutes=5)).isoformat()
@@ -1296,8 +1312,8 @@ class SupervisorStore:
                 db.execute("UPDATE device_pairings SET status='EXPIRED' WHERE id=? AND status='PENDING_CONFIRMATION'", (pairing_id,))
                 return "EXPIRED"
             cur = db.execute(
-                "UPDATE device_pairings SET status=?,confirmed_at=?,claim_challenge=?,claim_expires_at=? WHERE id=? AND status='PENDING_CONFIRMATION' AND expires_at>?",
-                (status, now.isoformat(), claim_challenge, claim_expires, pairing_id, now.isoformat()),
+                "UPDATE device_pairings SET status=?,confirmed_at=?,claim_challenge=?,claim_expires_at=?,web_owner_id=? WHERE id=? AND status='PENDING_CONFIRMATION' AND expires_at>?",
+                (status, now.isoformat(), claim_challenge, claim_expires, mapped_owner, pairing_id, now.isoformat()),
             )
             if cur.rowcount != 1:
                 raise RuntimeError("device request changed before the decision was recorded")
@@ -1343,7 +1359,7 @@ class SupervisorStore:
         expires = (now + timedelta(days=max(1, min(ttl_days, 365)))).isoformat()
         with self._tx() as db:
             row = db.execute(
-                "SELECT status,public_key_b64,device_name,claim_challenge,claim_expires_at,claim_used_at FROM device_pairings WHERE id=?",
+                "SELECT status,public_key_b64,device_name,claim_challenge,claim_expires_at,claim_used_at,web_owner_id FROM device_pairings WHERE id=?",
                 (pairing_id,),
             ).fetchone()
             if row is None or row["status"] != "APPROVED" or row["claim_used_at"] is not None or not row["claim_challenge"] or row["claim_expires_at"] <= now.isoformat():
@@ -1366,7 +1382,24 @@ class SupervisorStore:
                 "INSERT INTO paired_devices(id,public_key_b64,token_hash,created_at,expires_at,device_name) VALUES(?,?,?,?,?,?)",
                 (device_id, row["public_key_b64"], token_hash, now.isoformat(), expires, row["device_name"] or "Android companion"),
             )
+            web_owner_id = row["web_owner_id"]
+            if isinstance(web_owner_id, str) and web_owner_id:
+                db.execute(
+                    "INSERT INTO web_device_mappings(web_owner_id,device_id,pairing_id,created_at) VALUES(?,?,?,?)",
+                    (web_owner_id, device_id, pairing_id, now.isoformat()),
+                )
         return {"device_id": device_id, "access_token": token, "expires_at": expires, "expires_in_days": max(1, min(ttl_days, 365))}
+
+    def web_device_mapping_ids(self, web_owner_id: str) -> set[str]:
+        """Return device IDs explicitly attached to one authenticated Web owner."""
+        if not isinstance(web_owner_id, str) or not web_owner_id.strip():
+            return set()
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT device_id FROM web_device_mappings WHERE web_owner_id=?",
+                (web_owner_id.strip(),),
+            ).fetchall()
+        return {str(row["device_id"]) for row in rows if row["device_id"]}
 
     def revoke_device_by_pairing(self, pairing_id: str) -> bool:
         """Revoke an issued token associated with a pairing; useful for local UI recovery."""

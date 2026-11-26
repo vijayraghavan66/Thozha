@@ -113,7 +113,25 @@ def resolve_web_device_ids(
     cannot set this mapping in a request body or header.
     """
     env = os.environ if environ is None else environ
-    ids = _mapped_web_device_ids(principal, environ=env)
+    configured_ids = _mapped_web_device_ids(principal, environ=env, allow_empty=True)
+    owner_id = _principal_user_id(principal)
+    mapping_reader = getattr(supervisor_store, "web_device_mapping_ids", None)
+    try:
+        persisted_ids = mapping_reader(owner_id) if callable(mapping_reader) else set()
+    except Exception as exc:
+        logger.warning("Web device mapping read unavailable error_type=%s", type(exc).__name__)
+        raise HTTPException(
+            status_code=503, detail="Web device mapping is unavailable"
+        ) from exc
+    ids = configured_ids | {
+        item for item in persisted_ids
+        if isinstance(item, str) and _DEVICE_ID_RE.fullmatch(item)
+    }
+    if not ids:
+        raise HTTPException(
+            status_code=403,
+            detail="This Web owner has no paired-device supervisor mapping",
+        )
 
     db_path = Path(str(getattr(supervisor_store, "db_path", ""))).expanduser()
     if not db_path.is_file():
@@ -156,7 +174,10 @@ def resolve_web_device_ids(
 
 
 def _mapped_web_device_ids(
-    principal: Any, *, environ: dict[str, str] | None = None
+    principal: Any,
+    *,
+    environ: dict[str, str] | None = None,
+    allow_empty: bool = False,
 ) -> set[str]:
     env = os.environ if environ is None else environ
     owner_id = _principal_user_id(principal)
@@ -168,10 +189,9 @@ def _mapped_web_device_ids(
         )
     raw = env.get("THOZHA_WEB_ALLOWED_DEVICE_IDS", "")
     if not raw.strip():
-        raise HTTPException(
-            status_code=403,
-            detail="This Web owner has no paired-device supervisor mapping",
-        )
+        if allow_empty:
+            return set()
+        raise HTTPException(status_code=403, detail="This Web owner has no paired-device supervisor mapping")
     ids = [item.strip() for item in raw.split(",")]
     if any(not _DEVICE_ID_RE.fullmatch(item) for item in ids) or len(set(ids)) != len(
         ids
@@ -183,7 +203,9 @@ def _mapped_web_device_ids(
     return set(ids)
 
 
-def is_web_device_mapped(principal: Any, device_id: str) -> bool:
+def is_web_device_mapped(
+    principal: Any, device_id: str, supervisor_store: Any | None = None
+) -> bool:
     """Check explicit mapping membership, even after revocation, for retries.
 
     Use only for idempotent revoke/cleanup reconciliation. Task, approval and
@@ -192,7 +214,14 @@ def is_web_device_mapped(principal: Any, device_id: str) -> bool:
     if not _DEVICE_ID_RE.fullmatch(device_id):
         return False
     try:
-        return device_id in _mapped_web_device_ids(principal)
+        if device_id in _mapped_web_device_ids(principal, allow_empty=True):
+            return True
+        if supervisor_store is None:
+            from openjarvis.tasks.supervisor import get_supervisor_store
+
+            supervisor_store = get_supervisor_store()
+        reader = getattr(supervisor_store, "web_device_mapping_ids", None)
+        return bool(callable(reader) and device_id in reader(_principal_user_id(principal)))
     except HTTPException:
         return False
 

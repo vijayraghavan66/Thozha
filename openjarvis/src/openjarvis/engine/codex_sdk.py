@@ -47,6 +47,20 @@ def _resolve_codex_python() -> Path:
     return Path(sys.executable).resolve()
 
 
+def _codex_cli_path() -> Path | None:
+    """Prefer the CLI packaged with the SDK; retain PATH compatibility for legacy installs."""
+    try:
+        from codex_cli_bin import bundled_codex_path
+
+        bundled = Path(bundled_codex_path()).resolve()
+        if bundled.is_file() and os.access(bundled, os.X_OK):
+            return bundled
+    except (ImportError, FileNotFoundError, OSError):
+        pass
+    configured = shutil.which("codex")
+    return Path(configured).resolve() if configured else None
+
+
 CODEX_HOME = _resolve_codex_home()
 MAC_MCP = Path(__file__).resolve().parent.parent / "mac_desktop_mcp.py"
 DEV_MCP = Path(__file__).resolve().parent.parent / "tasks" / "jarvis_dev_mcp.py"
@@ -801,7 +815,7 @@ class CodexSDKEngine(InferenceEngine):
             package_present = True
         except ImportError:
             package_present = False
-        cli_present = bool(shutil.which("codex"))
+        cli_present = _codex_cli_path() is not None
         auth_file_present = CODEX_HOME.joinpath("auth.json").is_file()
         auth_state = (
             "verified_this_process"

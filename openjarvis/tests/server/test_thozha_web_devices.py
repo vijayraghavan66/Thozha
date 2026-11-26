@@ -53,7 +53,7 @@ def _client(tmp_path):
     def active(user_id, device_id, db):
         return device_id in _active_device_ids(db)
 
-    def mapped(principal, device_id):
+    def mapped(principal, device_id, _store):
         user_id = (
             principal["user_id"] if isinstance(principal, dict) else principal.user_id
         )

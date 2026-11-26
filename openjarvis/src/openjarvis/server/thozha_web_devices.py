@@ -162,7 +162,7 @@ def create_web_devices_router(
     require_web_session: Callable[..., Any],
     resolve_web_device_ids: Callable[[Any, SupervisorStore], set[str]],
     is_web_device_active: Callable[[str, str, SupervisorStore], bool],
-    is_web_device_mapped: Callable[[Any, str], bool],
+    is_web_device_mapped: Callable[[Any, str, SupervisorStore], bool],
     *,
     store_provider: Callable[..., SupervisorStore] | None = None,
 ) -> APIRouter:
@@ -266,12 +266,16 @@ def create_web_devices_router(
         response: Response,
         principal=Depends(require_web_session),
     ):
-        _require_supervisor_owner(request, principal)
+        owner_id = _require_supervisor_owner(request, principal)
         if not _DEVICE_ID_RE.fullmatch(invitation_id):
             raise HTTPException(status_code=404, detail="Pairing request not found")
         store = get_store(request)
         try:
-            status = store.decide_device_pairing(invitation_id, body.decision)
+            status = store.decide_device_pairing(
+                invitation_id,
+                body.decision,
+                web_owner_id=owner_id if body.decision == "approve" else None,
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Pairing request not found") from exc
         except RuntimeError as exc:
@@ -337,7 +341,7 @@ def create_web_devices_router(
         store = get_store(request)
         user_id = _web_user_id(principal)
         try:
-            mapped = is_web_device_mapped(principal, device_id)
+            mapped = is_web_device_mapped(principal, device_id, store)
         except Exception as exc:
             logger.warning(
                 "Web device mapping check unavailable error_type=%s", type(exc).__name__
