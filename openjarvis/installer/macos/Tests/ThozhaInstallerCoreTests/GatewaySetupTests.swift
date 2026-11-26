@@ -90,6 +90,7 @@ final class GatewaySetupTests: XCTestCase {
         openJarvisPython: URL(fileURLWithPath: "/opt/homebrew/opt/openjarvis/bin/python3.13"),
         tlsPython: URL(fileURLWithPath: "/opt/homebrew/bin/python3.14"),
         shutdownSupervisor: URL(fileURLWithPath: "/Applications/Thozha Setup.app/Contents/Helpers/ThozhaGatewaySupervisor"),
+        ssidHelper: URL(fileURLWithPath: "/Applications/Thozha Setup.app/Contents/MacOS/ThozhaSetup"),
         launchdPath: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     )
 
@@ -191,7 +192,7 @@ final class GatewaySetupTests: XCTestCase {
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_PORT"], "8443")
         XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_HOSTNAME"], "thozha-12345678.local")
         XCTAssertEqual(environment["JARVIS_COMPANION_TLS_PROXY_PYTHON"], runtime.tlsPython.path)
-        XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_SSID_HELPER"], runtime.shutdownSupervisor.path)
+        XCTAssertEqual(environment["JARVIS_COMPANION_WIFI_SSID_HELPER"], runtime.ssidHelper.path)
         XCTAssertNil(environment["OPENJARVIS_API_KEY"])
         XCTAssertNil(environment["SUPERVISOR_API_KEY"])
         XCTAssertNil(environment["JARVIS_DEV_WORKER_CONFIG"])

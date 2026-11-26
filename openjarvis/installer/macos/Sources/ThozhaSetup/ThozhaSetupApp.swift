@@ -1,8 +1,23 @@
 import SwiftUI
 import ThozhaInstallerCore
+import Darwin
 
 @main
 struct ThozhaSetupApp: App {
+    init() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        guard arguments.first == "--ssid" else { return }
+        guard let output = GatewaySSIDHelper.output(
+            arguments: arguments,
+            reader: CoreWLANCurrentWiFiSSIDReader()
+        ) else {
+            // Fail closed and do not disclose the network name or denial details.
+            exit(78)
+        }
+        FileHandle.standardOutput.write(Data(output.utf8))
+        exit(0)
+    }
+
     var body: some Scene { WindowGroup { SetupView() }.windowResizability(.contentSize) }
 }
 
