@@ -35,3 +35,7 @@ PROGRESS.md
 .idea/
 .DS_Store
 .migration-staging/
+
+# Python build/test artifacts
+__pycache__/
+*.py[cod]
