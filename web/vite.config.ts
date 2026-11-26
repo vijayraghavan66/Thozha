@@ -35,6 +35,7 @@ const webPaths = `^/v1/web/(?:${[
   `conversations(?:/${uuid}(?:/archive|/attachments(?:/${id})?|/messages(?:/stream|/${uuid}/cancel)?)?)?`,
   `memory(?:/search|/${id})?`,
   'supervisor/readiness',
+  'device-platform/inventory',
   `tasks(?:/${id}(?:/events(?:/stream)?|/cancel|/artifacts(?:/[a-f0-9]{64}/download)?)?)?`,
   `approvals/(?:pending|${id}(?:/decision)?)`,
   `devices(?:/pairing-invitations(?:/${id}(?:/cancel)?)?|/pairing-requests(?:/${id}/decision)?|/${id}(?:/revoke)?)?`,

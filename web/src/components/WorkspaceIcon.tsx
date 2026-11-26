@@ -1,6 +1,8 @@
 const paths = {
   'AI Workspace': 'M5 5h14v11H9l-4 3V5Z M9 9h6 M9 12h4',
   Tasks: 'M8 5h11v15H5V5h3 M8 3h8v4H8V3Z M9 11h6 M9 15h4',
+  Agents:
+    'M5 5h14v14H5V5Z M9 9h6v6H9V9Z M9 2v3 M15 2v3 M9 19v3 M15 19v3 M2 9h3 M19 9h3 M2 15h3 M19 15h3',
   Approvals: 'M12 3 4 6v6c0 4 8 9 8 9s8-5 8-9V6l-8-3Z M8 12l3 3 5-6',
   Automations: 'M4 5h6v5H4V5Z M14 14h6v5h-6v-5Z M10 7h7v7 M7 10v7h7',
   'Memory Center': 'M5 4h14v16H5V4Z M9 4v16 M12 9h4 M12 13h4',

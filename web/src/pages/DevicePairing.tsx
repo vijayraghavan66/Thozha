@@ -120,11 +120,22 @@ function PairingReview({
 
 export default function DevicePairing({
   api,
-  connected,
+  connected: sessionConnected,
 }: {
   api: WorkspaceApi;
   connected: boolean;
 }) {
+  const [browserOnline, setBrowserOnline] = useState(() => navigator.onLine);
+  useEffect(() => {
+    const update = () => setBrowserOnline(navigator.onLine);
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => {
+      window.removeEventListener('online', update);
+      window.removeEventListener('offline', update);
+    };
+  }, []);
+  const connected = sessionConnected && browserOnline;
   const cache = useQueryClient();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [invitation, setInvitation] = useState<PairingInvitation>();
@@ -212,7 +223,13 @@ export default function DevicePairing({
   const hasActiveInvitation = Boolean(
     invitation && remaining > 0 && status && !terminalInvitationStates.has(status)
   );
-  const visibleQr = Boolean(invitation && remaining > 0 && (status === 'INVITED' || !status));
+  const visibleQr = Boolean(
+    connected &&
+      invitation &&
+      remaining > 0 &&
+      !invitationStatus.isError &&
+      (status === 'INVITED' || !status)
+  );
   const gatewayUnavailable =
     create.error instanceof WebApiError &&
     create.error.status === 409 &&
@@ -441,11 +458,13 @@ export default function DevicePairing({
                 </div>
               ) : (
                 <p role="status" className={muted}>
-                  {remaining === 0
-                    ? 'This QR invitation has expired.'
-                    : status
-                      ? invitationStatusText[status]
-                      : 'The invitation status is being checked.'}
+                  {!connected
+                    ? 'Connection unavailable. Reconnect to check this invitation.'
+                    : remaining === 0 && status && !terminalInvitationStates.has(status)
+                      ? 'This QR invitation has expired.'
+                      : status
+                        ? invitationStatusText[status]
+                        : 'The invitation status is being checked.'}
                 </p>
               )}
               {invitationStatus.isError && (

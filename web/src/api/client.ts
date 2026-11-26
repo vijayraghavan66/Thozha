@@ -4,6 +4,7 @@ import type { WebConversationSseEvent } from '../../../contracts/web-api/v1';
 import { readConversationStream } from './sse';
 import { WebApiError } from './errors';
 import { createControlApi } from './control';
+import { createDevicePlatformApi } from './devicePlatform';
 
 export { WebApiError } from './errors';
 
@@ -407,6 +408,9 @@ export function createWebApi(fetcher: typeof fetch = globalThis.fetch.bind(globa
       }
       const mutation = { method: 'POST', csrf, body: {} } as const;
       return {
+        ...createDevicePlatformApi((path, status, schema, options) =>
+          auth(request(path, status, schema, { ...options, explain: true }))
+        ),
         ...createControlApi(
           (path, status, schema, options) =>
             auth(request(path, status, schema, { ...options, explain: true })),

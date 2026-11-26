@@ -6,6 +6,7 @@ import { LiquidCard } from '../components/LiquidSurface';
 import { formatDate, muted, outline, solid } from '../components/styles';
 import { Chip, Head, Loading, Modal, Notice, Panel, Row } from '../components/ui';
 import DevicePairing from './DevicePairing';
+import DevicePlatformDetails from './DevicePlatformDetails';
 import {
   approvalsKey,
   automationCapabilitiesKey,
@@ -63,14 +64,19 @@ export default function DeviceHub({ api, connected }: { api: WorkspaceApi; conne
         title="Device Hub"
         desc="Review active companion pairings explicitly mapped to this Web owner. Pairing is not an online or reachability check."
         action={
-          <button
-            type="button"
-            className={solid}
-            disabled={!connected || devices.isFetching}
-            onClick={() => void devices.refetch()}
-          >
-            Refresh devices
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <a className={outline} href="#/agents">
+              Manage execution agents
+            </a>
+            <button
+              type="button"
+              className={solid}
+              disabled={!connected || devices.isFetching}
+              onClick={() => void devices.refetch()}
+            >
+              Refresh devices
+            </button>
+          </div>
         }
       />
       <DevicePairing api={api} connected={connected} />
@@ -89,8 +95,9 @@ export default function DeviceHub({ api, connected }: { api: WorkspaceApi; conne
         <Panel cls="p-6">
           <h2 className="font-semibold">No active mapped devices</h2>
           <p className={`mt-2 ${muted}`}>
-            Pair and explicitly map a device outside the browser. No Android credentials are
-            accepted here.
+            Use Pair new device above, then ask the host owner to verify its Web-owner mapping.
+            Already paired? Keep the companion's saved identity; check its mapping rather than
+            resetting it.
           </p>
         </Panel>
       )}
@@ -137,9 +144,14 @@ export default function DeviceHub({ api, connected }: { api: WorkspaceApi; conne
                 />
                 <Row main="Paired" sub={formatDate(pairing.created_at)} />
                 <Row main="Expires" sub={formatDate(pairing.expires_at)} />
+                <DevicePlatformDetails
+                  api={api}
+                  connected={connected}
+                  deviceId={pairing.device_id}
+                />
                 <p className={`my-3 ${muted}`}>
-                  Web v1 does not expose network presence, discovery, enrollment or permission
-                  editing.
+                  Permission editing and permanent history removal are not exposed by this host.
+                  Revocation removes active access; it does not delete task history.
                 </p>
                 <button
                   type="button"

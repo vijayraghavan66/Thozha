@@ -46,6 +46,11 @@ export default defineConfig({
   projects: [
     { name: 'workspace', testMatch: 'workspace.spec.ts', use: { baseURL: origin } },
     { name: 'control', testMatch: 'control.spec.ts', use: { baseURL: controlOrigin } },
+    {
+      name: 'device-platform',
+      testMatch: 'device-platform.spec.ts',
+      use: { baseURL: controlOrigin },
+    },
   ],
   webServer: [...servers(origin, apiPort, false), ...servers(controlOrigin, controlApiPort, true)],
 });

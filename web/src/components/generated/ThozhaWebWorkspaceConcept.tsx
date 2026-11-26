@@ -1,3 +1,4 @@
+import '../../pages/devicePlatform.css';
 import {
   lazy,
   Suspense,
@@ -35,6 +36,7 @@ const TradingLab = lazy(() => import('../../trading/TradingLab'));
 const MemoryCenter = lazy(() => import('../../memory/MemoryCenter'));
 const DeveloperStudio = lazy(() => import('../../pages/DeveloperStudio'));
 const DeviceHub = lazy(() => import('../../pages/DeviceHub'));
+const AgentHub = lazy(() => import('../../pages/AgentHub'));
 const AutomationStudio = lazy(() => import('../../pages/AutomationStudio'));
 const sections = [
   ['AI Workspace', 'ai-workspace', '✳'],
@@ -43,6 +45,7 @@ const sections = [
   ['Automations', 'automations', '◇'],
   ['Memory Center', 'memory-center', '◎'],
   ['Device Hub', 'device-hub', '▣'],
+  ['Agents', 'agents', '◇'],
   ['Developer Studio', 'developer-studio', '⌘'],
   ['Trading Lab', 'trading-lab', '⌁'],
   ['Settings', 'settings', '⚙'],
@@ -1100,7 +1103,10 @@ export function ThozhaWebWorkspaceConcept({
                 </div>
               )}
               {page !== 'AI Workspace' && (
-                <div key={page} className="th-enter">
+                <div
+                  key={page}
+                  className={`th-enter${page === 'Device Hub' || page === 'Agents' ? ' th-device-platform' : ''}`}
+                >
                   {page === 'Trading Lab' && (
                     <Suspense fallback={<Loading label="Loading Trading Lab…" />}>
                       <TradingLab />
@@ -1109,6 +1115,11 @@ export function ThozhaWebWorkspaceConcept({
                   {page === 'Device Hub' && (
                     <Suspense fallback={<Loading label="Loading Device Hub…" />}>
                       <DeviceHub api={api} connected={!problem} />
+                    </Suspense>
+                  )}
+                  {page === 'Agents' && (
+                    <Suspense fallback={<Loading label="Loading Agents…" />}>
+                      <AgentHub api={api} connected={!problem} />
                     </Suspense>
                   )}
                   {page === 'Automations' && (
