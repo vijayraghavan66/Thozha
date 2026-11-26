@@ -1,0 +1,1858 @@
+[
+  {
+    "route": "overview",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      1081
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 1080.9375,
+        "scrollHeight": 1081,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 1056.9375,
+        "scrollHeight": 1055,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 1054.9375,
+        "scrollHeight": 1055,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 984.9375,
+        "scrollHeight": 985,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "ai-workspace",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 825,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 823,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 753,
+        "scrollHeight": 753,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "trading-lab",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 825,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 823,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 753,
+        "scrollHeight": 753,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "device-hub",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 825,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 823,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 753,
+        "scrollHeight": 753,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "automations",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 825,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 823,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 753,
+        "scrollHeight": 753,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "memory-center",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 825,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 823,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 753,
+        "scrollHeight": 753,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "developer-studio",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      900
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 900,
+        "scrollHeight": 900,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 825,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 823,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 753,
+        "scrollHeight": 753,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "settings",
+    "viewport": [
+      1440,
+      900
+    ],
+    "document": [
+      1440,
+      1131
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1440,
+        "h": 1131,
+        "scrollHeight": 1131,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1416,
+        "h": 1107,
+        "scrollHeight": 1105,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 1105,
+        "scrollHeight": 1105,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1177,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1177,
+        "h": 1035,
+        "scrollHeight": 1035,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "overview",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      1114
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 1113.9375,
+        "scrollHeight": 1114,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 1089.9375,
+        "scrollHeight": 1088,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 1087.9375,
+        "scrollHeight": 1088,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 1017.9375,
+        "scrollHeight": 1018,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "ai-workspace",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      880
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 880,
+        "scrollHeight": 880,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 856,
+        "scrollHeight": 854,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 854,
+        "scrollHeight": 854,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 784,
+        "scrollHeight": 784,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "trading-lab",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      849
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 849,
+        "scrollHeight": 849,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 825,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 823,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 753,
+        "scrollHeight": 753,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "device-hub",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      849
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 849,
+        "scrollHeight": 849,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 825,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 823,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 753,
+        "scrollHeight": 753,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "automations",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      849
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 849,
+        "scrollHeight": 849,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 825,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 823,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 753,
+        "scrollHeight": 753,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "memory-center",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      1002
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 1001.5,
+        "scrollHeight": 1002,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 977.5,
+        "scrollHeight": 976,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 975.5,
+        "scrollHeight": 976,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 905.5,
+        "scrollHeight": 906,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "developer-studio",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      849
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 849,
+        "scrollHeight": 849,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 825,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 823,
+        "scrollHeight": 823,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 753,
+        "scrollHeight": 753,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "settings",
+    "viewport": [
+      1280,
+      800
+    ],
+    "document": [
+      1280,
+      1131
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 1280,
+        "h": 1131,
+        "scrollHeight": 1131,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 1256,
+        "h": 1107,
+        "scrollHeight": 1105,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 13,
+        "y": 13,
+        "w": 237,
+        "h": 1105,
+        "scrollHeight": 1105,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 250,
+        "y": 13,
+        "w": 1017,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 250,
+        "y": 83,
+        "w": 1017,
+        "h": 1035,
+        "scrollHeight": 1035,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "overview",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      1732
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 1731.59375,
+        "scrollHeight": 1732,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 1707.59375,
+        "scrollHeight": 1706,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 1635.59375,
+        "scrollHeight": 1636,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "ai-workspace",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      1370
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 1370,
+        "scrollHeight": 1370,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 1346,
+        "scrollHeight": 1344,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 1274,
+        "scrollHeight": 1274,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "trading-lab",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      1440
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 1439.5,
+        "scrollHeight": 1440,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 1415.5,
+        "scrollHeight": 1414,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 1343.5,
+        "scrollHeight": 1344,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "device-hub",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      844
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844,
+        "scrollHeight": 844,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 820,
+        "scrollHeight": 818,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 748,
+        "scrollHeight": 748,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "automations",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      844
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 844,
+        "scrollHeight": 844,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 820,
+        "scrollHeight": 818,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 748,
+        "scrollHeight": 748,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "memory-center",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      1477
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 1477,
+        "scrollHeight": 1477,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 1453,
+        "scrollHeight": 1451,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 1381,
+        "scrollHeight": 1381,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "developer-studio",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      1196
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 1195.5,
+        "scrollHeight": 1196,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 1171.5,
+        "scrollHeight": 1170,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 1099.5,
+        "scrollHeight": 1100,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "settings",
+    "viewport": [
+      390,
+      844
+    ],
+    "document": [
+      390,
+      1373
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 390,
+        "h": 1373.328125,
+        "scrollHeight": 1373,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 366,
+        "h": 1349.328125,
+        "scrollHeight": 1347,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 364,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 364,
+        "h": 1277.328125,
+        "scrollHeight": 1277,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "overview",
+    "viewport": [
+      640,
+      400
+    ],
+    "document": [
+      640,
+      1431
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 640,
+        "h": 1431.09375,
+        "scrollHeight": 1431,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 616,
+        "h": 1407.09375,
+        "scrollHeight": 1405,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 614,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 614,
+        "h": 1335.09375,
+        "scrollHeight": 1335,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "ai-workspace",
+    "viewport": [
+      640,
+      400
+    ],
+    "document": [
+      640,
+      1199
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 640,
+        "h": 1199,
+        "scrollHeight": 1199,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 616,
+        "h": 1175,
+        "scrollHeight": 1173,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 614,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 614,
+        "h": 1103,
+        "scrollHeight": 1103,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "trading-lab",
+    "viewport": [
+      640,
+      400
+    ],
+    "document": [
+      640,
+      1354
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 640,
+        "h": 1353.5,
+        "scrollHeight": 1354,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 616,
+        "h": 1329.5,
+        "scrollHeight": 1328,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 614,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 614,
+        "h": 1257.5,
+        "scrollHeight": 1258,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "device-hub",
+    "viewport": [
+      640,
+      400
+    ],
+    "document": [
+      640,
+      467
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 640,
+        "h": 466.5,
+        "scrollHeight": 467,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 616,
+        "h": 442.5,
+        "scrollHeight": 441,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 614,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 614,
+        "h": 370.5,
+        "scrollHeight": 371,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "automations",
+    "viewport": [
+      640,
+      400
+    ],
+    "document": [
+      640,
+      611
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 640,
+        "h": 610.5,
+        "scrollHeight": 611,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 616,
+        "h": 586.5,
+        "scrollHeight": 585,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 614,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 614,
+        "h": 514.5,
+        "scrollHeight": 515,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "memory-center",
+    "viewport": [
+      640,
+      400
+    ],
+    "document": [
+      640,
+      1337
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 640,
+        "h": 1336.5,
+        "scrollHeight": 1337,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 616,
+        "h": 1312.5,
+        "scrollHeight": 1311,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 614,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 614,
+        "h": 1240.5,
+        "scrollHeight": 1241,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "developer-studio",
+    "viewport": [
+      640,
+      400
+    ],
+    "document": [
+      640,
+      1068
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 640,
+        "h": 1068,
+        "scrollHeight": 1068,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 616,
+        "h": 1044,
+        "scrollHeight": 1042,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 614,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 614,
+        "h": 972,
+        "scrollHeight": 972,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  },
+  {
+    "route": "settings",
+    "viewport": [
+      640,
+      400
+    ],
+    "document": [
+      640,
+      1157
+    ],
+    "measurements": {
+      ".th-workspace": {
+        "x": 0,
+        "y": 0,
+        "w": 640,
+        "h": 1157,
+        "scrollHeight": 1157,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      ".th-workspace > div": {
+        "x": 12,
+        "y": 12,
+        "w": 616,
+        "h": 1133,
+        "scrollHeight": 1131,
+        "scrollTop": 0,
+        "overflowY": "hidden"
+      },
+      "aside": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "scrollHeight": 0,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "header": {
+        "x": 13,
+        "y": 13,
+        "w": 614,
+        "h": 70,
+        "scrollHeight": 69,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      },
+      "#main-content": {
+        "x": 13,
+        "y": 83,
+        "w": 614,
+        "h": 1061,
+        "scrollHeight": 1061,
+        "scrollTop": 0,
+        "overflowY": "visible"
+      }
+    }
+  }
+]
