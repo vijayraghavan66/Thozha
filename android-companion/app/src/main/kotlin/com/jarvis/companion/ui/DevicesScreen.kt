@@ -13,7 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
 @Composable
-fun DevicesScreen(store: JarvisStore, onOpenSettings: () -> Unit) {
+fun DevicesScreen(store: JarvisStore, onOpenSettings: () -> Unit, onPairAnotherServer: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(start = JarvisSpace.Page, end = 8.dp, top = 14.dp, bottom = 4.dp),
@@ -25,6 +25,12 @@ fun DevicesScreen(store: JarvisStore, onOpenSettings: () -> Unit) {
             }
             IconAction(JarvisIcons.Settings, "Settings", onClick = onOpenSettings)
         }
+        TextAction(
+            label = "Pair another server",
+            filled = false,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = JarvisSpace.Page, vertical = 8.dp),
+            onClick = onPairAnotherServer,
+        )
         Box(Modifier.weight(1f)) {
             LiveScreen(store, showHeader = false, showPhoneDetails = false, showVoice = false)
         }

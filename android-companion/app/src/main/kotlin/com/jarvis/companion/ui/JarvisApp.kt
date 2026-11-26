@@ -2,8 +2,10 @@ package com.jarvis.companion.ui
 
 import android.provider.Settings
 import android.app.Activity
+import android.content.Intent
 import android.content.Context
 import android.content.ContextWrapper
+import com.jarvis.companion.AdvancedActivity
 import com.jarvis.companion.link.LinkSettings
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -184,6 +186,12 @@ fun JarvisApp(store: JarvisStore) {
                             ThozhaDestination.DEVICES -> DevicesScreen(
                                 store,
                                 onOpenSettings = { store.openOverlay(Overlay.SETTINGS) },
+                                onPairAnotherServer = {
+                                    context.startActivity(
+                                        Intent(context, AdvancedActivity::class.java)
+                                            .putExtra("open_device_pairing", true),
+                                    )
+                                },
                             )
                         }
                     }

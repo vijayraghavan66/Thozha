@@ -141,7 +141,7 @@ class SecureStore(context: Context) {
         val activeFingerprint = prefs.getString(KEY_ACTIVE_SERVER_PROFILE, current?.fingerprint).orEmpty()
         val records = ServerProfileRecords.parse(prefs.getString(KEY_SERVER_PROFILES, null))
         val result = linkedMapOf<String, ServerProfileSummary>()
-        current?.let { identity ->
+        current?.takeIf { !token().isNullOrBlank() && deviceId().isNotBlank() }?.let { identity ->
             result[ServerProfileRecords.id(identity.fingerprint)] = ServerProfileSummary(
                 identity.fingerprint,
                 runCatching { localGatewayPin()?.hostname }.getOrNull() ?: baseUrl(),
@@ -149,6 +149,10 @@ class SecureStore(context: Context) {
             )
         }
         records.values.forEach { record ->
+            if (record.fields[KEY_DEVICE_ID].isNullOrBlank() ||
+                record.fields[KEY_TOKEN_IV].isNullOrBlank() ||
+                record.fields[KEY_TOKEN_CIPHER].isNullOrBlank()
+            ) return@forEach
             val id = ServerProfileRecords.id(record.fingerprint)
             result[id] = ServerProfileSummary(record.fingerprint, record.label, record.fingerprint == activeFingerprint)
         }
@@ -307,9 +311,6 @@ class SecureStore(context: Context) {
         current?.let { profiles.remove(ServerProfileRecords.id(it.fingerprint)) }
         prefs.edit()
             .remove(KEY_DEVICE_ID).remove(KEY_TOKEN_IV).remove(KEY_TOKEN_CIPHER)
-            .remove(KEY_SERVER_PIN_IV).remove(KEY_SERVER_PIN_CIPHER)
-            .remove(KEY_WIFI_PIN_IV).remove(KEY_WIFI_PIN_CIPHER)
-            .remove(KEY_ACTIVE_SERVER_PROFILE)
             .putString(KEY_SERVER_PROFILES, ServerProfileRecords.encode(profiles))
             .apply()
     }
