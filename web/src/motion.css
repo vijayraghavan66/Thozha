@@ -1,0 +1,513 @@
+/* Shared choreography. Layout and overflow ownership remain in index.css. */
+:root {
+  --th-duration-feedback: 110ms;
+  --th-duration-press: 180ms;
+  --th-duration-icon: 180ms;
+  --th-duration-surface: 280ms;
+  --th-duration-panel: 280ms;
+  --th-duration-nav: 280ms;
+  --th-duration-drawer: 280ms;
+  --th-duration-page: 320ms;
+  --th-duration-reveal: 560ms;
+  --th-ease-out: cubic-bezier(0.22, 0.8, 0.24, 1);
+  --th-ease-spring: cubic-bezier(0.2, 0.85, 0.25, 1);
+}
+
+.th-workspace {
+  --th-ui-duration: var(--th-duration-press);
+}
+
+.th-workspace :where(button, a, summary) {
+  transition:
+    background-color var(--th-duration-press) var(--th-ease-out),
+    color var(--th-duration-press) var(--th-ease-out),
+    border-color var(--th-duration-press) var(--th-ease-out),
+    scale var(--th-duration-feedback) var(--th-ease-out);
+}
+.th-workspace :where(button, summary):active:not(:disabled) {
+  scale: 0.975;
+}
+.th-workspace :where(input, textarea, select) {
+  transition:
+    border-color var(--th-duration-press) var(--th-ease-out),
+    background-color var(--th-duration-press) var(--th-ease-out);
+}
+.th-workspace :where(input, textarea, select):focus {
+  border-color: #b6bbc873;
+}
+.th-v4-nav-rail {
+  transition: width var(--th-duration-nav) var(--th-ease-spring);
+}
+.th-nav-label {
+  display: block;
+  min-width: 0;
+  max-width: 180px;
+  opacity: 1;
+  transition:
+    opacity var(--th-duration-press) var(--th-ease-out),
+    max-width var(--th-duration-nav) var(--th-ease-spring);
+}
+.th-rail-collapsed .th-v4-nav-rail .th-nav-label {
+  display: block;
+  opacity: 0;
+  max-width: 0;
+}
+.th-v4-nav-rail nav a {
+  justify-content: flex-start;
+}
+.th-v4-nav-rail nav a .th-nav-label {
+  flex: 1;
+}
+.th-rail-collapsed .th-v4-nav-rail nav a,
+.th-rail-collapsed .th-nav-new .th-v4-rail-new {
+  gap: 0;
+}
+.th-v4-history-pane {
+  transition:
+    left var(--th-duration-nav) var(--th-ease-spring),
+    transform var(--th-duration-panel, 280ms) var(--th-ease-spring),
+    opacity var(--th-duration-panel, 280ms) var(--th-ease-out),
+    visibility 280ms;
+}
+.th-v4-history-pane.is-hidden {
+  transform: translateX(calc(-100% - 20px));
+}
+.th-workspace dialog[open] {
+  animation: th-dialog-in var(--th-duration-surface) var(--th-ease-spring) both;
+}
+.th-workspace dialog[data-leaving='true']::backdrop {
+  animation: th-backdrop-out 160ms ease-out both;
+}
+.th-workspace dialog[data-leaving='true'] {
+  pointer-events: none;
+}
+.th-anchored-surface {
+  clip-path: none;
+  transform-origin: top right;
+  transform: translateY(-5px) scale(0.975);
+  transition:
+    opacity var(--th-duration-press) var(--th-ease-out),
+    transform var(--th-duration-surface) var(--th-ease-spring);
+}
+.th-anchored-surface[data-open='true'] {
+  clip-path: none;
+  transform: none;
+}
+.th-anchored-surface::before {
+  transform: none;
+}
+.th-profile-surface {
+  transform-origin: bottom left;
+}
+.th-page-heading,
+.th-notice,
+.th-state-arrival {
+  animation: th-arrive var(--th-duration-panel, 280ms) var(--th-ease-out) both;
+}
+.th-panel {
+  transition: border-color var(--th-duration-press) var(--th-ease-out);
+}
+.th-panel:focus-within {
+  border-color: #ffffff29;
+}
+.th-loading > [aria-hidden] {
+  animation: th-loading-breathe 1800ms ease-in-out infinite alternate;
+}
+.th-loading > [aria-hidden]:last-child {
+  animation-delay: 180ms;
+}
+.th-v4-conversation form:has(textarea) {
+  transition:
+    border-color var(--th-duration-press) var(--th-ease-out),
+    background-color var(--th-duration-press) var(--th-ease-out);
+}
+.th-v4-conversation form:has(textarea:focus) {
+  border-color: #bfc5d14d;
+}
+.th-composer-attachment {
+  animation: th-arrive var(--th-duration-surface) var(--th-ease-spring) both;
+  transition: border-color var(--th-duration-press) var(--th-ease-out);
+}
+.th-message-identity,
+.th-task-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.th-message-identity .th-pulse-mark {
+  width: 23px;
+  height: 23px;
+  flex: none;
+}
+.th-v4-assistant-message[data-response-state='completed'] > .th-markdown {
+  animation: th-response-settle var(--th-duration-surface) var(--th-ease-out) both;
+}
+[aria-label='Task lifecycle milestones'] li {
+  transition:
+    border-color var(--th-duration-surface) var(--th-ease-out),
+    background-color var(--th-duration-surface) var(--th-ease-out),
+    color var(--th-duration-press) var(--th-ease-out);
+}
+.th-timeline-event[data-arriving='true'] {
+  animation: th-arrive var(--th-duration-surface) var(--th-ease-out) both;
+}
+.th-task-row > a {
+  transition: background-color var(--th-duration-press) var(--th-ease-out);
+}
+.th-v4-conversation {
+  position: relative;
+}
+.th-v4-conversation.is-welcome {
+  background:
+    radial-gradient(ellipse at 50% 35%, #30313650, transparent 46%),
+    linear-gradient(160deg, #151619, #0d0e11 70%);
+}
+.th-silver {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  flex: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.th-silver-canvas,
+.th-silver-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.th-silver-canvas {
+  opacity: 0;
+  transition: opacity var(--th-duration-surface) ease;
+}
+.th-silver[data-renderer='webgl'] .th-silver-canvas {
+  opacity: 1;
+}
+.th-silver[data-renderer='webgl'] .th-silver-poster {
+  opacity: 0;
+}
+.th-silver-poster {
+  transition: opacity var(--th-duration-surface) ease;
+}
+.th-intelligence-stage {
+  position: relative;
+  flex: none;
+  margin-inline: auto;
+  pointer-events: none;
+}
+.th-intelligence-stage[data-mode='hero'] {
+  width: min(480px, 100%);
+  height: clamp(150px, 29dvh, 270px);
+  margin-bottom: 6px;
+}
+.th-intelligence-stage[data-mode='hero']::after {
+  content: '';
+  position: absolute;
+  inset: auto 12% 4%;
+  height: 16px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, #0009, transparent 70%);
+  pointer-events: none;
+}
+.th-intelligence-stage[data-mode='hidden'] {
+  height: 0;
+  width: 0;
+  visibility: hidden;
+  margin: 0;
+}
+.th-intelligence-stage[data-mode='presence'] {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 72px;
+  margin-block: -18px -8px;
+  gap: 8px;
+}
+.th-intelligence-stage[data-mode='presence'] .th-silver {
+  width: 108px;
+  height: 72px;
+}
+.th-presence-label {
+  color: #c5c8cf;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.th-task-identity .th-silver {
+  width: 108px;
+  height: 72px;
+}
+.is-welcome .th-v4-message-log {
+  gap: 0;
+  padding: 8px 18px 26px;
+  max-width: 860px;
+}
+.th-welcome-eyebrow {
+  display: block;
+  margin-bottom: 13px;
+  color: #b7bbc3;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.34em;
+  animation: th-arrive 220ms var(--th-ease-out) both;
+}
+.th-v4-welcome h2 {
+  font-size: clamp(31px, 4.5vw, 51px);
+  font-weight: 400;
+  letter-spacing: -0.055em;
+  animation: th-arrive 220ms var(--th-ease-out) both;
+}
+.th-v4-welcome p {
+  color: #a7abb4;
+  animation: th-arrive 220ms var(--th-ease-out) both;
+}
+.th-v4-conversation.is-welcome form:has(textarea) {
+  background: linear-gradient(150deg, #25262b, #1a1b20);
+  border-color: #bfc5d13d;
+  box-shadow:
+    0 20px 65px #0005,
+    inset 0 1px #ffffff12;
+}
+.is-welcome form:has(textarea),
+.th-v4-starters button {
+  animation: th-arrive 220ms var(--th-ease-out) both;
+}
+.th-pulse-mark :is(path, circle) {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition:
+    opacity var(--th-duration-surface),
+    stroke var(--th-duration-surface);
+}
+.th-pulse-mark[data-identity='idle'] .th-pulse-primary {
+  animation: none;
+}
+.th-pulse-mark[data-identity='thinking'] .th-pulse-primary,
+.th-pulse-mark[data-identity='thinking'] .th-pulse-secondary {
+  animation: th-identity-flow 1600ms ease-in-out infinite alternate;
+}
+.th-pulse-mark[data-identity='thinking'] .th-pulse-secondary {
+  animation-delay: -800ms;
+}
+.th-pulse-mark[data-identity='executing'] .th-pulse-ring {
+  stroke-dasharray: 0.18 0.12;
+  animation: th-identity-execute 5s linear infinite;
+}
+.th-pulse-mark[data-identity='approval'] .th-pulse-ring {
+  stroke: #e0dfe6;
+  animation: th-identity-breathe 2800ms ease-in-out infinite;
+}
+.th-pulse-mark[data-identity='failed'] .th-pulse-ring {
+  stroke: #c2aeb5;
+  stroke-dasharray: 0.46 0.04;
+}
+.th-pulse-mark[data-identity='cancelled'] :is(path, circle) {
+  opacity: 0.45;
+}
+.th-pulse-mark[data-identity='completed'][data-state-changed] .th-pulse-highlight {
+  animation: th-pulse-sweep 560ms var(--th-ease-out) both;
+}
+
+@keyframes th-arrive {
+  from {
+    opacity: 0.35;
+    translate: 0 5px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+@keyframes th-composer-reveal {
+  from {
+    box-shadow:
+      0 24px 64px #0000,
+      inset 0 1px #ffffff00;
+  }
+  to {
+    box-shadow:
+      0 20px 65px #0005,
+      inset 0 1px #ffffff12;
+  }
+}
+@keyframes th-identity-breathe {
+  0%,
+  100% {
+    opacity: 0.65;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes th-identity-flow {
+  from {
+    transform: translateY(-1.5px) scaleY(0.95);
+    opacity: 0.65;
+  }
+  to {
+    transform: translateY(1.5px) scaleY(1.05);
+    opacity: 1;
+  }
+}
+@keyframes th-identity-execute {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes th-loading-breathe {
+  to {
+    opacity: 0.35;
+  }
+}
+@keyframes th-response-settle {
+  from {
+    opacity: 0.6;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Native scene snapshots leave the app tree, focus and sidebar in place. */
+#main-content {
+  view-transition-name: th-workspace-page;
+}
+::view-transition-group(root) {
+  animation: none;
+}
+::view-transition-old(root) {
+  display: none;
+}
+::view-transition-new(root) {
+  animation: none;
+}
+::view-transition {
+  pointer-events: none;
+}
+::view-transition-group(th-workspace-page) {
+  animation-duration: var(--th-duration-page);
+  animation-timing-function: var(--th-ease-out);
+}
+::view-transition-old(th-workspace-page) {
+  animation: th-scene-exit 160ms var(--th-ease-out) both;
+}
+::view-transition-new(th-workspace-page) {
+  animation: th-scene-enter var(--th-duration-page) var(--th-ease-out) both;
+}
+@keyframes th-scene-enter {
+  from {
+    opacity: 0.15;
+    transform: perspective(1400px) translateX(calc(var(--th-route-direction, 1) * 70px))
+      rotateY(calc(var(--th-route-direction, 1) * -3deg)) scale(0.97);
+  }
+}
+@keyframes th-scene-exit {
+  to {
+    opacity: 0;
+    transform: perspective(1400px) translateX(calc(var(--th-route-direction, 1) * -35px))
+      scale(0.95);
+  }
+}
+
+.th-workspace[data-motion-paused='true'] *,
+.th-workspace[data-motion-paused='true'] *::before,
+.th-workspace[data-motion-paused='true'] *::after,
+.th-workspace [hidden] *,
+.th-v4-history-pane[aria-hidden='true'] * {
+  animation-play-state: paused !important;
+}
+.th-workspace.th-stop-motion *,
+.th-workspace.th-stop-motion *::before,
+.th-workspace.th-stop-motion *::after {
+  animation: none !important;
+  transition: none !important;
+  scale: none !important;
+}
+.th-stop-motion #main-content {
+  view-transition-name: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .th-workspace *,
+  .th-workspace *::before,
+  .th-workspace *::after {
+    animation: none !important;
+    transition: none !important;
+    scale: none !important;
+  }
+  #main-content {
+    view-transition-name: none;
+  }
+}
+@media (max-width: 767px) {
+  .th-v4-history-pane.is-hidden {
+    transform: translateX(-100%);
+  }
+  .th-profile-surface {
+    transform-origin: top right;
+  }
+}
+@keyframes th-welcome-type {
+  from {
+    opacity: 0;
+    transform: perspective(800px) translateY(28px) rotateX(-12deg);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes th-starter-reveal {
+  from {
+    opacity: 0;
+    translate: 0 16px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+@keyframes th-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(32px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.th-workspace main > .th-enter {
+  animation: none;
+}
+@media (max-height: 680px) {
+  .th-intelligence-stage[data-mode='hero'] {
+    height: 150px;
+  }
+  .is-welcome .th-v4-message-log {
+    padding-block: 4px 16px;
+  }
+  .th-welcome-eyebrow {
+    margin-bottom: 8px;
+  }
+  .th-v4-welcome h2 {
+    font-size: clamp(29px, 4vw, 40px);
+  }
+  .is-welcome.has-attachments .th-intelligence-stage[data-mode='hero'] {
+    height: 88px;
+  }
+}
+@media (max-width: 767px) {
+  .th-intelligence-stage[data-mode='hero'] {
+    height: clamp(160px, 26dvh, 230px);
+  }
+  .th-welcome-eyebrow {
+    margin-bottom: 12px;
+  }
+  .th-v4-welcome h2 {
+    max-width: 330px;
+    margin-inline: auto;
+  }
+  .is-welcome.has-attachments .th-intelligence-stage[data-mode='hero'] {
+    height: 100px;
+  }
+}
