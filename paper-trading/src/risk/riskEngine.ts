@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Database } from '../db/sqlAdapter';
-import { RiskViolationRepository } from '../db/repositories';
+import { RiskViolationRepository, FillRepository } from '../db/repositories';
 import type {
   RiskLimits,
   RiskCheckResult,
@@ -267,7 +267,6 @@ export class RiskEngine {
    */
   private checkOrdersPerDay(portfolioId: string, today: Date): RiskCheckResult {
     const maxOrdersPerDay = 50; // Default limit
-    const { FillRepository } = require('../db/repositories') as typeof import('../db/repositories');
     const fillRepo = new FillRepository(this.db);
     const orderCount = fillRepo.countByDate(portfolioId, today);
 

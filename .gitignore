@@ -41,3 +41,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+
+# Paper-trading test database artifacts
+paper-trading/tests/*.sqlite3
+paper-trading/tests/*.sqlite3-shm
+paper-trading/tests/*.sqlite3-wal

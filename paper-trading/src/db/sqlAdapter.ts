@@ -17,6 +17,7 @@ export class Database {
   private db: DatabaseConstructor.Database;
   private statements = new Map<string, Statement>();
   private filePath: string;
+  private closed = false;
 
   constructor(sqlDb: DatabaseConstructor.Database, filePath: string) {
     this.db = sqlDb;
@@ -108,13 +109,20 @@ export class Database {
   }
 
   /**
-   * Close the database and checkpoint if file-backed
+   * Close the database and checkpoint if file-backed.
+   * Idempotent: repeated calls after the first are no-ops.
    */
   close(): void {
-    if (this.isFileBacked) {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    if (this.isFileBacked && this.db.open) {
       this.checkpoint();
     }
-    this.db.close();
+    if (this.db.open) {
+      this.db.close();
+    }
   }
 }
 
