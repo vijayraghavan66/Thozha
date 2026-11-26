@@ -18,6 +18,18 @@ val jarvisLabRoot = generateSequence(rootProject.projectDir) { it.parentFile }
     ?: error("Could not locate Jarvis-Lab/jarvis-link companion sources.")
 val jarvisLinkRoot = jarvisLabRoot.resolve("jarvis-link")
 
+// The official TDLib Java bindings load libtdjni at runtime. This local, ignored
+// ARM64 build input is not safe to omit: packaging a seemingly successful APK
+// without it makes Telegram crash on first Client.createNativeClient().
+tasks.named("preBuild").configure {
+    doFirst {
+        val tdlibNative = layout.projectDirectory.file("src/main/jniLibs/arm64-v8a/libtdjni.so").asFile
+        check(tdlibNative.isFile && tdlibNative.length() > 0L) {
+            "Missing TDLib ARM64 runtime at app/src/main/jniLibs/arm64-v8a/libtdjni.so. Restore the locally provisioned official TDLib build before assembling; do not ship without it."
+        }
+    }
+}
+
 android {
     namespace = "com.jarvis.companion"
     compileSdk = 37
@@ -174,6 +186,28 @@ tasks.register<JavaExec>("verifyLocalGatewayRouting") {
     mainClass.set("com.jarvis.companion.data.LocalGatewayRoutingChecks")
 }
 
+tasks.register<JavaExec>("verifyLocalMacDiscovery") {
+    group = "verification"
+    description = "Checks DNS-SD candidate validation, duplicate/lost service handling, address changes, and unverified identity semantics."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.data.LocalMacDiscoveryChecks")
+}
+
+tasks.register<JavaExec>("verifyTaskEventWssProtocol") {
+    group = "verification"
+    description = "Checks paired WSS route construction, TLS identity rejection, event filtering, resume cursors, and persisted-only cumulative ACK behavior."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.data.TaskEventWssProtocolChecks")
+}
+
 tasks.register<JavaExec>("verifyAssistantFormatting") {
     group = "verification"
     description = "Runs dependency-free assistant-text formatting and escaping regression vectors."
@@ -283,6 +317,14 @@ tasks.register<JavaExec>("verifyExecutionLanes") {
     dependsOn("compileDebugUnitTestKotlin")
     classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.ui.ExecutionLanesCheck")
+}
+
+tasks.register<JavaExec>("verifyLinkSyncPolicy") {
+    group = "verification"
+    description = "Checks durable active-task detection, lifecycle catch-up coalescing, deduplication and terminal/cancelled stop behavior."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(layout.buildDirectory.dir("tmp/kotlin-classes/debug"), layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest")) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.ui.LinkSyncPolicyChecks")
 }
 
 tasks.register<JavaExec>("verifyFastCommand") {

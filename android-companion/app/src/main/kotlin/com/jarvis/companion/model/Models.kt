@@ -50,6 +50,7 @@ data class LinkTaskResult(
     val state: String,
     val summary: String,
     val resultDigest: String = "",
+    val finalResultAvailable: Boolean = false,
 )
 
 data class PairingInvitation(

@@ -33,6 +33,7 @@ object CompanionProtocolTest {
         fastCommandExpiryCoversObservedTelegramRetryWindow(now)
         endToEndEnvelopeRoundTrip(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         offlineOutboxAndRetry(root, host, hostEnc, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
+        multipleQueuedTasksSurviveRestartAndFlushOnce(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         staleTimestampRetryKeepsAuthenticatedEnvelopeQueued(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         crashAfterRelayAcceptancePreservesExactEnvelope(hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
         inboxPersistenceBeforeAck(host, hostCertificate, companion, companionEnc, companionCertificate, hostRoot, now)
@@ -40,6 +41,9 @@ object CompanionProtocolTest {
         approvalDecisionRequiresAuthoritativeCorrelatedResult()
         developmentPlanApprovalRequiresCompleteDigestBoundDetails()
         localTaskHistoryIsRestartSafe()
+        taskEventStreamPersistsEventAndCursorAtomically()
+        completedWssEventSeparatesExecutionFromResultDelivery()
+        apiTaskStatusLookupWaitsForAdmission()
         authenticatedTaskStatusCorrectsOnlyTheLocalMissingRecordMarker()
         fastReadOnlyApiRequestPersistsItsNoLinkReconciliationPolicy()
         progressSequenceDeduplicatesOutOfOrderEvents()
@@ -439,6 +443,36 @@ object CompanionProtocolTest {
         directory.deleteRecursively()
     }
 
+    private fun multipleQueuedTasksSurviveRestartAndFlushOnce(
+        hostCert: DeviceCertificate,
+        companion: SigningIdentity,
+        companionEnc: EncryptionIdentity,
+        companionCert: DeviceCertificate,
+        hostRoot: TrustedHostRoot,
+        now: Long,
+    ) {
+        val directory = java.nio.file.Files.createTempDirectory("telegram-queued-tasks").toFile()
+        val relay = MemoryRelay(companion)
+        val outboxFile = File(directory, "outbox.json")
+        fun client() = JarvisLinkCompanion(
+            "tenant_sim", companion, companionEnc, companionCert, hostRoot, hostCert, relay,
+            FileMessageOutbox(outboxFile), MemoryMessageInbox(), now = { now },
+        )
+        val first = client()
+        val firstId = "a1".repeat(16)
+        val secondId = "b2".repeat(16)
+        check(first.submitTask(TaskSubmission("first harmless task", setOf(SafeCapability.ASSISTANT), firstId)).queuedOffline)
+        check(first.submitTask(TaskSubmission("second harmless task", setOf(SafeCapability.ASSISTANT), secondId)).queuedOffline)
+        check(FileMessageOutbox(outboxFile).list().size == 2) { "both tasks must survive while Telegram is unavailable" }
+
+        val restored = client().also { it.setOnline(true) }
+        val receipts = restored.flushOutbox()
+        check(receipts.map { it.messageId }.toSet() == setOf(firstId, secondId)) { "restart recovery must flush each original idempotency ID once" }
+        check(FileMessageOutbox(outboxFile).list().isEmpty()) { "confirmed queue entries must be removed" }
+        check(restored.flushOutbox().isEmpty() && relay.queued.size == 2) { "a catch-up must not submit duplicate tasks" }
+        directory.deleteRecursively()
+    }
+
     private fun approvalReviewIsDigestAndExpiryBound() {
         val review = ApprovalReview(
             approvalId = "a".repeat(32),
@@ -607,6 +641,127 @@ object CompanionProtocolTest {
         check(runCatching {
             recovered.recordLocalTaskRequest("local-usb-task-20261116-000000000002", "bad scope", capabilityScope = "mac_root")
         }.isFailure)
+        directory.deleteRecursively()
+    }
+
+    private fun taskEventStreamPersistsEventAndCursorAtomically() {
+        val directory = java.nio.file.Files.createTempDirectory("jarvis-wss-cursor").toFile()
+        val stateFile = File(directory, "state.json")
+        val backing = FileLinkStateStore(stateFile)
+        var failNextWrite = false
+        val state = object : LinkStateStore {
+            override fun read(): String? = backing.read()
+            override fun write(json: String) {
+                if (failNextWrite) {
+                    failNextWrite = false
+                    throw java.io.IOException("test-only state write failure")
+                }
+                backing.write(json)
+            }
+        }
+        val now = 1_800_000_000_000L
+        fun runtime() = LinkRuntime(SoftwareTestKeyProvider(File(directory, "keys.json")), state, directory, now = { now })
+        val first = runtime()
+        val requestId = "a1".repeat(16)
+        val supervisorTaskId = "b2".repeat(16)
+        first.recordLocalTaskRequest(requestId, "read-only status", transport = "link", lookupLinkStatus = false)
+        // Link acceptance initially binds the conversation to the request/message ID until the Mac
+        // returns its supervisor task ID. The authenticated WSS event may safely replace this placeholder.
+        first.recordLocalTaskResult(requestId, requestId, "SENT", "Waiting for Mac")
+        check(first.updateLocalTaskTransport(requestId, "telegram"))
+        check(first.conversation().single()["transport"] == "telegram")
+
+        check(first.taskEventStreamCursor(requestId) == 0L)
+        check(first.persistTaskEventStreamEvent(
+            requestId, supervisorTaskId, 12L, "link_task.started", "2026-11-25T10:00:00Z",
+            "RUNNING", "Mac started the task", "", null,
+        ) == TaskEventStreamPersistResult.PERSISTED)
+        check(first.taskEventStreamCursor(requestId) == 12L)
+        check(first.conversation().single()["state"] == "RUNNING")
+        check(first.conversation().single()["task_id"] == supervisorTaskId)
+        check(first.taskRegistry().single()["status"] == "RUNNING")
+        val savedEvent = first.taskEventHistory().single { it["event_id"] == "wss:$requestId:12" }
+        check(savedEvent["sequence"] == 12L && savedEvent["event_type"] == "link_task.started")
+
+        check(first.persistTaskEventStreamEvent(
+            requestId, supervisorTaskId, 12L, "link_task.started", "2026-11-25T10:00:00Z",
+            "RUNNING", "duplicate delivery", "", null,
+        ) == TaskEventStreamPersistResult.ALREADY_PERSISTED)
+        check(first.taskEventHistory().count { it["event_id"] == "wss:$requestId:12" } == 1)
+        check(first.conversation().single()["summary"] == "Mac started the task")
+
+        check(runCatching {
+            first.persistTaskEventStreamEvent(
+                requestId, "c3".repeat(16), 13L, "link_task.completed", "2026-11-25T10:00:01Z",
+                "COMPLETED", "wrong task",
+            )
+        }.isFailure)
+        check(first.taskEventStreamCursor(requestId) == 12L)
+
+        check(first.persistTaskEventStreamCheckpoint(requestId, supervisorTaskId, 20L) == TaskEventStreamPersistResult.PERSISTED)
+        val recovered = runtime()
+        check(recovered.taskEventStreamCursor(requestId) == 20L)
+        check(recovered.taskEventHistory().count { it["event_id"] == "wss:$requestId:12" } == 1)
+        check(recovered.persistTaskEventStreamCheckpoint(requestId, supervisorTaskId, 19L) == TaskEventStreamPersistResult.ALREADY_PERSISTED)
+        check(runCatching { recovered.persistTaskEventStreamCheckpoint(requestId, "c3".repeat(16), 21L) }.isFailure)
+
+        failNextWrite = true
+        check(runCatching {
+            recovered.persistTaskEventStreamEvent(
+                requestId, supervisorTaskId, 21L, "link_task.completed", "2026-11-25T10:00:02Z",
+                "COMPLETED", "test result",
+            )
+        }.isFailure)
+        val afterFailedWrite = runtime()
+        check(afterFailedWrite.taskEventStreamCursor(requestId) == 20L)
+        check(afterFailedWrite.taskEventHistory().none { it["event_id"] == "wss:$requestId:21" })
+        directory.deleteRecursively()
+    }
+
+    private fun completedWssEventSeparatesExecutionFromResultDelivery() {
+        val directory = java.nio.file.Files.createTempDirectory("jarvis-wss-result-delivery").toFile()
+        val runtime = LinkRuntime(
+            keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+            state = FileLinkStateStore(File(directory, "state.json")),
+            storeDir = directory,
+            now = { 1_800_000_000_000L },
+        )
+        val requestId = "a1".repeat(16)
+        val supervisorTaskId = "b2".repeat(16)
+        runtime.recordLocalTaskRequest(requestId, "Explain Java", transport = "api")
+        runtime.persistTaskEventStreamEvent(
+            requestId, supervisorTaskId, 1L, "link_task.completed", "2026-11-25T10:00:00Z",
+            "COMPLETED", "Execution complete; retrieving the final answer.",
+        )
+        val execution = runtime.conversation().single()
+        check(execution["state"] == "COMPLETED")
+        check(execution["execution_state"] == "COMPLETED")
+        check(execution["result_delivery_state"] == "PENDING")
+
+        runtime.recordLocalTaskResult(
+            requestId, supervisorTaskId, "COMPLETED", "Java is a high-level programming language.",
+            finalResultAvailable = true,
+        )
+        val delivered = runtime.conversation().single()
+        check(delivered["state"] == "COMPLETED")
+        check(delivered["result_delivery_state"] == "DELIVERED")
+        check(delivered["summary"] == "Java is a high-level programming language.")
+        directory.deleteRecursively()
+    }
+
+    private fun apiTaskStatusLookupWaitsForAdmission() {
+        val directory = java.nio.file.Files.createTempDirectory("jarvis-api-admission-race").toFile()
+        val runtime = LinkRuntime(
+            keys = SoftwareTestKeyProvider(File(directory, "keys.json")),
+            state = FileLinkStateStore(File(directory, "state.json")),
+            storeDir = directory,
+        )
+        val requestId = "admission-race-20261125"
+        val taskId = "c7bdffa7" + "0".repeat(24)
+        runtime.recordLocalTaskRequest(requestId, "Explain a simple concept", transport = "api", lookupLinkStatus = false)
+        check(runtime.conversation().single()["lookup_link_status"] == false) { "a local outbox row must not be reconciled before submission" }
+        runtime.recordLocalTaskResult(requestId, taskId, "CREATED", "Task accepted")
+        check(runtime.conversation().single()["lookup_link_status"] == true) { "a confirmed supervisor task enables status/result reconciliation" }
         directory.deleteRecursively()
     }
 

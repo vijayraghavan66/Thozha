@@ -1,5 +1,6 @@
 package com.jarvis.companion.presentation
 
+import com.jarvis.companion.model.JarvisTask
 
 private var assertions = 0
 
@@ -26,6 +27,36 @@ fun main() {
     check(com.jarvis.companion.ui.ThozhaPalette.Dark.contrast(com.jarvis.companion.ui.ThozhaPalette.Dark.textMuted, com.jarvis.companion.ui.ThozhaPalette.Dark.background) >= 5.0, "dark theme secondary text remains readable")
     check(com.jarvis.companion.ui.ThozhaPalette.Light.contrast(com.jarvis.companion.ui.ThozhaPalette.Light.text, com.jarvis.companion.ui.ThozhaPalette.Light.background) >= 7.0, "light theme primary text contrast is at least 7:1")
     check(com.jarvis.companion.ui.ThozhaPalette.Light.contrast(com.jarvis.companion.ui.ThozhaPalette.Light.textMuted, com.jarvis.companion.ui.ThozhaPalette.Light.background) >= 5.0, "light theme secondary text remains readable")
+
+    // --- transport selection -------------------------------------------------------------------------------
+    check(
+        !MacTransportSelection.usePairedMacApi(
+            hasMacApiPairing = true, pairedLocalRouteReady = false,
+            directReadOnlyCommand = true, routeIsMac = true,
+        ),
+        "without a pinned, permitted local route, Android keeps the authenticated Link fallback",
+    )
+    check(
+        MacTransportSelection.usePairedMacApi(
+            hasMacApiPairing = true, pairedLocalRouteReady = true,
+            directReadOnlyCommand = true, routeIsMac = false,
+        ),
+        "a paired local route carries read-only Mac status directly",
+    )
+    check(
+        MacTransportSelection.usePairedMacApi(
+            hasMacApiPairing = true, pairedLocalRouteReady = true,
+            directReadOnlyCommand = false, routeIsMac = true,
+        ),
+        "a paired local route carries ordinary Mac tasks directly",
+    )
+    check(
+        !MacTransportSelection.usePairedMacApi(
+            hasMacApiPairing = false, pairedLocalRouteReady = true,
+            directReadOnlyCommand = true, routeIsMac = true,
+        ),
+        "a missing direct pairing never becomes an API route",
+    )
 
     // --- states -----------------------------------------------------------------------------------------------
     check(TaskStates.toneFor("completed") == TaskTone.COMPLETED, "state names are case-insensitive")
@@ -85,11 +116,51 @@ fun main() {
     check(rows.getValue("b").requestId == "b", "rows carry the request id the cancel path uses")
     check(rows.getValue("a").capabilityScope == "development" && rows.getValue("b").capabilityScope.isBlank(), "artifact action scope comes only from the locally recorded task scope")
     check(rows.getValue("b").transport == "api" && rows.getValue("c").transport.isBlank(), "Mac cancellation action is limited to API-owned requests")
+    val syncedMacTask = supervisorTaskSnapshotRecords(
+        listOf(JarvisTask("b314beabbd454aa181140280f1b0ff9f", "Task b314beab", "COMPLETED", updatedAt = "2026-11-24T16:17:51.341439+00:00")),
+        representedTaskIds = emptySet(),
+    )
+    val syncedMacRow = TimelinePresentation.sections(syncedMacTask, fmt).flatMap { it.rows }.single()
+    check(syncedMacRow.taskId == "b314beabbd454aa181140280f1b0ff9f" && syncedMacRow.tone == TaskTone.COMPLETED, "completed authenticated Mac snapshots appear as completed Activity rows")
+    check(syncedMacRow.transport == "mac_snapshot" && !syncedMacRow.canCancel, "read-only Mac snapshots do not expose phone cancellation or replay controls")
+    val recentCompleted = TimelinePresentation.sections(orderActivityRecordsNewestFirst(listOf(
+        mapOf("message_id" to "older", "task_id" to "older-task", "text" to "Older", "state" to "COMPLETED", "updated_at_unix_ms" to 1L),
+        syncedMacTask.single(),
+    )), fmt).single { it.title == "Completed" }
+    check(recentCompleted.rows.first().taskId == "b314beabbd454aa181140280f1b0ff9f", "fresh supervisor results appear before older Activity history")
+    check(supervisorTaskSnapshotRecords(
+        listOf(JarvisTask("b314beabbd454aa181140280f1b0ff9f", "Task b314beab", "COMPLETED")),
+        representedTaskIds = setOf("b314beabbd454aa181140280f1b0ff9f"),
+    ).isEmpty(), "a task already represented by a phone request is not duplicated")
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "RUNNING")), "active API tasks continue status reconciliation")
     check(!shouldReconcileApiTask(mapOf("transport" to "api", "lookup_link_status" to false, "state" to "RUNNING")), "typed fast commands do not query the Link task-status endpoint")
+    check(!shouldReconcileApiTask(mapOf("transport" to "api", "lookup_link_status" to false, "state" to "CREATED")), "an outbox row is not reconciled before the POST acceptance response")
     check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "The exact approved plan is active. Use capability_id=secret")), "plan issuance text is reconciled against the authoritative final result")
+    check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "result_delivery_state" to "PENDING", "result_delivery_retry_after_ms" to 0L)), "WSS execution completion remains eligible until the full answer is delivered")
+    check(!shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "result_delivery_state" to "PENDING", "result_delivery_retry_after_ms" to 20_000L), nowMs = 10_000L), "failed final-result retrieval observes a bounded retry delay")
+    check(!shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "result_delivery_state" to "DELIVERED", "summary" to "Finished normally")), "a fully delivered result is not polled again")
+    check(shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "Task completed")), "legacy terminal events without a final answer are reconciled")
     check(!shouldReconcileApiTask(mapOf("transport" to "api", "state" to "COMPLETED", "summary" to "Finished normally")), "ordinary completed API tasks are not polled again")
     check(!shouldReconcileApiTask(mapOf("transport" to "local", "state" to "RUNNING")), "local tasks never call the Mac status endpoint")
+    val rateLimitedTelegram = com.jarvis.companion.telegram.TelegramSnapshot(
+        com.jarvis.companion.telegram.TelegramConnection.CONNECTED,
+        com.jarvis.companion.telegram.AuthStep.Ready,
+        true,
+        null,
+        null,
+        0,
+        null,
+        retryAfterUntilUnixMs = 211_000L,
+    )
+    check(
+        com.jarvis.companion.ui.telegramRetryStatus(rateLimitedTelegram, 1_000L) == "Telegram rate limit: retry in 3m 30s. Requests remain queued on this phone.",
+        "retry-after is shown as a cooldown while preserving the queued request",
+    )
+    check(
+        com.jarvis.companion.ui.telegramRetryStatus(rateLimitedTelegram.copy(sendBlockedReasonCode = "AUTH_REQUIRED"), 1_000L)
+            ?.contains("authorization needs attention") == true,
+        "permanent Telegram authorization failures are shown separately from rate limits",
+    )
     val nowForReconciliation = 10_000_000L
     val earlyNotFound = mapOf<String, Any?>(
         "transport" to "api", "state" to "FAILED", "task_id" to "", "summary" to "The Mac no longer has this task record.",
@@ -188,6 +259,14 @@ fun main() {
         "executed" to true, "success" to true,
     ), now + 5)!!
     check(completed.phase == ApprovalDecisionPhase.COMPLETED, "only executed, persisted success can show completed")
+    val locallyFailed = completed.copy(phase = ApprovalDecisionPhase.FAILED)
+    check(ApprovalDecisionPresentation.needsSupervisorReconciliation(locallyFailed), "a local decision failure still checks authoritative supervisor state")
+    check(ApprovalDecisionPresentation.authoritative(locallyFailed, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
+        "decision" to "approve", "status" to "CONSUMED", "execution_state" to "COMPLETED",
+        "executed" to true, "success" to true,
+    ), now + 6)?.phase == ApprovalDecisionPhase.COMPLETED, "authoritative consumed completion repairs a stale local failure label")
+    check(!ApprovalDecisionPresentation.needsSupervisorReconciliation(completed.copy(phase = ApprovalDecisionPhase.REJECTED)), "terminal rejection needs no retry or status poll")
     check(ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
         "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
         "decision" to "approve", "status" to "APPROVED", "execution_state" to "COMPLETED",

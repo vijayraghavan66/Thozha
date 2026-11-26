@@ -111,7 +111,7 @@ fun SettingsScreen(
                     filled = false,
                     enabled = !store.syncing,
                     modifier = Modifier.fillMaxWidth(),
-                ) { store.syncNow() }
+                ) { store.syncNow(forcePermanentTelegramRetry = true) }
             }
 
             item { SectionLabel("Your assistant") }

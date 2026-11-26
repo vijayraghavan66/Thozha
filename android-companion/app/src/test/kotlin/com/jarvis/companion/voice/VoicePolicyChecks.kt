@@ -33,6 +33,10 @@ object VoicePolicyChecks {
         check((0..VoiceReconnectPolicy.maxAttempts).map(VoiceReconnectPolicy::delayMs) == listOf(1000L, 2000L, 4000L, 8000L, 16000L, 0L)) {
             "Mac reconnect delays must be bounded and stop at the attempt budget"
         }
+        check((0 until VoiceReconnectPolicy.maxAttempts).map(VoiceReconnectPolicy::nextDelayMs) == listOf(1000L, 2000L, 4000L, 8000L, 16000L))
+        check(VoiceReconnectPolicy.nextDelayMs(VoiceReconnectPolicy.maxAttempts) == 60_000L) {
+            "after bounded fast retries the phone should stay usable and periodically check Mac recovery"
+        }
         val turn = VoiceSessionGeneration()
         val first = turn.begin()
         check(turn.isCurrent(first)) { "new voice session should accept callbacks" }
@@ -53,6 +57,15 @@ object VoicePolicyChecks {
         check(!bargeIn.onSpeechStarted()) { "cancellation or TTS completion must disarm barge-in" }
         bargeIn.arm()
         check(bargeIn.onSpeechStarted()) { "a new listening turn must be recoverable after interruption" }
-        println("Voice policy checks passed: 18 assertions")
+        check(callConnectionLabel(VoiceControllerState.IDLE, phoneFallback = true, macReady = false) == "Phone mode · ready")
+        check(callConnectionLabel(VoiceControllerState.LISTENING, phoneFallback = true, macReady = false) == "Listening · phone mode")
+        check(callConnectionLabel(VoiceControllerState.IDLE, phoneFallback = false, macReady = false) == "Connecting to Mac voice")
+        check(callConnectionLabel(VoiceControllerState.LISTENING, phoneFallback = false, macReady = true) == "Listening")
+        check(voiceTaskSpeech(mapOf("state" to "RUNNING", "summary" to "Working")) == null)
+        check(voiceTaskSpeech(mapOf("state" to "COMPLETED", "summary" to "Execution completed; retrieving the final answer.", "result_delivery_state" to "PENDING")) == null)
+        check(voiceTaskSpeech(mapOf("state" to "WAITING_APPROVAL", "summary" to "Review required"))!!.contains("owner approval"))
+        check(voiceTaskSpeech(mapOf("state" to "COMPLETED", "summary" to "The Mac battery is 82%.", "result_delivery_state" to "DELIVERED")) == "The Mac battery is 82%.")
+        check(voiceTaskSpeech(mapOf("state" to "FAILED", "summary" to "Runner unavailable")) == "Runner unavailable")
+        println("Voice policy checks passed: 29 assertions")
     }
 }

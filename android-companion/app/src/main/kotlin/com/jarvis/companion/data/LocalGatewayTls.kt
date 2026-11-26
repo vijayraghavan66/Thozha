@@ -17,9 +17,13 @@ object LocalGatewayTls {
     private val localHostnamePattern = Regex("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.local$", RegexOption.IGNORE_CASE)
 
     fun socketFactory(expectedFingerprint: String): SSLSocketFactory {
+        return SSLContext.getInstance("TLS").apply { init(null, arrayOf(trustManager(expectedFingerprint)), null) }.socketFactory
+    }
+
+    fun trustManager(expectedFingerprint: String): X509TrustManager {
         require(expectedFingerprint.matches(Regex("sha256:[0-9a-f]{64}"))) { "invalid local gateway certificate pin" }
         val expected = expectedFingerprint.removePrefix("sha256:")
-        val trustManager = object : X509TrustManager {
+        return object : X509TrustManager {
             override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {
                 throw CertificateException("Client certificates are not used by the companion gateway")
@@ -41,7 +45,6 @@ object LocalGatewayTls {
                 if (BuildConfig.DEBUG) Log.i("JarvisWifi", "tls_pin_match=true")
             }
         }
-        return SSLContext.getInstance("TLS").apply { init(null, arrayOf(trustManager), null) }.socketFactory
     }
 
     fun hostnameVerifier(expectedHostname: String): HostnameVerifier {

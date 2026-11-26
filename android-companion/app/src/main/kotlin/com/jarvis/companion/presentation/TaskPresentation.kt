@@ -1,5 +1,8 @@
 package com.jarvis.companion.presentation
 
+import com.jarvis.companion.model.JarvisTask
+import java.time.OffsetDateTime
+
 /** One row of the Activity timeline. Read-only; cancelling is offered only when the runtime says it can be. */
 data class TimelineRow(
     /** Identifier the existing cancel path uses (the conversation message id). */
@@ -103,6 +106,41 @@ object TimelinePresentation {
     }
 }
 
+/**
+ * Converts authenticated supervisor snapshots to read-only Activity records. It omits task IDs
+ * already represented by phone-originated messages/events so synchronization cannot duplicate rows.
+ */
+fun supervisorTaskSnapshotRecords(
+    tasks: List<JarvisTask>,
+    representedTaskIds: Set<String>,
+): List<Map<String, Any?>> = tasks.asSequence()
+    .filter { it.id.isNotBlank() && it.id !in representedTaskIds }
+    .take(50)
+    .map { task ->
+        val updatedAt = runCatching {
+            OffsetDateTime.parse(task.updatedAt).toInstant().toEpochMilli()
+        }.getOrDefault(0L)
+        buildMap<String, Any?> {
+            put("message_id", "mac-supervisor:${task.id}")
+            put("task_id", task.id)
+            put("text", task.title.ifBlank { "Task ${task.id.take(8)}" })
+            put("state", task.state)
+            put("transport", "mac_snapshot")
+            put("created_at_unix_ms", updatedAt)
+            put("updated_at_unix_ms", updatedAt)
+            task.lastEvent.ifBlank { task.currentStep }.takeIf { it.isNotBlank() }?.let { put("summary", it) }
+        }
+    }
+    .toList()
+
+/** Keep current Mac-reported work ahead of older local history in each Activity section. */
+fun orderActivityRecordsNewestFirst(tasks: List<Map<String, Any?>>): List<Map<String, Any?>> =
+    tasks.sortedByDescending { record ->
+        (record["updated_at_unix_ms"] as? Number)?.toLong()
+            ?: (record["created_at_unix_ms"] as? Number)?.toLong()
+            ?: 0L
+    }
+
 /** Refresh unfinished API requests and the one nonterminal approval response that contains only capability issuance. */
 fun shouldReconcileApiTask(record: Map<String, Any?>, nowMs: Long = System.currentTimeMillis()): Boolean {
     if (record["transport"] != "api") return false
@@ -110,6 +148,18 @@ fun shouldReconcileApiTask(record: Map<String, Any?>, nowMs: Long = System.curre
     val state = (record["state"] as? String)?.trim()?.uppercase().orEmpty()
     if (state in setOf("CREATED", "QUEUED", "RUNNING", "PLANNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "SENT", "UNCONFIRMED")) return true
     val summary = (record["summary"] as? String).orEmpty().trim()
+    if (state == "COMPLETED") {
+        if (record["result_delivery_state"] == "PENDING") {
+            val retryAfterMs = (record["result_delivery_retry_after_ms"] as? Number)?.toLong() ?: 0L
+            return nowMs >= retryAfterMs
+        }
+        if (summary in setOf(
+                "Task completed",
+                "Execution completed; retrieving the final answer.",
+                "Task completed, but the Mac returned no result text.",
+            )
+        ) return true
+    }
     if (state == "COMPLETED" && summary.startsWith("The exact approved plan is active. Use capability_id=")) return true
     val createdAt = (record["created_at_unix_ms"] as? Number)?.toLong() ?: return false
     return state == "FAILED" && record["task_id"].let { it == null || it == "" } &&

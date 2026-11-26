@@ -220,7 +220,7 @@ fun HomeScreen(store: JarvisStore, onOpenSettings: () -> Unit, onOpenConnection:
                                 enabled = !store.syncing,
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                if (connection.paired) store.syncNow() else onOpenConnection()
+                                if (connection.paired) store.syncNow(forcePermanentTelegramRetry = true) else onOpenConnection()
                             }
                         }
                     }

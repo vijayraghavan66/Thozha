@@ -59,6 +59,9 @@ data class LinkStatus(
     val outboxSize: Int,
 )
 
+/** Outcome of durably consuming one task-scoped WSS event or checkpoint. */
+enum class TaskEventStreamPersistResult { PERSISTED, ALREADY_PERSISTED }
+
 /**
  * Every companion operation the app and the CLI need. Relay access is always the real HTTP client, and
  * every message is verified and decrypted by the production Kotlin protocol code.
@@ -69,6 +72,7 @@ data class SyncReport(
     val updates: List<Map<String, Any>>,
     val flushed: Int,
     val error: String,
+    val errorStatus: Int? = null,
 )
 
 class LinkRuntime(
@@ -179,10 +183,12 @@ class LinkRuntime(
     fun syncNow(relayUrl: String): SyncReport = synchronized(syncLock) {
         var flushed = 0
         var error = ""
+        var errorStatus: Int? = null
         try {
             flushed = flush(relayUrl)["delivered"] as Int
         } catch (failure: Exception) {
             error = errorCode(failure)
+            errorStatus = (failure as? RelayHttpException)?.status
         }
         reconcileOrphanedQueuedRequests()
         val newlyPending = mutableListOf<ApprovalReview>()
@@ -193,9 +199,10 @@ class LinkRuntime(
             markAnnounced(newlyPending.map { it.approvalId })
         } catch (failure: Exception) {
             error = errorCode(failure)
+            errorStatus = (failure as? RelayHttpException)?.status
         }
         save(mapOf("last_sync_ms" to now(), "last_sync_error" to error))
-        return SyncReport(newlyPending, recentUpdates(), flushed, error)
+        return SyncReport(newlyPending, recentUpdates(), flushed, error, errorStatus)
     }
 
     private fun errorCode(failure: Exception): String = when (failure) {
@@ -332,6 +339,241 @@ class LinkRuntime(
     fun taskRegistry(): List<Map<String, Any>> = (load()["task_registry"] as? List<Map<String, Any>>) ?: emptyList()
     fun taskEventHistory(): List<Map<String, Any>> = (load()["task_event_history"] as? List<Map<String, Any>>) ?: emptyList()
 
+    /** Updates only the selected response transport for an existing idempotent request. */
+    fun updateLocalTaskTransport(requestId: String, transport: String): Boolean = synchronized(stateLock) {
+        require(requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid request ID" }
+        require(transport in setOf("api", "link", "telegram")) { "invalid conversation transport" }
+        val rows = conversation().toMutableList()
+        val index = rows.indexOfFirst { it["message_id"] == requestId }
+        if (index < 0) return@synchronized false
+        rows[index] = LinkedHashMap(rows[index]).apply { put("transport", transport); put("updated_at_unix_ms", now()) }
+        save(mapOf("conversation" to rows))
+        true
+    }
+
+    /**
+     * Returns the durable event cursor for one submitted request. Cursors are per request because the
+     * WSS route is task-scoped even though the server's TaskEvent sequence is globally increasing.
+     */
+    fun taskEventStreamCursor(requestId: String): Long = synchronized(stateLock) {
+        require(requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid request ID" }
+        val cursors = (load()["task_event_stream_cursors"] as? Map<*, *>) ?: emptyMap<Any, Any>()
+        (cursors[requestId] as? Number)?.toLong() ?: 0L
+    }
+
+    /**
+     * Atomically persists a sanitized server event, its task/conversation projection, and the WSS
+     * resume cursor. Callers may acknowledge the sequence only after this method returns. A repeated
+     * sequence is an idempotent success; an unknown request or mismatched supervisor task is rejected.
+     */
+    fun persistTaskEventStreamEvent(
+        requestId: String,
+        supervisorTaskId: String,
+        sequence: Long,
+        eventType: String,
+        createdAt: String,
+        taskState: String?,
+        summary: String,
+        toolName: String = "",
+        durationMs: Long? = null,
+    ): TaskEventStreamPersistResult = synchronized(stateLock) {
+        require(requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid request ID" }
+        require(supervisorTaskId.matches(Regex("[A-Za-z0-9._:-]{1,128}"))) { "invalid supervisor task ID" }
+        require(sequence > 0) { "invalid task event sequence" }
+        require(eventType.matches(Regex("[a-z][a-z0-9_.-]{0,79}"))) { "invalid task event type" }
+        require(createdAt.length in 1..64 && createdAt.none(Char::isISOControl)) { "invalid event timestamp" }
+        require(summary.length <= 1024 && summary.none(Char::isISOControl)) { "invalid task event summary" }
+        require(toolName.length <= 80 && toolName.none(Char::isISOControl)) { "invalid tool name" }
+        require(durationMs == null || durationMs in 0..600_000L) { "invalid task event duration" }
+
+        val current = load()
+        val cursors = ((current["task_event_stream_cursors"] as? Map<*, *>) ?: emptyMap<Any, Any>())
+            .entries.mapNotNull { (key, value) ->
+                val id = key as? String ?: return@mapNotNull null
+                val seq = (value as? Number)?.toLong() ?: return@mapNotNull null
+                id to seq
+            }.toMap().toMutableMap()
+        val previousCursor = cursors[requestId] ?: 0L
+        if (sequence <= previousCursor) return@synchronized TaskEventStreamPersistResult.ALREADY_PERSISTED
+
+        val conversations = conversation().toMutableList()
+        val entryIndex = conversations.indexOfFirst { it["message_id"] == requestId }
+        require(entryIndex >= 0) { "task event request is not present in the durable conversation" }
+        val previousEntry = conversations[entryIndex]
+        val boundTask = (previousEntry["task_id"] as? String).orEmpty()
+        require(boundTask.isBlank() || boundTask == requestId || boundTask == supervisorTaskId) { "task event belongs to a different supervisor task" }
+
+        val normalizedState = normalizeStreamTaskState(taskState)
+            ?: when (eventType) {
+                "link_task.queued" -> "QUEUED"
+                "link_task.started", "tool.mcp_approval_dispatch_claimed", "approval.mac_mcp_dispatched" -> "RUNNING"
+                "link_task.waiting_approval" -> "WAITING_APPROVAL"
+                "link_task.completed", "approval.execution_completed" -> "COMPLETED"
+                "link_task.failed", "approval.execution_failed" -> "FAILED"
+                "link_task.approval_rejected" -> "REJECTED"
+                "approval.expired" -> "EXPIRED"
+                "task.cancelled" -> "CANCELLED"
+                else -> (previousEntry["state"] as? String)?.uppercase() ?: "RUNNING"
+            }
+        val eventTime = runCatching { java.time.Instant.parse(createdAt).toEpochMilli() }.getOrDefault(now())
+        val eventId = "wss:$requestId:$sequence"
+
+        val history = ((current["task_event_history"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
+        if (history.none { it["event_id"] == eventId }) {
+            val row = linkedMapOf<String, Any>(
+                "event_id" to eventId,
+                "task_id" to requestId,
+                "supervisor_task_id" to supervisorTaskId,
+                "sequence" to sequence,
+                "status" to normalizedState,
+                "event_type" to eventType,
+                "timestamp_unix_ms" to eventTime,
+                "event" to streamEventLabel(eventType),
+                "summary" to summary,
+            )
+            if (toolName.isNotBlank()) row["tool_name"] = toolName
+            durationMs?.let { row["duration_ms"] = it }
+            history.add(row)
+        }
+
+        val registry = ((current["task_registry"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
+        val oldRegistry = registry.firstOrNull { it["request_id"] == requestId }
+        val preserveTerminal = (oldRegistry?.get("status") as? String)?.uppercase() in terminalStates && normalizedState !in terminalStates
+        val nextStatus = if (preserveTerminal) oldRegistry?.get("status") as? String ?: normalizedState else normalizedState
+        val registryRow = linkedMapOf<String, Any>(
+            "task_id" to requestId,
+            "request_id" to requestId,
+            "supervisor_task_id" to supervisorTaskId,
+            "execution_target" to (oldRegistry?.get("execution_target") as? String ?: "MAC"),
+            "status" to nextStatus,
+            "created_at_unix_ms" to ((oldRegistry?.get("created_at_unix_ms") as? Number)?.toLong() ?: eventTime),
+            "updated_at_unix_ms" to eventTime,
+            "summary" to summary,
+        )
+        if (nextStatus in terminalStates) {
+            registryRow["completed_at_unix_ms"] = (oldRegistry?.get("completed_at_unix_ms") as? Number)?.toLong() ?: eventTime
+        }
+        registry.removeAll { it["request_id"] == requestId }
+        registry.add(registryRow)
+
+        val conversationRow = LinkedHashMap(previousEntry)
+        val preserveConversationTerminal = isStaleAfterTerminal(previousEntry, normalizedState)
+        if (!preserveConversationTerminal) {
+            conversationRow["state"] = normalizedState
+            conversationRow["summary"] = summary
+            conversationRow["updated_at_unix_ms"] = eventTime
+            conversationRow["task_id"] = supervisorTaskId
+            conversationRow["progress_seq"] = sequence
+            conversationRow["execution_state"] = normalizedState
+            if (
+                normalizedState == "COMPLETED" && previousEntry["transport"] == "api" &&
+                previousEntry["lookup_link_status"] != false
+            ) {
+                // WSS events are intentionally sanitized and do not carry model output.
+                // Completion therefore starts a separate result-delivery phase.
+                conversationRow["result_delivery_state"] = "PENDING"
+                conversationRow["result_delivery_retry_after_ms"] = 0L
+                conversationRow["summary"] = "Execution completed; retrieving the final answer."
+            }
+        }
+        conversations[entryIndex] = conversationRow
+
+        val updates = ((current["updates"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
+        if (updates.none { it["task_id"] == supervisorTaskId && (it["event_seq"] as? Number)?.toLong() == sequence }) {
+            updates.add(linkedMapOf(
+                "task_id" to supervisorTaskId,
+                "in_reply_to" to requestId,
+                "state" to normalizedState,
+                "summary" to summary,
+                "event_seq" to sequence,
+                "event_type" to eventType,
+                "created_at" to createdAt,
+                "received_at_unix_ms" to now(),
+            ))
+        }
+        cursors[requestId] = sequence
+
+        save(mapOf(
+            "conversation" to conversations.takeLast(100),
+            "task_registry" to registry.takeLast(500),
+            "task_event_history" to history.takeLast(2000),
+            "updates" to updates.takeLast(200),
+            "task_event_stream_cursors" to cursors,
+        ))
+        TaskEventStreamPersistResult.PERSISTED
+    }
+
+    /** Persists a server high-water checkpoint after all preceding public events have been saved. */
+    fun persistTaskEventStreamCheckpoint(
+        requestId: String,
+        supervisorTaskId: String,
+        sequence: Long,
+    ): TaskEventStreamPersistResult = synchronized(stateLock) {
+        require(requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid request ID" }
+        require(supervisorTaskId.matches(Regex("[A-Za-z0-9._:-]{1,128}"))) { "invalid supervisor task ID" }
+        require(sequence >= 0) { "invalid checkpoint sequence" }
+        val current = load()
+        val conversations = conversation().toMutableList()
+        val entryIndex = conversations.indexOfFirst { it["message_id"] == requestId }
+        require(entryIndex >= 0) { "checkpoint request is not present in the durable conversation" }
+        val entry = LinkedHashMap(conversations[entryIndex])
+        val boundTask = (entry["task_id"] as? String).orEmpty()
+        require(boundTask.isBlank() || boundTask == requestId || boundTask == supervisorTaskId) { "checkpoint belongs to a different supervisor task" }
+        entry["task_id"] = supervisorTaskId
+        conversations[entryIndex] = entry
+
+        val cursors = ((current["task_event_stream_cursors"] as? Map<*, *>) ?: emptyMap<Any, Any>())
+            .entries.mapNotNull { (key, value) ->
+                val id = key as? String ?: return@mapNotNull null
+                val seq = (value as? Number)?.toLong() ?: return@mapNotNull null
+                id to seq
+            }.toMap().toMutableMap()
+        val old = cursors[requestId] ?: 0L
+        if (sequence <= old) return@synchronized TaskEventStreamPersistResult.ALREADY_PERSISTED
+        cursors[requestId] = sequence
+        val registry = ((current["task_registry"] as? List<Map<String, Any>>) ?: emptyList()).toMutableList()
+        val registryIndex = registry.indexOfFirst { it["request_id"] == requestId }
+        if (registryIndex >= 0) {
+            registry[registryIndex] = LinkedHashMap(registry[registryIndex]).apply { put("supervisor_task_id", supervisorTaskId) }
+        }
+        save(mapOf("task_event_stream_cursors" to cursors, "conversation" to conversations, "task_registry" to registry))
+        TaskEventStreamPersistResult.PERSISTED
+    }
+
+    private fun normalizeStreamTaskState(value: String?): String? = when (value?.trim()?.uppercase()) {
+        "CREATED" -> "CREATED"
+        "QUEUED", "SENT", "DELIVERED_WAITING_SUPERVISOR", "UNCONFIRMED" -> "QUEUED"
+        "WAITING_APPROVAL" -> "WAITING_APPROVAL"
+        "WAITING_CONNECTION", "PAUSED" -> "WAITING_CONNECTION"
+        "RUNNING", "PLANNING", "VERIFYING" -> "RUNNING"
+        "COMPLETED" -> "COMPLETED"
+        "FAILED", "REJECTED", "EXPIRED", "INDETERMINATE" -> "FAILED"
+        "CANCELLED" -> "CANCELLED"
+        else -> null
+    }
+
+    private fun streamEventLabel(eventType: String): String = when (eventType) {
+        "task.state" -> "Task status changed"
+        "task.recovered_paused" -> "Task paused for safe recovery"
+        "task.cancelled", "link_task.cancelled" -> "Task cancelled"
+        "link_task.queued" -> "Task queued on Mac"
+        "link_task.started" -> "Mac started the task"
+        "link_task.waiting_approval" -> "Waiting for owner approval"
+        "link_task.approval_consumed", "approval.consumed" -> "Approval accepted"
+        "link_task.approval_rejected" -> "Approval rejected"
+        "link_task.completed" -> "Task completed"
+        "link_task.failed" -> "Task failed"
+        "approval.created" -> "Approval request created"
+        "approval.decision" -> "Approval decision recorded"
+        "approval.expired" -> "Approval expired"
+        "approval.execution_completed" -> "Approved operation completed"
+        "approval.execution_failed" -> "Approved operation failed"
+        "approval.mac_mcp_dispatched" -> "Authorized operation dispatched"
+        "tool.mcp_approval_dispatch_claimed" -> "Authorized operation dispatch claimed"
+        "development.tool_performance" -> "Development step completed"
+        else -> "Task event"
+    }
+
     private fun normalizedTaskState(value: String): String = when (value.trim().uppercase()) {
         "CREATED" -> "CREATED"
         "QUEUED", "SENT", "DELIVERED_WAITING_SUPERVISOR", "UNCONFIRMED" -> "QUEUED"
@@ -409,6 +651,9 @@ class LinkRuntime(
             "transport" to transport,
             "capability_scope" to capabilityScope,
             "lookup_link_status" to (lookupLinkStatus && executionTarget == "MAC"),
+            "execution_state" to "CREATED",
+            "result_delivery_state" to if (transport == "api" && lookupLinkStatus && executionTarget == "MAC") "PENDING" else "NOT_REQUIRED",
+            "result_delivery_retry_after_ms" to 0L,
             "updated_at_unix_ms" to now(),
         ))
         save(mapOf("conversation" to entries.takeLast(100)))
@@ -424,13 +669,37 @@ class LinkRuntime(
     }
 
     /** Records the Mac's actual supervisor result or the last known task state. */
-    fun recordLocalTaskResult(idempotencyKey: String, taskId: String, state: String, summary: String) {
-        applyToConversation(idempotencyKey, taskId, state.uppercase(), summary)
+    fun recordLocalTaskResult(
+        idempotencyKey: String,
+        taskId: String,
+        state: String,
+        summary: String,
+        finalResultAvailable: Boolean? = null,
+    ) {
+        applyToConversation(idempotencyKey, taskId, state.uppercase(), summary, finalResultAvailable)
         recordTaskLifecycle(idempotencyKey, taskId, state, summary)
     }
 
+    /** Back off an unsuccessful final-result fetch without treating execution as failed. */
+    fun deferTaskResultDelivery(idempotencyKey: String, delayMs: Long = 10_000L) = synchronized(stateLock) {
+        require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid request ID" }
+        require(delayMs in 1_000L..300_000L) { "invalid result retry delay" }
+        val entries = conversation().map { entry ->
+            if (entry["message_id"] == idempotencyKey && entry["result_delivery_state"] == "PENDING") {
+                LinkedHashMap(entry).apply { put("result_delivery_retry_after_ms", now() + delayMs) }
+            } else entry
+        }
+        save(mapOf("conversation" to entries))
+    }
+
     /** Corrects only the exact local 404 terminal marker after a fresh authenticated Mac status response. */
-    fun reconcileMissingApiTaskResult(idempotencyKey: String, taskId: String, state: String, summary: String): Boolean {
+    fun reconcileMissingApiTaskResult(
+        idempotencyKey: String,
+        taskId: String,
+        state: String,
+        summary: String,
+        finalResultAvailable: Boolean? = null,
+    ): Boolean {
         require(idempotencyKey.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) { "invalid task idempotency key" }
         require(taskId.matches(Regex("[0-9a-f]{32}"))) { "invalid supervisor task ID" }
         val normalizedState = state.trim().uppercase()
@@ -447,7 +716,14 @@ class LinkRuntime(
                     LinkedHashMap(entry).apply {
                         put("task_id", taskId)
                         put("state", normalizedState)
-                        put("summary", summary)
+                        put("execution_state", normalizedState)
+                        put("summary", if (normalizedState == "COMPLETED" && finalResultAvailable == false) {
+                            "Execution completed; waiting for the complete answer."
+                        } else summary)
+                        if (normalizedState == "COMPLETED" && finalResultAvailable != null) {
+                            put("result_delivery_state", if (finalResultAvailable) "DELIVERED" else "PENDING")
+                            put("result_delivery_retry_after_ms", if (finalResultAvailable) 0L else now() + 10_000L)
+                        }
                         put("updated_at_unix_ms", now())
                     }
                 } else entry
@@ -477,10 +753,32 @@ class LinkRuntime(
         return linkedMapOf("message_id" to result.messageId, "queued_offline" to result.queuedOffline)
     }
 
-    private fun applyToConversation(messageId: String, taskId: String, state: String, summary: String) = synchronized(stateLock) {
+    private fun applyToConversation(
+        messageId: String,
+        taskId: String,
+        state: String,
+        summary: String,
+        finalResultAvailable: Boolean? = null,
+    ) = synchronized(stateLock) {
         val entries = conversation().map { entry ->
             if (entry["message_id"] == messageId && !isStaleAfterTerminal(entry, state)) LinkedHashMap(entry).apply {
-                put("state", state); put("summary", summary); put("task_id", taskId); put("updated_at_unix_ms", now())
+                put("state", state)
+                put("execution_state", state)
+                put("summary", if (state == "COMPLETED" && finalResultAvailable == false) {
+                    "Execution completed; waiting for the complete answer."
+                } else summary)
+                put("task_id", taskId)
+                if (
+                    entry["transport"] == "api" && state in setOf("CREATED", "QUEUED", "RUNNING", "PLANNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED") &&
+                    taskId.matches(Regex("[0-9a-f]{32}"))
+                ) {
+                    put("lookup_link_status", true)
+                }
+                put("updated_at_unix_ms", now())
+                if (state == "COMPLETED" && finalResultAvailable != null) {
+                    put("result_delivery_state", if (finalResultAvailable) "DELIVERED" else "PENDING")
+                    put("result_delivery_retry_after_ms", if (finalResultAvailable) 0L else now() + 10_000L)
+                }
             } else entry
         }
         save(mapOf("conversation" to entries))

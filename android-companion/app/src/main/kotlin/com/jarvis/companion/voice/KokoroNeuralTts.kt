@@ -32,7 +32,7 @@ class KokoroNeuralTts(private val dir: File, private val defaultSpeakerId: Int =
         Log.i("JarvisNeuralTts", "event=native_model_initialized path=${model.absolutePath} bytes=${model.length()} speakers=${tts?.numSpeakers()} load_ms=$elapsed")
         return elapsed
     }
-    data class StreamingResult(val generationMs: Long, val firstPcmMs: Long, val playbackStartMs: Long, val audioDurationMs: Long, val samples: Int)
+    data class StreamingResult(val generationMs: Long, val firstPcmMs: Long, val playbackStartMs: Long, val audioDurationMs: Long, val samples: Int, val sampleRate: Int)
 
     fun speak(text: String, speakerId: Int = defaultSpeakerId, cancelled: () -> Boolean = { false }, speechEndElapsedMs: Long? = null, onFirstPlayback: (Long) -> Unit = {}): StreamingResult {
         val started = SystemClock.elapsedRealtime()
@@ -79,7 +79,7 @@ class KokoroNeuralTts(private val dir: File, private val defaultSpeakerId: Int =
             val generationMs = (firstPcmMs.takeIf { it >= 0 } ?: (SystemClock.elapsedRealtime() - started))
             val duration = sampleCount * 1000L / rate
             Log.i("JarvisNeuralTts", "event=stream_complete sid=$speakerId chunks_samples=$sampleCount generated_samples=${audio.samples.size} rate=$rate duration_ms=$duration generation_to_first_pcm_ms=$generationMs playback_head=${track.playbackHeadPosition} cancelled=${cancelled()}")
-            return StreamingResult(generationMs, firstPcmMs, playbackStartMs, duration, sampleCount)
+            return StreamingResult(generationMs, firstPcmMs, playbackStartMs, duration, sampleCount, rate)
         } finally {
             if (track.playState != AudioTrack.PLAYSTATE_STOPPED) track.stop()
             track.release()

@@ -25,6 +25,7 @@ private enum class CaptureMode { PUSH_TO_TALK, AUTOMATIC_ENDPOINTER, BARGE_IN }
 
 /** Stable, UI-agnostic voice states for a lead-owned Compose or Activity control. */
 enum class VoiceControllerState { IDLE, LISTENING, PROCESSING, SPEAKING, ERROR }
+enum class VoiceOutputEngine { SYSTEM_TTS, KOKORO_NEURAL, FALLBACK, UNAVAILABLE }
 
 enum class VoiceControllerError {
     PERMISSION_REQUIRED,
@@ -62,6 +63,7 @@ class JarvisVoiceController(
         fun onBargeInDetected() {}
         fun onFinalText(text: String) {}
         fun onError(error: VoiceControllerError) {}
+        fun onOutputEngineChanged(engine: VoiceOutputEngine) {}
     }
 
     private val appContext = context.applicationContext
@@ -217,7 +219,7 @@ class JarvisVoiceController(
             pendingSpeech = safeText
             return
         }
-        if (!ttsReady) { fail(VoiceControllerError.SYNTHESIS_UNAVAILABLE); return }
+        if (!ttsReady) { listener.onOutputEngineChanged(VoiceOutputEngine.UNAVAILABLE); fail(VoiceControllerError.SYNTHESIS_UNAVAILABLE); return }
         speakNow(safeText)
     }
 
@@ -241,13 +243,15 @@ class JarvisVoiceController(
                     val privateModel = KokoroAssets.provision(appContext)
                     KokoroNeuralTts(privateModel).also { val loadMs = it.load(); neuralTts = it; android.util.Log.i("JarvisNeuralTts", "event=model_loaded model=kokoro-en-v0_19 load_ms=$loadMs speakers=${it.speakerCount()}") }
                 }
-                val stream = engine.speak(text, sid, { neuralCancelled.get() || closed }, speechEndElapsedMs)
+                val stream = engine.speak(text, sid, { neuralCancelled.get() || closed }, speechEndElapsedMs) {
+                    main.post { if (!closed && !neuralCancelled.get()) listener.onOutputEngineChanged(VoiceOutputEngine.KOKORO_NEURAL) }
+                }
                 val synthMs = stream.generationMs
                 android.util.Log.i("JarvisNeuralTts", "event=neural_stream_finished voice=$voiceName sid=$sid first_pcm_ms=${stream.firstPcmMs} playback_start_ms=${stream.playbackStartMs} duration_ms=${stream.audioDurationMs} synth_and_play_ms=$synthMs cancelled=${neuralCancelled.get()} elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
                 main.post { neuralSpeaking = false; if (!closed && !neuralCancelled.get()) { abandonFocus(); setState(VoiceControllerState.IDLE) } }
             } catch (failure: Throwable) {
                 android.util.Log.e("JarvisNeuralTts", "event=neural_failed voice=$voiceName sid=$sid elapsed_ms=${android.os.SystemClock.elapsedRealtime() - started} type=${failure.javaClass.simpleName} detail=${failure.message?.take(300)}")
-                main.post { neuralSpeaking = false; if (!closed && !neuralCancelled.get()) { listener.onError(VoiceControllerError.SYNTHESIS_FAILED); abandonFocus(); speak(text) } }
+                main.post { neuralSpeaking = false; if (!closed && !neuralCancelled.get()) { listener.onOutputEngineChanged(VoiceOutputEngine.FALLBACK); listener.onError(VoiceControllerError.SYNTHESIS_FAILED); abandonFocus(); speak(text) } }
             }
         }.start()
     }
@@ -386,10 +390,15 @@ class JarvisVoiceController(
         engine.setPitch(1.0f)
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = post {
-                if (!closed && utteranceId != null && utteranceId == activeUtteranceId) setState(VoiceControllerState.SPEAKING)
+                if (!closed && utteranceId != null && utteranceId == activeUtteranceId) {
+                    android.util.Log.i("JarvisVoiceLatency", "event=tts_on_start engine=SYSTEM_TTS elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
+                    listener.onOutputEngineChanged(VoiceOutputEngine.SYSTEM_TTS)
+                    setState(VoiceControllerState.SPEAKING)
+                }
             }
             override fun onDone(utteranceId: String?) = post {
                 if (!closed && utteranceId != null && utteranceId == activeUtteranceId) {
+                    android.util.Log.i("JarvisVoiceLatency", "event=tts_on_done engine=SYSTEM_TTS elapsed_ms=${android.os.SystemClock.elapsedRealtime()}")
                     activeUtteranceId = null
                     if (captureMode == CaptureMode.BARGE_IN && state == VoiceControllerState.LISTENING) {
                         bargeInGate.disarm()
@@ -408,6 +417,7 @@ class JarvisVoiceController(
                         return@post
                     }
                     abandonFocus()
+                    listener.onOutputEngineChanged(VoiceOutputEngine.UNAVAILABLE)
                     fail(VoiceControllerError.SYNTHESIS_FAILED)
                 }
             }
@@ -419,6 +429,7 @@ class JarvisVoiceController(
                         return@post
                     }
                     abandonFocus()
+                    listener.onOutputEngineChanged(VoiceOutputEngine.UNAVAILABLE)
                     fail(VoiceControllerError.SYNTHESIS_FAILED)
                 }
             }
@@ -427,8 +438,8 @@ class JarvisVoiceController(
     }
 
     private fun speakNow(text: String) {
-        val engine = textToSpeech ?: run { fail(VoiceControllerError.SYNTHESIS_UNAVAILABLE); return }
-        if (!requestFocus()) { fail(VoiceControllerError.SYNTHESIS_FAILED); return }
+        val engine = textToSpeech ?: run { listener.onOutputEngineChanged(VoiceOutputEngine.UNAVAILABLE); fail(VoiceControllerError.SYNTHESIS_UNAVAILABLE); return }
+        if (!requestFocus()) { listener.onOutputEngineChanged(VoiceOutputEngine.UNAVAILABLE); fail(VoiceControllerError.SYNTHESIS_FAILED); return }
         val utteranceId = "jarvis-${UUID.randomUUID()}"
         activeUtteranceId = utteranceId
         val result = try {
@@ -437,6 +448,7 @@ class JarvisVoiceController(
         if (result == TextToSpeech.ERROR) {
             activeUtteranceId = null
             abandonFocus()
+            listener.onOutputEngineChanged(VoiceOutputEngine.UNAVAILABLE)
             fail(VoiceControllerError.SYNTHESIS_FAILED)
         } else {
             setState(VoiceControllerState.SPEAKING)

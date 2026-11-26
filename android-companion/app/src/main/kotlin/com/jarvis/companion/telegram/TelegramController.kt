@@ -13,6 +13,8 @@ data class TelegramSnapshot(
     val notice: String?,
     val pendingPings: Int,
     val lastRttMs: Long?,
+    val retryAfterUntilUnixMs: Long? = null,
+    val sendBlockedReasonCode: String? = null,
 )
 
 /**
@@ -35,6 +37,8 @@ class TelegramController(
     private val history = ArrayDeque<PingResult>()
     private var lastRtt: Long? = null
     private var ignoredAcks = 0
+    private var retryAfterUntilMs = 0L
+    private var sendBlockedReasonCode: String? = null
 
     fun start(creds: ApiCredentials) {
         synchronized(lock) {
@@ -152,6 +156,24 @@ class TelegramController(
         notifyChange()
     }
 
+    override fun onRateLimitUntil(retryUntilUnixMs: Long) {
+        synchronized(lock) {
+            retryAfterUntilMs = if (retryUntilUnixMs <= clock()) 0L else maxOf(retryAfterUntilMs, retryUntilUnixMs)
+        }
+        notifyChange()
+    }
+
+    override fun onSendBlocked(reasonCode: String) {
+        val safe = reasonCode.takeIf { it.matches(Regex("[A-Z0-9_]{1,48}")) } ?: "SEND_BLOCKED"
+        synchronized(lock) { sendBlockedReasonCode = safe }
+        notifyChange()
+    }
+
+    fun clearSendBlock() {
+        synchronized(lock) { sendBlockedReasonCode = null }
+        notifyChange()
+    }
+
     // --- internals -------------------------------------------------------------
 
     private fun fail(message: String): Boolean {
@@ -176,6 +198,8 @@ class TelegramController(
         notice = notice,
         pendingPings = pending.size,
         lastRttMs = lastRtt,
+        retryAfterUntilUnixMs = retryAfterUntilMs.takeIf { it > clock() },
+        sendBlockedReasonCode = sendBlockedReasonCode,
     )
 
     private fun notifyChange() {

@@ -7,6 +7,9 @@ import android.app.job.JobService
 import android.content.ComponentName
 import android.content.Context
 import com.jarvis.link.SyncReport
+import com.jarvis.companion.telegram.TelegramSession
+import com.jarvis.companion.telegram.RelayFailureDisposition
+import com.jarvis.companion.telegram.classifyRelayFailure
 
 /**
  * One Link sync: retries queued sends, polls for replies and approval requests, and alerts once per new
@@ -28,13 +31,65 @@ object LinkBackgroundSync {
         return runCatching { LinkService.runtime(context).status().certificatesVerified }.getOrDefault(false)
     }
 
-    fun run(context: Context): SyncReport? {
+    fun run(context: Context, forcePermanentRetry: Boolean = false): SyncReport? {
         val settings = LinkSettings(context)
         if (!canRun(context)) return null
-        val report = LinkService.runtime(context).syncNow(settings.relayUrl)
+        val runtime = LinkService.runtime(context)
+        val usesTelegramTunnel = settings.mode == LinkMode.TEST_RELAY && TelegramSession.activeTunnel() != null
+        if (usesTelegramTunnel) {
+            var retryState = TelegramSession.retryState()
+            if (forcePermanentRetry && retryState.blockedCode != null) {
+                retryState = TelegramSession.clearPermanentSendBlock()
+            }
+            if (retryState.blockedCode != null) {
+                android.util.Log.w(
+                    "JarvisDelivery",
+                    "event=telegram_sync_deferred reason=permanent_failure code=${retryState.blockedCode}",
+                )
+                return SyncReport(emptyList(), runtime.recentUpdates(), 0, "TELEGRAM_AUTH_BLOCKED")
+            }
+            val remaining = TelegramSession.retryRemainingMs()
+            if (remaining > 0L) {
+                android.util.Log.i(
+                    "JarvisDelivery",
+                    "event=telegram_sync_deferred reason=retry_after remaining_s=${(remaining + 999L) / 1_000L}",
+                )
+                return SyncReport(emptyList(), runtime.recentUpdates(), 0, "TELEGRAM_RETRY_AFTER")
+            }
+        }
+        val startedAtMs = System.currentTimeMillis()
+        val startedNs = android.os.SystemClock.elapsedRealtimeNanos()
+        val report = runtime.syncNow(settings.relayUrl)
+        if (usesTelegramTunnel) {
+            when (classifyRelayFailure(report.errorStatus, report.error)) {
+                RelayFailureDisposition.PERMANENT -> TelegramSession.blockAutomaticRetry(permanentReason(report))
+                RelayFailureDisposition.TRANSIENT -> TelegramSession.deferTransientRetry()
+                RelayFailureDisposition.NONE -> TelegramSession.recordTransportSuccess()
+            }
+        }
+        val newlyPersisted = report.updates.filter { row ->
+            val receivedAt = (row["received_at_unix_ms"] as? Number)?.toLong() ?: 0L
+            receivedAt >= startedAtMs
+        }
+        val newlyPersistedTerminal = newlyPersisted.count { row ->
+            (row["state"] as? String)?.uppercase() in TERMINAL_TASK_STATES
+        }
+        val latestReceiptAt = newlyPersisted.maxOfOrNull { row ->
+            (row["received_at_unix_ms"] as? Number)?.toLong() ?: 0L
+        } ?: 0L
+        val safeError = report.error.takeIf { it.matches(Regex("[A-Z0-9_]{1,48}")) } ?: if (report.error.isBlank()) "none" else "other"
+        android.util.Log.i(
+            "JarvisDelivery",
+            "event=link_sync_persisted mode=${settings.mode.wire} elapsed_ms=${android.os.SystemClock.elapsedRealtimeNanos().minus(startedNs) / 1_000_000} new_updates=${newlyPersisted.size} new_terminal=$newlyPersistedTerminal receipt_to_sync_end_ms=${if (latestReceiptAt > 0) (System.currentTimeMillis() - latestReceiptAt).coerceAtLeast(0) else -1} error=$safeError",
+        )
         report.newApprovals.forEach { LinkAlerts.notifyApproval(context, it) }
         return report
     }
+
+    private fun permanentReason(report: SyncReport): String = if (report.errorStatus == 401 || report.errorStatus == 403) "AUTH_REQUIRED" else
+        report.error.takeIf { it.matches(Regex("[A-Z0-9_]{1,48}")) } ?: "SEND_REJECTED"
+
+    private val TERMINAL_TASK_STATES = setOf("COMPLETED", "FAILED", "CANCELLED", "REJECTED", "EXPIRED", "INDETERMINATE")
 }
 
 /**

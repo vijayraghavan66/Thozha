@@ -24,4 +24,6 @@ interface TelegramEvents {
     fun onConnectionChanged(online: Boolean)
     fun onPingAck(nonce: String)
     fun onError(message: String)
+    fun onRateLimitUntil(retryUntilUnixMs: Long) {}
+    fun onSendBlocked(reasonCode: String) {}
 }

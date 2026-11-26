@@ -36,6 +36,7 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf(VoiceControllerState.IDLE) }
+    var speechEngine by remember { mutableStateOf("Android system TTS") }
     var transcript by remember { mutableStateOf("") }
     var response by remember { mutableStateOf("") }
     var muted by remember { mutableStateOf(false) }
@@ -51,6 +52,8 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
     var macReady by remember { mutableStateOf(false) }
     var phoneFallback by remember { mutableStateOf(false) }
     var macStatus by remember { mutableStateOf("Connecting to paired Mac…") }
+    var voiceTaskRequestId by remember { mutableStateOf<String?>(null) }
+    var voiceTaskAnnouncementKey by remember { mutableStateOf("") }
     val settings = remember(context) { context.getSharedPreferences("jarvis_voice", Context.MODE_PRIVATE) }
     var sid by remember { mutableIntStateOf(settings.getInt("kokoro_sid", 5)) }
     val kokoroVoice = when (sid) { 1 -> "af_bella"; 6 -> "am_michael"; 9 -> "bm_george"; 10 -> "bm_lewis"; else -> "am_adam" }
@@ -62,11 +65,23 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
     val localVoice = remember(context) {
         JarvisVoiceController(context, object : JarvisVoiceController.Listener {
             override fun onStateChanged(value: VoiceControllerState) { state = value }
+            override fun onOutputEngineChanged(engine: VoiceOutputEngine) {
+                speechEngine = when (engine) {
+                    VoiceOutputEngine.SYSTEM_TTS -> "Android system TTS"
+                    VoiceOutputEngine.KOKORO_NEURAL -> "Kokoro neural"
+                    VoiceOutputEngine.FALLBACK -> "Neural unavailable · system fallback"
+                    VoiceOutputEngine.UNAVAILABLE -> "Speech output unavailable"
+                }
+            }
             override fun onPartialText(text: String) { transcript = text; missedUtterances = 0; retryJob?.cancel(); response = "" }
             override fun onBargeInDetected() { response = "Interrupted"; pending = false }
             override fun onFinalText(text: String) { transcriptRouter.value(text, false) }
             override fun onError(error: VoiceControllerError) {
                 pending = false
+                if (error == VoiceControllerError.SYNTHESIS_FAILED && speechEngine == "Neural unavailable · system fallback") {
+                    android.util.Log.w("ThozhaLive", "event=speech_engine_fallback engine=ANDROID_SYSTEM_TTS")
+                    return
+                }
                 if (VoiceRecognitionRetryPolicy.isRecoverable(error) && active && !muted && phoneFallback) {
                     missedUtterances += 1
                     val wait = VoiceRecognitionRetryPolicy.delayMs(missedUtterances)
@@ -125,18 +140,18 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
                 response = message
                 if (!macReady && active) {
                     phoneFallback = true
-                    macStatus = "Mac voice unavailable · phone-local recognition"
+                    macStatus = "Mac voice unavailable · phone recognition + authenticated task transport"
                     state = VoiceControllerState.IDLE
-                    if (reconnectAttempts < VoiceReconnectPolicy.maxAttempts) {
-                        val waitMs = VoiceReconnectPolicy.delayMs(reconnectAttempts)
-                        macRetryJob?.cancel()
-                        macRetryJob = scope.launch {
-                            delay(waitMs)
-                            if (active && !macReady) {
-                                reconnectAttempts += 1
-                                macStatus = "Phone-local voice · retrying paired Mac"
-                                macController?.connect()
-                            }
+                    val retryIndex = reconnectAttempts
+                    val waitMs = VoiceReconnectPolicy.nextDelayMs(retryIndex)
+                    macStatus = "Phone mode active · Mac retry in ${waitMs / 1000}s"
+                    macRetryJob?.cancel()
+                    macRetryJob = scope.launch {
+                        delay(waitMs)
+                        if (active && !macReady) {
+                            reconnectAttempts = (retryIndex + 1).coerceAtMost(VoiceReconnectPolicy.maxAttempts)
+                            macStatus = "Phone mode active · checking Mac voice"
+                            macController?.connect()
                         }
                     }
                 } else if (macReady) {
@@ -158,6 +173,9 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
             pending = true
             android.util.Log.i("ThozhaLive", "event=transcript_final source=${if (fromMac) "MAC_ASR" else "PHONE_ASR"} chars=${text.length} elapsed_ms=${SystemClock.elapsedRealtime()}")
             val weather = WeatherIntentRouter.isWeatherRequest(text)
+            // A newer utterance owns the call transcript/result surface. Old async responses
+            // remain in durable Tasks history but must never speak over a newer turn.
+            voiceTaskRequestId = null
             if (weather) {
                 val city = Regex("(?i)\\b(?:in|for)\\s+([\\p{L} .'-]+?)(?:\\s+(?:today|now|currently|should)\\b|[?.!,]|$)")
                     .find(text)?.groupValues?.get(1)?.trim()
@@ -217,9 +235,12 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
             } else if (fromMac) {
                 macVoice.respond(qwenSpeaker)
             } else {
+                val requestId = UUID.randomUUID().toString().replace("-", "")
+                voiceTaskRequestId = requestId
+                voiceTaskAnnouncementKey = ""
                 store.draft = text
-                store.submit()
-                response = "Sent to the paired Mac task flow. Check Tasks for status or approval."
+                store.submit(requestId)
+                response = "Sent through the paired Mac task flow. I’ll speak its verified result when it is delivered; approval may be required."
                 pending = false
                 localVoice.speakNeural(response, sid, kokoroVoice)
             }
@@ -245,8 +266,52 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
     LaunchedEffect(state, pending, muted, active, phoneFallback) {
         if (active && phoneFallback && !muted && !pending && state == VoiceControllerState.IDLE) {
             delay(300)
-            if (active && phoneFallback && !muted && !pending && state == VoiceControllerState.IDLE) localVoice.startVoiceTurn()
+            if (active && phoneFallback && !muted && !pending && state == VoiceControllerState.IDLE) {
+                transcript = ""
+                localVoice.startVoiceTurn()
+            }
         }
+    }
+
+    // Keep the call's text/audio response tied to the same idempotency key as the ordinary
+    // authenticated task submission. WSS events and API reconciliation update this durable row.
+    LaunchedEffect(voiceTaskRequestId, active) {
+        val requestId = voiceTaskRequestId ?: return@LaunchedEffect
+        if (!active) return@LaunchedEffect
+        repeat(36) { attempt ->
+            delay(if (attempt == 0) 2_000L else 5_000L)
+            if (!active || voiceTaskRequestId != requestId) return@LaunchedEffect
+            val row = store.entries.firstOrNull { it["message_id"] == requestId }
+            if (row != null) {
+                val status = (row["state"] as? String)?.uppercase().orEmpty()
+                if (status in setOf("FAILED", "CANCELLED", "REJECTED", "EXPIRED", "INDETERMINATE") ||
+                    (status == "COMPLETED" && row["result_delivery_state"] == "DELIVERED")
+                ) return@LaunchedEffect
+                if (status in setOf("QUEUED", "SENT", "UNCONFIRMED", "RUNNING", "PLANNING", "VERIFYING", "WAITING_APPROVAL", "COMPLETED")) {
+                    store.refreshLocal()
+                }
+            } else {
+                store.refreshLocal()
+            }
+        }
+    }
+    LaunchedEffect(voiceTaskRequestId, store.entries, state, active) {
+        val requestId = voiceTaskRequestId ?: return@LaunchedEffect
+        // If capture is idle between words, cancel that empty recognizer before speaking the
+        // delivered result. A non-empty partial transcript means the owner is speaking; defer.
+        val safeToSpeak = state == VoiceControllerState.IDLE ||
+            (state == VoiceControllerState.LISTENING && transcript.isBlank())
+        if (!active || !safeToSpeak) return@LaunchedEffect
+        val row = store.entries.firstOrNull { it["message_id"] == requestId } ?: return@LaunchedEffect
+        val speech = voiceTaskSpeech(row) ?: return@LaunchedEffect
+        val key = "${row["state"]}:${row["result_delivery_state"]}:${speech.hashCode()}"
+        if (voiceTaskAnnouncementKey == key) return@LaunchedEffect
+        voiceTaskAnnouncementKey = key
+        response = speech
+        pending = false
+        android.util.Log.i("ThozhaLive", "event=voice_task_result_ready state=${row["state"]} result_delivery=${row["result_delivery_state"] ?: "not_applicable"} chars=${speech.length}")
+        if (state == VoiceControllerState.LISTENING) localVoice.cancel()
+        localVoice.speakNeural(speech, sid, kokoroVoice)
     }
 
     fun endCall() {
@@ -266,19 +331,14 @@ fun JarvisCallScreen(store: JarvisStore, onEnd: () -> Unit) {
             }
             BasicText("Jarvis Live", style = JarvisType.Title.copy(color = JarvisColor.Text))
             BasicText("%02d:%02d".format(seconds / 60, seconds % 60), style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
-            BasicText(when (state) {
-                VoiceControllerState.LISTENING -> "Listening"
-                VoiceControllerState.PROCESSING -> "Thinking"
-                VoiceControllerState.SPEAKING -> "Speaking"
-                VoiceControllerState.ERROR -> if (phoneFallback) "Listening · phone mode" else "Reconnecting"
-                VoiceControllerState.IDLE -> "Connecting"
-            }, style = JarvisType.Section.copy(color = JarvisColor.Sage))
+            BasicText(callConnectionLabel(state, phoneFallback, macReady), style = JarvisType.Section.copy(color = JarvisColor.Sage))
             BasicText(macStatus, style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+            BasicText(if (macReady) "Speech engine · Mac session" else "Speech engine · $speechEngine", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
             BasicText(if (transcript.isNotBlank()) transcript else "Speak naturally; Jarvis listens for the end of your turn.", style = JarvisType.Body.copy(color = JarvisColor.TextMuted))
             if (response.isNotBlank()) BasicText(response, style = JarvisType.Body.copy(color = JarvisColor.Text))
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            BasicText("Mac voice · $qwenSpeaker  /  Phone fallback · $kokoroVoice", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+            BasicText(if (macReady) "Mac voice · $qwenSpeaker  /  Phone voice · $kokoroVoice" else "Phone voice · $kokoroVoice  /  Android system voice if neural model is unavailable", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
             BasicText("Voice · $kokoroVoice", Modifier.clip(RoundedCornerShape(20.dp)).background(JarvisColor.Surface).clickable {
                 sid = if (sid in setOf(1, 9, 10)) 5 else 1
                 settings.edit().putInt("kokoro_sid", sid).apply()

@@ -13,6 +13,53 @@ data class VoiceOutputProfile(
 
 enum class VoiceRecognitionProvider { ON_DEVICE, SYSTEM_FALLBACK }
 
+/** UI state must describe the active phone fallback, not the unavailable Mac connection attempt. */
+internal fun callConnectionLabel(state: VoiceControllerState, phoneFallback: Boolean, macReady: Boolean): String = when {
+    macReady -> when (state) {
+        VoiceControllerState.LISTENING -> "Listening"
+        VoiceControllerState.PROCESSING -> "Thinking"
+        VoiceControllerState.SPEAKING -> "Speaking"
+        VoiceControllerState.ERROR -> "Mac voice disconnected"
+        VoiceControllerState.IDLE -> "Mac voice ready"
+    }
+    phoneFallback -> when (state) {
+        VoiceControllerState.LISTENING -> "Listening · phone mode"
+        VoiceControllerState.PROCESSING -> "Thinking · phone mode"
+        VoiceControllerState.SPEAKING -> "Speaking · phone mode"
+        VoiceControllerState.ERROR -> "Phone voice needs attention"
+        VoiceControllerState.IDLE -> "Phone mode · ready"
+    }
+    else -> when (state) {
+        VoiceControllerState.LISTENING -> "Listening"
+        VoiceControllerState.PROCESSING -> "Thinking"
+        VoiceControllerState.SPEAKING -> "Speaking"
+        VoiceControllerState.ERROR -> "Connection failed"
+        VoiceControllerState.IDLE -> "Connecting to Mac voice"
+    }
+}
+
+/** A task is spoken only after the durable row contains a delivered final result or terminal failure. */
+internal fun voiceTaskSpeech(row: Map<String, Any?>): String? {
+    val state = (row["state"] as? String)?.uppercase() ?: return null
+    val summary = (row["summary"] as? String)?.trim().orEmpty()
+    if (state == "WAITING_APPROVAL") return "This task is waiting for owner approval. Review it in Tasks to continue."
+    if (state == "COMPLETED") {
+        if (row["result_delivery_state"] == "PENDING") return null
+        if (summary.isBlank() || summary in setOf(
+                "Task completed",
+                "Task completed, but the Mac returned no result text.",
+                "Execution completed; retrieving the final answer.",
+                "Execution completed; waiting for the complete answer.",
+            )
+        ) return null
+        return summary
+    }
+    if (state in setOf("FAILED", "CANCELLED", "REJECTED", "EXPIRED", "INDETERMINATE")) {
+        return summary.takeIf(String::isNotBlank) ?: "The task ended with status ${state.lowercase()}."
+    }
+    return null
+}
+
 /** Small pure model so local voice selection can be regression-tested without Android services. */
 internal data class VoiceCandidate(
     val name: String,
@@ -66,9 +113,13 @@ internal object VoiceRecognitionRetryPolicy {
 
 internal object VoiceReconnectPolicy {
     const val maxAttempts = 5
+    const val recoveryDelayMs = 60_000L
 
     /** 1, 2, 4, 8, 16 seconds; zero means the bounded retry budget is exhausted. */
     fun delayMs(attempt: Int): Long = if (attempt in 0 until maxAttempts) 1_000L shl attempt else 0L
+
+    /** After the quick initial probes, keep phone mode active and check recovery once per minute. */
+    fun nextDelayMs(failedAttempts: Int): Long = delayMs(failedAttempts).takeIf { it > 0 } ?: recoveryDelayMs
 }
 
 internal object VoiceFocusPolicy {

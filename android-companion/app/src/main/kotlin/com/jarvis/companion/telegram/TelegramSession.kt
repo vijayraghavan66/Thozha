@@ -24,6 +24,8 @@ object TelegramSession {
     /** True only while the bot chat is resolved and Telegram reports the connection as online. */
     @Volatile var tunnelReady: Boolean = false
 
+    @Volatile private var retryStateStore: TelegramRetryStateStore? = null
+
     /** Jarvis Link relay requests carried over Telegram. Fails with IOException when the connection is not up. */
     val tunnel: TelegramRelayTunnel = TelegramRelayTunnel(
         sendFrame = { frame ->
@@ -36,8 +38,42 @@ object TelegramSession {
     /** The tunnel when Telegram is ready for Home traffic; otherwise null, which keeps the USB/HTTPS path. */
     fun activeTunnel(): com.jarvis.link.RelayTransport? = if (tunnelReady && frameSender != null) tunnel else null
 
+    internal fun retryState(): TelegramRetryState = retryStateStore?.state() ?: TelegramRetryState()
+
+    internal fun retryRemainingMs(): Long = retryStateStore?.remainingMs() ?: 0L
+
+    internal fun deferTransientRetry(): TelegramRetryState {
+        val state = retryStateStore?.deferTransientFailure() ?: TelegramRetryState()
+        controller?.onRateLimitUntil(state.retryUntilUnixMs)
+        return state
+    }
+
+    internal fun blockAutomaticRetry(reasonCode: String): TelegramRetryState {
+        val state = retryStateStore?.blockAutomaticRetry(reasonCode) ?: TelegramRetryState(blockedCode = reasonCode)
+        state.blockedCode?.let { controller?.onSendBlocked(it) }
+        return state
+    }
+
+    internal fun recordTransportSuccess(): TelegramRetryState {
+        val state = retryStateStore?.recordSuccess() ?: TelegramRetryState()
+        if (state.retryUntilUnixMs <= System.currentTimeMillis()) controller?.onRateLimitUntil(0L)
+        return state
+    }
+
+    internal fun retryStoreFor(filesDir: java.io.File): TelegramRetryStateStore = synchronized(this) {
+        retryStateStore ?: TelegramRetryStateStore(java.io.File(filesDir, "telegram_retry_state_v1.txt")).also {
+            retryStateStore = it
+        }
+    }
+
+    internal fun clearPermanentSendBlock(): TelegramRetryState {
+        val state = retryStateStore?.clearPermanentBlock() ?: TelegramRetryState()
+        controller?.clearSendBlock()
+        return state
+    }
+
     fun newTransport(filesDir: java.io.File, databaseKey: ByteArray): TelegramTransport =
-        TdlibTelegramTransport(filesDir, databaseKey)
+        TdlibTelegramTransport(filesDir, databaseKey, retryStateStore = retryStoreFor(filesDir))
 
     private val random = SecureRandom()
     private const val NONCE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
