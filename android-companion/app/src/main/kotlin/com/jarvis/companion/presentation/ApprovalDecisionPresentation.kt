@@ -30,6 +30,22 @@ data class ApprovalDecisionStatus(
 )
 
 object ApprovalDecisionPresentation {
+    /**
+     * Retry only an authoritative status read after a local decision request failed.
+     * The server's pending/consumed/rejected state decides whether that prior tap
+     * was delivered; this function never resubmits or changes the decision.
+     */
+    fun needsSupervisorReconciliation(status: ApprovalDecisionStatus): Boolean =
+        status.phase in setOf(
+            ApprovalDecisionPhase.SUBMITTING,
+            ApprovalDecisionPhase.INDETERMINATE,
+            ApprovalDecisionPhase.DELIVERED,
+            ApprovalDecisionPhase.APPROVED,
+            ApprovalDecisionPhase.EXECUTING,
+            ApprovalDecisionPhase.FAILED,
+            ApprovalDecisionPhase.UNKNOWN,
+        ) || (status.phase == ApprovalDecisionPhase.COMPLETED && status.operation.isBlank())
+
     /** A process death during an in-flight send leaves delivery uncertain until authoritative sync reconciles it. */
     fun afterRestart(previous: ApprovalDecisionStatus): ApprovalDecisionStatus =
         if (previous.phase == ApprovalDecisionPhase.SUBMITTING) previous.copy(phase = ApprovalDecisionPhase.UNKNOWN) else previous

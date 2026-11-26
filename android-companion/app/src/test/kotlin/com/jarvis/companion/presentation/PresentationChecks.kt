@@ -259,6 +259,14 @@ fun main() {
         "executed" to true, "success" to true,
     ), now + 5)!!
     check(completed.phase == ApprovalDecisionPhase.COMPLETED, "only executed, persisted success can show completed")
+    val locallyFailed = completed.copy(phase = ApprovalDecisionPhase.FAILED)
+    check(ApprovalDecisionPresentation.needsSupervisorReconciliation(locallyFailed), "a local decision failure still checks authoritative supervisor state")
+    check(ApprovalDecisionPresentation.authoritative(locallyFailed, mapOf(
+        "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
+        "decision" to "approve", "status" to "CONSUMED", "execution_state" to "COMPLETED",
+        "executed" to true, "success" to true,
+    ), now + 6)?.phase == ApprovalDecisionPhase.COMPLETED, "authoritative consumed completion repairs a stale local failure label")
+    check(!ApprovalDecisionPresentation.needsSupervisorReconciliation(completed.copy(phase = ApprovalDecisionPhase.REJECTED)), "terminal rejection needs no retry or status poll")
     check(ApprovalDecisionPresentation.authoritative(relayAccepted, mapOf(
         "kind" to "approval.decision_result", "approval_id" to "ap1", "task_id" to "task1",
         "decision" to "approve", "status" to "APPROVED", "execution_state" to "COMPLETED",

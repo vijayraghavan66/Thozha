@@ -1424,16 +1424,7 @@ class JarvisStore(private val app: Context) {
         val pollTime = System.currentTimeMillis()
         if (pollTime - lastSupervisorDecisionPollMs < SUPERVISOR_DECISION_POLL_INTERVAL_MS) return emptyMap()
         lastSupervisorDecisionPollMs = pollTime
-        val candidates = approvalDecisions.values.filter { status ->
-            status.phase in setOf(
-                ApprovalDecisionPhase.SUBMITTING,
-                ApprovalDecisionPhase.INDETERMINATE,
-                ApprovalDecisionPhase.DELIVERED,
-                ApprovalDecisionPhase.APPROVED,
-                ApprovalDecisionPhase.EXECUTING,
-                ApprovalDecisionPhase.UNKNOWN,
-            ) || (status.phase == ApprovalDecisionPhase.COMPLETED && status.operation.isBlank())
-        }
+        val candidates = approvalDecisions.values.filter(ApprovalDecisionPresentation::needsSupervisorReconciliation)
         val resolved = linkedMapOf<String, ApprovalDecisionStatus>()
         for (previous in candidates) {
             val row = conversation.firstOrNull {
