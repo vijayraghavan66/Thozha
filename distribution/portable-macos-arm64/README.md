@@ -1,10 +1,15 @@
 # Thozha Server for macOS Apple Silicon
 
-This is a portable ZIP distribution. It is not a macOS application installer.
+This is a portable ZIP distribution. It is not a Thozha macOS application installer.
 It contains a managed Python 3.13 server runtime, its production dependencies,
 the Web UI, the Codex CLI runtime, and a separate Python 3.14/OpenSSL 3.6 TLS
 runtime for the restricted companion gateway. No global Python or Node
 installation is needed to run the extracted bundle.
+
+The upstream CPython TLS runtime is distributed as a Python.framework and
+includes its standard `Python.app` executable launcher internally. This is a
+runtime component, not a Thozha application or installer; the ZIP has no
+Thozha `.app`, `.pkg`, or Store package.
 
 ## Start
 
