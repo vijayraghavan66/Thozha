@@ -51,6 +51,7 @@ import com.jarvis.companion.model.PairingStatus
 import com.jarvis.companion.model.TaskDetail
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import com.google.zxing.DecodeHintType
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.concurrent.ExecutorService
@@ -69,9 +70,11 @@ class AdvancedActivity : ComponentActivity() {
     private val qrScanner = registerForActivityResult(ScanContract()) { result ->
         val payload = result.contents
         if (payload.isNullOrBlank()) {
+            android.util.Log.i("ThozhaPairingQr", "scan_finished_without_result")
             statusMessage = "QR scan canceled or no code was read."
             render()
         } else {
+            android.util.Log.i("ThozhaPairingQr", "decode_callback chars=${payload.length}")
             handleInvitationQr(payload)
         }
     }
@@ -1243,10 +1246,12 @@ class AdvancedActivity : ComponentActivity() {
         qrScanner.launch(
             ScanOptions()
                 .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setCaptureActivity(PairingQrCaptureActivity::class.java)
                 .setPrompt("Scan the short-lived QR shown by Thozha on your Mac")
                 .setBeepEnabled(false)
                 .setBarcodeImageEnabled(false)
-                .setOrientationLocked(false),
+                .setOrientationLocked(true)
+                .addExtra(DecodeHintType.TRY_HARDER.name, true),
         )
     }
 

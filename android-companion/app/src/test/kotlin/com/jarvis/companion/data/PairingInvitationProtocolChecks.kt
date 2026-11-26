@@ -1,6 +1,15 @@
 package com.jarvis.companion.data
 
 import org.json.JSONObject
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
+import com.google.zxing.EncodeHintType
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.qrcode.QRCodeWriter
+import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import java.math.BigInteger
 import java.security.KeyFactory
 import java.security.Signature
@@ -55,7 +64,32 @@ object PairingInvitationProtocolChecks {
         expectRejected(invitation("openjarvis-pairing-v2", expiry = Instant.now().minusSeconds(10)))
         expectRejected(invitation("openjarvis-pairing-v2", expiry = Instant.now().plusSeconds(720)))
 
-        println("Pairing invitation protocol checks passed: v1 compatibility, signed v2 Wi-Fi URL/pin/address, strict host/port/address/pin/expiry and tamper rejection.")
+        val densePayload = invitation("openjarvis-pairing-v2", challenge = "c".repeat(480))
+        check(densePayload.length > 1_000) { "Long signed QR fixture is not representative" }
+        val bitmap = QRCodeWriter().encode(
+            densePayload,
+            BarcodeFormat.QR_CODE,
+            1_600,
+            1_600,
+            mapOf(
+                EncodeHintType.CHARACTER_SET to "UTF-8",
+                EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,
+            ),
+        )
+        val pixels = IntArray(bitmap.width * bitmap.height) { index ->
+            if (bitmap.get(index % bitmap.width, index / bitmap.width)) 0xff000000.toInt() else -1
+        }
+        val decoderHints = mapOf(DecodeHintType.TRY_HARDER to true)
+        val decoded = MultiFormatReader().decode(
+            BinaryBitmap(HybridBinarizer(RGBLuminanceSource(bitmap.width, bitmap.height, pixels))),
+            decoderHints,
+        ).text
+        check(decoded == densePayload) { "ZXing changed a long signed invitation payload" }
+        check(PairingInvitationParser.parse(decoded).challenge == "c".repeat(480)) {
+            "Long decoded invitation did not reach the production signature/parser path"
+        }
+
+        println("Pairing invitation protocol checks passed: v1/v2 validation, tamper/expiry rejection, and ZXing round-trip for a >1KB signed QR payload.")
     }
 
     private fun invitation(
@@ -66,6 +100,7 @@ object PairingInvitationProtocolChecks {
         loopbackUrl: String? = "http://127.0.0.1:18000",
         includeLoopback: Boolean = true,
         certificatePin: String = "sha256:" + "a".repeat(64),
+        challenge: String = "one-time-challenge-value-123456",
         expiry: Instant = Instant.now().plusSeconds(120),
     ): String {
         val fields = linkedMapOf(
@@ -74,7 +109,7 @@ object PairingInvitationProtocolChecks {
             "server_fingerprint" to SERVER_FINGERPRINT,
             "server_public_key" to PUBLIC_KEY,
             "invitation_id" to "1".repeat(32),
-            "challenge" to "one-time-challenge-value-123456",
+            "challenge" to challenge,
             "expires_at" to OffsetDateTime.ofInstant(expiry, ZoneOffset.UTC).toString(),
         )
         if (protocol.endsWith("v2")) {
