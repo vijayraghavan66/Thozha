@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import openjarvis.server.companion_wifi as wifi
-from openjarvis.server.companion_wifi import ensure_local_gateway_tls_identity, validate_wifi_bind_host
+from openjarvis.server.companion_wifi import ensure_local_gateway_tls_identity, local_gateway_loopback_port, validate_wifi_bind_host
 from openjarvis.server import companion_wifi_gateway
 from openjarvis.server.supervisor_routes import _canonical_pairing_payload, _pairing_server_identity, router
 from openjarvis.tasks.supervisor import SupervisorStore
@@ -37,6 +37,41 @@ def test_tls_identity_is_stable_private_and_hostname_bound(tmp_path):
     assert first.certificate_sha256 == "sha256:" + hashlib.sha256(certificate.public_bytes(serialization.Encoding.DER)).hexdigest()
     with pytest.raises(ValueError):
         ensure_local_gateway_tls_identity(tmp_path / "wifi", "attacker.local")
+
+
+def test_tls_identity_and_listener_probe_support_portable_alternate_port(tmp_path, monkeypatch):
+    identity = ensure_local_gateway_tls_identity(tmp_path / "portable-wifi", "thozha-portable.local", port=8444)
+    assert identity.port == 8444
+    certificate = x509.load_pem_x509_certificate(identity.certificate_path.read_bytes())
+    certificate_der = certificate.public_bytes(serialization.Encoding.DER)
+
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    class FakeTLS(FakeConnection):
+        def getpeercert(self, *, binary_form):
+            assert binary_form is True
+            return certificate_der
+
+    class FakeContext:
+        check_hostname = True
+        verify_mode = None
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def wrap_socket(self, _connection, *, server_hostname):
+            assert server_hostname == "thozha-portable.local"
+            return FakeTLS()
+
+    monkeypatch.setattr(wifi.ssl, "SSLContext", lambda _protocol: FakeContext())
+    monkeypatch.setattr(wifi.socket, "create_connection", lambda address, timeout: (address == ("192.168.1.8", 8444) and FakeConnection()) or (_ for _ in ()).throw(AssertionError("unexpected address")))
+    assert wifi.verify_local_gateway_tls_listener(
+        "192.168.1.8", "thozha-portable.local", 8444, identity.certificate_sha256,
+    )
+    assert local_gateway_loopback_port(8444) == 8002
+    assert local_gateway_loopback_port(8443) == 8001
+    with pytest.raises(ValueError):
+        local_gateway_loopback_port(8445)
 
 
 def test_tls_listener_probe_requires_exact_stored_certificate_and_sends_no_http(tmp_path, monkeypatch):
@@ -759,13 +794,16 @@ def test_wifi_qr_refuses_invalid_or_disabled_gateway_configuration(
     monkeypatch.setattr(supervisor, "_STORE_INSTANCE", None)
 
 
-def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_path, monkeypatch):
+@pytest.mark.parametrize("tls_port,loopback_port", [(8443, 8001), (8444, 8002)])
+def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_path, monkeypatch, tls_port, loopback_port):
     client, store = _pairing_test_client(tmp_path, monkeypatch)
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_ENABLED", "1")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_INTERFACE", "en0")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_ALLOWED_SSID", "HomeNet")
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_BIND_HOST", "192.168.1.8")
-    monkeypatch.setenv("JARVIS_COMPANION_WIFI_PORT", "8443")
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_PORT", str(tls_port))
+    monkeypatch.setenv("JARVIS_COMPANION_WIFI_LOOPBACK_PORT", str(loopback_port))
+    monkeypatch.setenv("JARVIS_COMPANION_LOOPBACK_API_BASE_URL", "http://127.0.0.1:18000")
     helper = _make_ssid_helper(tmp_path)
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_SSID_HELPER", str(helper))
     monkeypatch.setattr(wifi, "wifi_interface_ipv4_address", lambda _interface: "192.168.1.8")
@@ -799,13 +837,14 @@ def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_
     assert response.headers["cache-control"] == "no-store"
     payload = response.json()["qr_payload"]
     assert set(payload) == {
-        "protocol", "server_url", "gateway_address", "gateway_port", "gateway_certificate_sha256",
+        "protocol", "server_url", "loopback_url", "gateway_address", "gateway_port", "gateway_certificate_sha256",
         "server_fingerprint", "server_public_key", "invitation_id", "challenge", "expires_at", "server_signature",
     }
     assert payload["protocol"] == "openjarvis-pairing-v2"
-    assert payload["server_url"] == "https://thozha-mac.local:8443"
+    assert payload["server_url"] == f"https://thozha-mac.local:{tls_port}"
+    assert payload["loopback_url"] == "http://127.0.0.1:18000"
     assert payload["gateway_address"] == "192.168.1.8"
-    assert payload["gateway_port"] == "8443"
+    assert payload["gateway_port"] == str(tls_port)
     assert payload["gateway_certificate_sha256"] == "sha256:" + "a" * 64
     unsigned = dict(payload)
     signature = base64.b64decode(unsigned.pop("server_signature"), validate=True)

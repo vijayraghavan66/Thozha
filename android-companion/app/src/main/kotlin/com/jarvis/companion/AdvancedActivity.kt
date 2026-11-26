@@ -616,8 +616,13 @@ class AdvancedActivity : ComponentActivity() {
                     "The expiring device token is encrypted with Android Keystore. The signing private key never leaves Android Keystore.",
                     13, color(R.color.muted),
                 ).apply { setPadding(0, dp(10), 0, 0) })
+                addView(actionButton("Pair another Thozha server", R.color.signal, secondary = true) {
+                    requestCameraAndScan()
+                }.apply { setPadding(0, dp(12), 0, 0) })
             }
             gap(page, 12)
+            invitation?.let { drawAdditionalServerInvitation(page, it) }
+            pairingSession?.let { drawAdditionalServerPairingStatus(page, it) }
             drawPinnedServerMigration(page)
         } else {
             val currentInvitation = invitation
@@ -729,6 +734,7 @@ class AdvancedActivity : ComponentActivity() {
             }
         }
 
+        drawServerProfiles(page)
         gap(page, 12)
         card(page, compact = true) {
             addView(text("Local-only connection", 15, color(R.color.paper), bold = true))
@@ -739,6 +745,88 @@ class AdvancedActivity : ComponentActivity() {
         }
         gap(page, 12)
         drawJarvisLink(page)
+    }
+
+    private fun drawServerProfiles(page: LinearLayout) {
+        val profiles = runCatching { store.serverProfiles() }.getOrElse { emptyList() }
+        if (profiles.isEmpty() || (isPaired() && profiles.size < 2)) return
+        card(page) {
+            addView(text("Saved Mac servers", 18, color(R.color.paper), bold = true))
+            addView(text(
+                "Each server keeps its own Keystore-encrypted device token and TLS pins. Switching does not pair again or delete the other profile.",
+                13, color(R.color.muted),
+            ).apply { setPadding(0, dp(6), 0, dp(10)) })
+            profiles.forEach { profile ->
+                val shortFingerprint = profile.fingerprint.removePrefix("sha256:").take(12)
+                addView(text(
+                    "${profile.label} · $shortFingerprint${if (profile.active) " · ACTIVE" else ""}",
+                    13, if (profile.active) color(R.color.success) else color(R.color.paper),
+                    bold = profile.active,
+                ).apply { setPadding(0, dp(6), 0, dp(6)) })
+                if (!profile.active) {
+                    addView(actionButton("Switch to ${profile.label}", R.color.muted, secondary = true) {
+                        runCatching { store.activateServerProfile(profile.fingerprint) }
+                            .onSuccess {
+                                statusMessage = "Switched to the saved Mac profile. Its token and certificate pins were restored."
+                                errorMessage = ""
+                            }
+                            .onFailure {
+                                statusMessage = ""
+                                errorMessage = "The saved server profile could not be activated safely."
+                            }
+                        render()
+                    })
+                }
+            }
+        }
+        gap(page, 12)
+    }
+
+    private fun drawAdditionalServerInvitation(page: LinearLayout, currentInvitation: PairingInvitation) {
+        card(page) {
+            addView(text("Review new Mac server", 19, color(R.color.paper), bold = true))
+            addView(labelValue("SERVER URL", currentInvitation.serverUrl))
+            if (currentInvitation.gatewayAddress != null) {
+                addView(labelValue("SIGNED PRIVATE ADDRESS", "${currentInvitation.gatewayAddress}:${currentInvitation.gatewayPort}"))
+                addView(labelValue("TLS CERTIFICATE SHA-256", currentInvitation.gatewayCertificateSha256.orEmpty()))
+            }
+            addView(labelValue("MAC SERVER FINGERPRINT", currentInvitation.serverFingerprint))
+            addView(labelValue("EXPIRES", currentInvitation.expiresAt))
+            addView(text(
+                "Pairing adds a separate server profile. Your existing Mac token, server identity, and Wi-Fi pin stay encrypted and available.",
+                13, color(R.color.muted),
+            ).apply { setPadding(0, dp(8), 0, dp(10)) })
+            addView(actionButton(if (isBusy) "Sending signed pairing request…" else "Request pairing on this server", R.color.signal) {
+                requestPairing(currentInvitation)
+            })
+            if (pairingSession == null) {
+                addView(actionButton("Clear scanned invitation", R.color.muted, secondary = true) {
+                    resetLocalInvitation("Scanned invitation cleared; the Mac-side invitation expires on its own.")
+                })
+            }
+        }
+        gap(page, 12)
+    }
+
+    private fun drawAdditionalServerPairingStatus(page: LinearLayout, session: PairingSession) {
+        card(page) {
+            addView(text("New Mac confirmation", 19, color(R.color.paper), bold = true))
+            addView(labelValue("INVITATION ID", session.invitationId))
+            addView(labelValue("DEVICE NAME", api.deviceName()))
+            addView(labelValue("PHONE KEY FINGERPRINT", store.signingKeyFingerprint()))
+            when (val currentStatus = pairingStatus) {
+                PairingStatus.Pending, null -> {
+                    addView(text("Waiting for owner confirmation in Thozha Web", 14, color(R.color.warning), bold = true))
+                    addView(actionButton("Check status now", R.color.signal, secondary = true) {
+                        refreshPairingStatus()
+                    })
+                }
+                PairingStatus.Rejected -> addView(text("The Web owner rejected this server pairing. The existing server profile is unchanged.", 14, color(R.color.danger)))
+                PairingStatus.Expired -> addView(text("This invitation expired. Create a fresh QR to retry.", 14, color(R.color.warning)))
+                is PairingStatus.Approved -> addView(text("Owner approved this phone. Completing the signed claim…", 14, color(R.color.success)))
+            }
+        }
+        gap(page, 12)
     }
 
     /**

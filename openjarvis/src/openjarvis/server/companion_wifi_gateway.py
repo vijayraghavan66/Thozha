@@ -21,10 +21,11 @@ from pathlib import Path
 import uvicorn
 
 from openjarvis.core.paths import get_config_dir
-from openjarvis.server.companion_gateway import create_gateway_app
+from openjarvis.server.companion_gateway import create_gateway_app, configured_gateway_backend_url
 from openjarvis.server.companion_wifi import (
     ensure_local_gateway_tls_identity,
     local_gateway_hostname,
+    local_gateway_loopback_port,
     read_wifi_ssid,
     validate_wifi_bind_host,
     wifi_interface_ipv4_address,
@@ -32,7 +33,6 @@ from openjarvis.server.companion_wifi import (
 )
 
 _LOOPBACK_GATEWAY_HOST = "127.0.0.1"
-_LOOPBACK_GATEWAY_PORT = 8001
 def _wifi_address(interface: str) -> str:
     return wifi_interface_ipv4_address(interface)
 
@@ -104,9 +104,17 @@ def serve() -> None:
     if not _network_matches_allowlist(interface, allowed_ssid):
         raise RuntimeError("Current Wi-Fi network does not match the configured allowlist")
 
-    port = int(os.environ.get("JARVIS_COMPANION_WIFI_PORT", "8443"))
-    if port != 8443:
-        raise RuntimeError("Local Wi-Fi gateway uses fixed port 8443")
+    try:
+        port = int(os.environ.get("JARVIS_COMPANION_WIFI_PORT", "8443"))
+        loopback_port = int(os.environ.get("JARVIS_COMPANION_WIFI_LOOPBACK_PORT", "8001"))
+    except ValueError as exc:
+        raise RuntimeError("Local Wi-Fi gateway ports are invalid") from exc
+    try:
+        expected_loopback_port = local_gateway_loopback_port(port)
+    except ValueError as exc:
+        raise RuntimeError("Local Wi-Fi gateway must use a supported TLS/loopback port pair") from exc
+    if loopback_port != expected_loopback_port:
+        raise RuntimeError("Local Wi-Fi gateway must use a supported TLS/loopback port pair")
     hostname = local_gateway_hostname()
     tls_identity = ensure_local_gateway_tls_identity(
         get_config_dir() / "companion-wifi", hostname, port=port,
@@ -121,14 +129,14 @@ def serve() -> None:
     # terminate LAN TLS with the tested system Python 3.14/OpenSSL 3.6 runtime.
     # The proxy forwards only to this fixed loopback gateway, never to the raw API.
     try:
-        with socket.create_connection((_LOOPBACK_GATEWAY_HOST, _LOOPBACK_GATEWAY_PORT), timeout=0.2):
+        with socket.create_connection((_LOOPBACK_GATEWAY_HOST, loopback_port), timeout=0.2):
             raise RuntimeError("Loopback companion gateway port is already in use")
     except (ConnectionRefusedError, TimeoutError, OSError):
         pass
     loopback_server = uvicorn.Server(uvicorn.Config(
-        create_gateway_app(),
+        create_gateway_app(backend_url=configured_gateway_backend_url()),
         host=_LOOPBACK_GATEWAY_HOST,
-        port=_LOOPBACK_GATEWAY_PORT,
+        port=loopback_port,
         log_level="warning",
         access_log=False,
         proxy_headers=False,
@@ -156,6 +164,7 @@ def serve() -> None:
             "--port", str(port),
             "--certificate", str(tls_identity.certificate_path),
             "--private-key", str(tls_identity.private_key_path),
+            "--upstream-port", str(loopback_port),
         ]
         if os.environ.get("JARVIS_COMPANION_WIFI_DEBUG", "").strip() == "1":
             proxy_args.append("--debug")

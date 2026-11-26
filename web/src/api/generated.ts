@@ -1,4 +1,4 @@
-// Generated from openapi/thozha-v1.yaml at 0f0541d903d1aaa5144dda79881d853aa1ff8443.
+// Generated from openapi/thozha-v1.yaml at release branch OpenAPI.
 // Do not edit. Run npm run contract:generate.
 
 export interface paths {
@@ -512,7 +512,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Records the authenticated Mac installation owner's explicit decision. Approve permits only the invitation-scoped phone claim; it does not itself issue a device credential. Reject never creates a paired device. */
+        /** @description Records the authenticated Mac installation owner's explicit decision. Approve permits only the invitation-scoped phone claim; it does not itself issue a device credential. After the phone completes its invitation-bound key proof and claims its credential, the server creates an owner-scoped Web device mapping for this approving Web owner. The mapping is not active before claim. Reject never creates a paired device or Web mapping. */
         post: operations["decideWebPairingRequest"];
         delete?: never;
         options?: never;
@@ -1006,10 +1006,15 @@ export interface components {
             protocol: "openjarvis-pairing-v2";
             /** Format: uri */
             server_url: string;
+            /**
+             * Format: uri
+             * @description Optional signed loopback API URL used only by an explicitly configured USB reverse tunnel.
+             */
+            loopback_url?: string;
             /** Format: ipv4 */
             gateway_address: string;
-            /** @constant */
-            gateway_port: "8443";
+            /** @enum {string} */
+            gateway_port: "8443" | "8444";
             gateway_certificate_sha256: string;
             server_fingerprint: string;
             server_public_key: string;
@@ -1025,10 +1030,15 @@ export interface components {
             protocol: "openjarvis-pairing-v2";
             /** Format: uri */
             server_url: string;
+            /**
+             * Format: uri
+             * @description Optional signed loopback API URL used only by an explicitly configured USB reverse tunnel.
+             */
+            loopback_url?: string;
             /** Format: ipv4 */
             gateway_address: string;
-            /** @constant */
-            gateway_port: "8443";
+            /** @enum {string} */
+            gateway_port: "8443" | "8444";
             gateway_certificate_sha256: string;
             server_fingerprint: string;
             server_public_key: string;

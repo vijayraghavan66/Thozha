@@ -38,8 +38,8 @@ android {
         applicationId = "com.jarvis.companion"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
         buildConfigField("boolean", "FCM_CONFIGURED", hasFirebaseConfig.toString())
         manifestPlaceholders["fcmMessagingServiceEnabled"] = hasFirebaseConfig.toString()
         // Vivo V2514 is arm64-v8a. TDLib is built for this ABI only (official source build, see PROGRESS.md).
@@ -162,6 +162,17 @@ tasks.register<JavaExec>("verifyPairingInvitationProtocol") {
         layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
     ) + configurations.getByName("debugUnitTestRuntimeClasspath")
     mainClass.set("com.jarvis.companion.data.PairingInvitationProtocolChecks")
+}
+
+tasks.register<JavaExec>("verifyServerProfiles") {
+    group = "verification"
+    description = "Checks ciphertext-only multi-server profile migration and retention."
+    dependsOn("compileDebugUnitTestKotlin")
+    classpath = files(
+        layout.buildDirectory.dir("tmp/kotlin-classes/debug"),
+        layout.buildDirectory.dir("tmp/kotlin-classes/debugUnitTest"),
+    ) + configurations.getByName("debugUnitTestRuntimeClasspath")
+    mainClass.set("com.jarvis.companion.data.ServerProfileRecordsChecks")
 }
 
 tasks.register<JavaExec>("verifyLocalWifiPresentation") {

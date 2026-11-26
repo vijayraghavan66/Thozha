@@ -30,6 +30,17 @@ object PairingInvitationProtocolChecks {
         check(parsedV2.gatewayAddress == "192.168.1.8")
         check(parsedV2.gatewayPort == 8443)
         check(parsedV2.gatewayCertificateSha256 == "sha256:" + "a".repeat(64))
+        check(parsedV2.loopbackBaseUrl == "http://127.0.0.1:18000")
+
+        val legacyV2 = PairingInvitationParser.parse(invitation("openjarvis-pairing-v2", includeLoopback = false))
+        check(legacyV2.loopbackBaseUrl == "http://127.0.0.1:8000")
+
+        val portableV2 = PairingInvitationParser.parse(
+            invitation("openjarvis-pairing-v2", gatewayPort = 8444, loopbackUrl = "http://127.0.0.1:18000"),
+        )
+        check(portableV2.serverUrl == "https://thozha-mac.local:8444")
+        check(portableV2.gatewayPort == 8444)
+        check(portableV2.loopbackBaseUrl == "http://127.0.0.1:18000")
 
         expectRejected(v2.replace("192.168.1.8", "8.8.8.8")) // signature mismatch before routing
         expectRejected(invitation("openjarvis-pairing-v2", address = "8.8.8.8"))
@@ -38,6 +49,8 @@ object PairingInvitationProtocolChecks {
         expectRejected(invitation("openjarvis-pairing-v2", address = "192.168.001.008"))
         expectRejected(invitation("openjarvis-pairing-v2", serverUrl = "http://thozha-mac.local:8443"))
         expectRejected(invitation("openjarvis-pairing-v2", serverUrl = "https://thozha-mac.local:443"))
+        expectRejected(invitation("openjarvis-pairing-v2", gatewayPort = 8445))
+        expectRejected(invitation("openjarvis-pairing-v2", loopbackUrl = "http://192.168.1.8:18000"))
         expectRejected(invitation("openjarvis-pairing-v2", certificatePin = "sha256:xyz"))
         expectRejected(invitation("openjarvis-pairing-v2", expiry = Instant.now().minusSeconds(10)))
         expectRejected(invitation("openjarvis-pairing-v2", expiry = Instant.now().plusSeconds(720)))
@@ -49,12 +62,15 @@ object PairingInvitationProtocolChecks {
         protocol: String,
         serverUrl: String? = null,
         address: String = "192.168.1.8",
+        gatewayPort: Int = 8443,
+        loopbackUrl: String? = "http://127.0.0.1:18000",
+        includeLoopback: Boolean = true,
         certificatePin: String = "sha256:" + "a".repeat(64),
         expiry: Instant = Instant.now().plusSeconds(120),
     ): String {
         val fields = linkedMapOf(
             "protocol" to protocol,
-            "server_url" to (serverUrl ?: if (protocol.endsWith("v2")) "https://thozha-mac.local:8443" else "http://localhost:8000"),
+            "server_url" to (serverUrl ?: if (protocol.endsWith("v2")) "https://thozha-mac.local:$gatewayPort" else "http://localhost:8000"),
             "server_fingerprint" to SERVER_FINGERPRINT,
             "server_public_key" to PUBLIC_KEY,
             "invitation_id" to "1".repeat(32),
@@ -63,8 +79,9 @@ object PairingInvitationProtocolChecks {
         )
         if (protocol.endsWith("v2")) {
             fields["gateway_address"] = address
-            fields["gateway_port"] = "8443"
+            fields["gateway_port"] = gatewayPort.toString()
             fields["gateway_certificate_sha256"] = certificatePin
+            if (includeLoopback && loopbackUrl != null) fields["loopback_url"] = loopbackUrl
         }
         val signature = signer().apply {
             update(PairingInvitationSignature.canonicalBytes(fields))

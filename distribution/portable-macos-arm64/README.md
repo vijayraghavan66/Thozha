@@ -32,11 +32,14 @@ permissions. Do not share or publish the `data/` directory.
 For a loopback-only session, run `./bin/start.sh --local-only`. The raw API and
 Web UI bind only to `127.0.0.1`; no LAN listener or discovery is started.
 
-LAN pairing is disabled by default. To enable it, use the interactive first-run
-prompt while on the approved Wi-Fi network. The gateway verifies the exact
-SSID and interface, creates a server TLS identity in the private data folder,
-and binds only to that interface's current private IPv4 address. It preserves
-the existing enforced SSID policy and never exposes the raw supervisor API.
+LAN pairing is disabled by default. The portable instance uses its own
+restricted gateway pair: loopback `127.0.0.1:8002` and TLS `8444`. This lets a
+previous Thozha gateway on `8001/8443` remain available during a portable test.
+To enable it, use the interactive first-run prompt while on the approved
+Wi-Fi network. The gateway verifies the exact SSID and interface, creates a
+server TLS identity in the private data folder, and binds only to that
+interface's current private IPv4 address. It preserves the existing enforced
+SSID policy and never exposes the raw supervisor API.
 If macOS cannot verify the SSID or the policy changes, the gateway fails closed.
 Do not bypass that check. QR pairing remains subject to device proof and the
 normal owner approval flow.

@@ -240,6 +240,9 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
     }
 
     fun completePairing(invitation: PairingInvitation): PairingSession {
+        if (!secureStore.canSaveServerIdentity(invitation.serverFingerprint)) {
+            throw ApiException("This phone has no space for another saved Mac profile. Existing pairings were left unchanged.")
+        }
         val base = pairingBase(invitation)
         val body = JSONObject()
             .put("device_name", deviceName())
@@ -301,7 +304,7 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             serverFingerprint = invitation.serverFingerprint,
             // Keep the established loopback base as the USB recovery route. The signed Wi-Fi pin
             // separately selects HTTPS when reverse is absent; it never replaces the credential.
-            baseUrl = if (wifiPin != null) "http://127.0.0.1:8000" else invitation.serverUrl,
+            baseUrl = if (wifiPin != null) invitation.loopbackBaseUrl ?: "http://127.0.0.1:8000" else invitation.serverUrl,
             localGatewayPin = wifiPin,
         )
         return PairedDevice(deviceId, token, expiresAt)

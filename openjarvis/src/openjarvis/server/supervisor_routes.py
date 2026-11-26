@@ -436,6 +436,8 @@ def create_signed_pairing_qr(
             "challenge": challenge,
             "expires_at": expires,
         }
+        if wifi.get("loopback_url"):
+            qr_payload["loopback_url"] = wifi["loopback_url"]
     canonical = _canonical_pairing_payload(qr_payload)
     qr_payload["server_signature"] = base64.b64encode(
         private_key.sign(canonical, ec.ECDSA(hashes.SHA256()))
@@ -449,6 +451,7 @@ def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:
         ensure_local_gateway_tls_identity,
         local_gateway_hostname,
         read_wifi_ssid,
+        SUPPORTED_WIFI_PORTS,
         validate_wifi_bind_host,
         wifi_gateway_enabled,
         wifi_interface_ipv4_address,
@@ -486,9 +489,28 @@ def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:
         port = int(raw_port)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail="The Wi-Fi gateway port is invalid") from exc
-    # The TLS front end has a fixed supported port. Do not sign an endpoint the runner rejects.
-    if port != 8443:
-        raise HTTPException(status_code=409, detail="The Wi-Fi gateway must use port 8443")
+    if port not in SUPPORTED_WIFI_PORTS:
+        raise HTTPException(status_code=409, detail="The Wi-Fi gateway port is not supported")
+
+    loopback_url = os.environ.get("JARVIS_COMPANION_LOOPBACK_API_BASE_URL", "").strip().rstrip("/")
+    if loopback_url:
+        try:
+            loopback = urlsplit(loopback_url)
+            if (
+                loopback.scheme != "http"
+                or loopback.hostname not in {"127.0.0.1", "localhost"}
+                or loopback.username is not None
+                or loopback.password is not None
+                or loopback.query
+                or loopback.fragment
+                or loopback.path not in {"", "/"}
+                or loopback.port is None
+                or not 1024 <= loopback.port <= 65535
+            ):
+                raise ValueError("invalid loopback API endpoint")
+            loopback_url = f"http://127.0.0.1:{loopback.port}"
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="The loopback API endpoint is invalid") from exc
 
     try:
         hostname = local_gateway_hostname()
@@ -514,12 +536,15 @@ def _local_wifi_pairing_parameters(store: Any) -> dict[str, str]:
         logger.info("Local Wi-Fi gateway not ready (%s)", type(exc).__name__)
         raise HTTPException(status_code=409, detail="The local Wi-Fi gateway is not accepting the stored TLS identity") from exc
 
-    return {
+    result = {
         "server_url": f"https://{hostname}:{port}",
         "gateway_address": actual_address,
         "gateway_port": str(port),
         "gateway_certificate_sha256": tls_identity.certificate_sha256,
     }
+    if loopback_url:
+        result["loopback_url"] = loopback_url
+    return result
 
 
 # Compatibility alias for the previous internal API name. It follows the same

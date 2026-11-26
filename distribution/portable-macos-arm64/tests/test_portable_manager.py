@@ -63,6 +63,8 @@ class PortableManagerTests(unittest.TestCase):
                 "bind_ipv4": "192.168.1.20",
                 "hostname": "thozha-identity.local",
                 "certificate_sha256": "sha256:" + "a" * 64,
+                "gateway_port": 8444,
+                "loopback_port": 8002,
             }
             policy_path.write_text(json.dumps(original))
             with (
@@ -73,6 +75,8 @@ class PortableManagerTests(unittest.TestCase):
             self.assertEqual(updated["bind_ipv4"], "192.168.1.21")
             self.assertEqual(updated["hostname"], original["hostname"])
             self.assertEqual(updated["certificate_sha256"], original["certificate_sha256"])
+            self.assertEqual(updated["gateway_port"], 8444)
+            self.assertEqual(updated["loopback_port"], 8002)
 
     def test_gateway_fails_closed_when_ssid_cannot_be_verified(self):
         with tempfile.TemporaryDirectory() as root:
@@ -91,6 +95,10 @@ class PortableManagerTests(unittest.TestCase):
             with patch.object(manager, "GATEWAY_POLICY", policy_path):
                 self.assertIsNone(manager._prepare_gateway({}, local_only=True))
             self.assertFalse(policy_path.exists())
+
+    def test_portable_gateway_uses_isolated_supported_port_pair(self):
+        self.assertEqual(manager.PORTABLE_LOOPBACK_GATEWAY_PORT, 8002)
+        self.assertEqual(manager.PORTABLE_TLS_PORT, 8444)
 
     def test_base_environment_does_not_inherit_provider_secrets(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "must-not-pass", "OTHER_TOKEN": "also-private"}, clear=False):

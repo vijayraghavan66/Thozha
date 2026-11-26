@@ -57,6 +57,23 @@ class SecureStore(context: Context) {
             .apply()
     }
 
+    /** Reject a full multi-server vault before the phone creates a one-time pairing claim. */
+    fun canSaveServerIdentity(serverFingerprint: String): Boolean {
+        val candidate = try { normalizeFingerprint(serverFingerprint) } catch (_: Exception) { return false }
+        if (!candidate.matches(Regex("sha256:[0-9a-f]{64}"))) return false
+        val current = try { pinnedServerIdentity() } catch (_: Exception) { return false }
+        if (current == null && (!token().isNullOrBlank() || deviceId().isNotBlank())) return false
+        val records = runCatching { ServerProfileRecords.parse(prefs.getString(KEY_SERVER_PROFILES, null)) }.getOrNull()
+            ?: return false
+        if (current?.fingerprint?.let { MessageDigest.isEqual(it.toByteArray(), candidate.toByteArray()) } == true) return true
+        val id = ServerProfileRecords.id(candidate)
+        val missingProfiles = setOfNotNull(
+            current?.let { ServerProfileRecords.id(it.fingerprint) },
+            id,
+        ).count { it !in records }
+        return records.size + missingProfiles <= ServerProfileRecords.MAX_PROFILES
+    }
+
     /** Atomically persists the device credential and the server key authenticated by its QR. */
     fun savePairingWithServerIdentity(
         deviceId: String,
@@ -69,19 +86,18 @@ class SecureStore(context: Context) {
         require(token.isNotBlank())
         val pin = validateServerIdentity(serverPublicKeyDer, serverFingerprint)
         val existing = pinnedServerIdentity()
-        if (existing != null && !sameServerIdentity(existing, pin)) {
-            throw SecurityException("The Mac server identity changed from the pinned key.")
-        }
         localGatewayPin?.let(::validateLocalGatewayPin)
         val (tokenIv, tokenCipher) = encrypt(token)
         val (pinIv, pinCipher) = encrypt(pinRecord(pin))
-        val edit = prefs.edit()
-            .putString(KEY_DEVICE_ID, deviceId)
-            .putString(KEY_TOKEN_IV, encode(tokenIv))
-            .putString(KEY_TOKEN_CIPHER, encode(tokenCipher))
-            .putString(KEY_SERVER_PIN_IV, encode(pinIv))
-            .putString(KEY_SERVER_PIN_CIPHER, encode(pinCipher))
-        baseUrl?.let { edit.putString(KEY_BASE_URL, it.trim().trimEnd('/')) }
+        val normalizedBaseUrl = baseUrl?.trim()?.trimEnd('/') ?: baseUrl()
+        val newFields = linkedMapOf(
+            KEY_BASE_URL to normalizedBaseUrl,
+            KEY_DEVICE_ID to deviceId,
+            KEY_TOKEN_IV to encode(tokenIv),
+            KEY_TOKEN_CIPHER to encode(tokenCipher),
+            KEY_SERVER_PIN_IV to encode(pinIv),
+            KEY_SERVER_PIN_CIPHER to encode(pinCipher),
+        )
         if (localGatewayPin != null) {
             val wifiRecord = listOfNotNull(
                 localGatewayPin.hostname,
@@ -90,10 +106,110 @@ class SecureStore(context: Context) {
                 localGatewayPin.address,
             ).joinToString("\n")
             val (wifiIv, wifiCipher) = encrypt(wifiRecord)
-            edit.putString(KEY_WIFI_PIN_IV, encode(wifiIv))
-                .putString(KEY_WIFI_PIN_CIPHER, encode(wifiCipher))
+            newFields[KEY_WIFI_PIN_IV] = encode(wifiIv)
+            newFields[KEY_WIFI_PIN_CIPHER] = encode(wifiCipher)
         }
+        val profiles = ServerProfileRecords.parse(prefs.getString(KEY_SERVER_PROFILES, null))
+        if (existing != null) {
+            val oldLabel = runCatching { this.localGatewayPin()?.hostname }.getOrNull()
+                ?: baseUrl().ifBlank { "Saved Mac ${existing.fingerprint.takeLast(8)}" }
+            profiles[ServerProfileRecords.id(existing.fingerprint)] = ServerProfileRecords.record(
+                existing.fingerprint,
+                oldLabel,
+                currentProfileFields(),
+            )
+        }
+        val newLabel = localGatewayPin?.hostname ?: normalizedBaseUrl
+        profiles[ServerProfileRecords.id(pin.fingerprint)] = ServerProfileRecords.record(
+            pin.fingerprint,
+            newLabel,
+            newFields,
+        )
+        if (profiles.size > ServerProfileRecords.MAX_PROFILES) {
+            throw SecurityException("Saved Mac server profile limit reached. Select and remove an unused server before pairing another.")
+        }
+        val edit = prefs.edit()
+        applyProfileFields(edit, newFields)
+        edit.putString(KEY_SERVER_PROFILES, ServerProfileRecords.encode(profiles))
+            .putString(KEY_ACTIVE_SERVER_PROFILE, pin.fingerprint)
         edit.apply()
+    }
+
+    /** Returns safe labels and public fingerprints; credentials and key material are never returned. */
+    fun serverProfiles(): List<ServerProfileSummary> {
+        val current = pinnedServerIdentity()
+        val activeFingerprint = prefs.getString(KEY_ACTIVE_SERVER_PROFILE, current?.fingerprint).orEmpty()
+        val records = ServerProfileRecords.parse(prefs.getString(KEY_SERVER_PROFILES, null))
+        val result = linkedMapOf<String, ServerProfileSummary>()
+        current?.let { identity ->
+            result[ServerProfileRecords.id(identity.fingerprint)] = ServerProfileSummary(
+                identity.fingerprint,
+                runCatching { localGatewayPin()?.hostname }.getOrNull() ?: baseUrl(),
+                identity.fingerprint == activeFingerprint,
+            )
+        }
+        records.values.forEach { record ->
+            val id = ServerProfileRecords.id(record.fingerprint)
+            result[id] = ServerProfileSummary(record.fingerprint, record.label, record.fingerprint == activeFingerprint)
+        }
+        return result.values.toList()
+    }
+
+    /** Switches only among previously paired servers whose credentials remain Keystore-encrypted. */
+    fun activateServerProfile(fingerprint: String) {
+        val targetId = ServerProfileRecords.id(fingerprint)
+        val current = pinnedServerIdentity()
+        if (current?.fingerprint == fingerprint) return
+        val profiles = ServerProfileRecords.parse(prefs.getString(KEY_SERVER_PROFILES, null))
+        current?.let { identity ->
+            profiles[ServerProfileRecords.id(identity.fingerprint)] = ServerProfileRecords.record(
+                identity.fingerprint,
+                runCatching { localGatewayPin()?.hostname }.getOrNull() ?: baseUrl(),
+                currentProfileFields(),
+            )
+        }
+        val target = profiles[targetId]
+            ?: throw SecurityException("This server has no saved pairing profile.")
+        val targetPin = serverIdentityFromFields(target.fields)
+        if (targetPin.fingerprint != target.fingerprint) {
+            throw SecurityException("Saved server profile identity does not match its encrypted pin.")
+        }
+        if (target.fields[KEY_DEVICE_ID].isNullOrBlank() ||
+            target.fields[KEY_TOKEN_IV].isNullOrBlank() ||
+            target.fields[KEY_TOKEN_CIPHER].isNullOrBlank() ||
+            target.fields[KEY_BASE_URL].isNullOrBlank()
+        ) throw SecurityException("Saved server profile credentials are incomplete.")
+        val edit = prefs.edit()
+        PROFILE_FIELD_KEYS.forEach { edit.remove(it) }
+        applyProfileFields(edit, target.fields)
+        edit.putString(KEY_SERVER_PROFILES, ServerProfileRecords.encode(profiles))
+            .putString(KEY_ACTIVE_SERVER_PROFILE, target.fingerprint)
+            .apply()
+    }
+
+    private fun currentProfileFields(): Map<String, String> = PROFILE_FIELD_KEYS.mapNotNull { key ->
+        prefs.getString(key, null)?.let { key to it }
+    }.toMap()
+
+    private fun serverIdentityFromFields(fields: Map<String, String>): PinnedServerIdentity {
+        val iv = fields[KEY_SERVER_PIN_IV] ?: throw SecurityException("Saved server profile identity is missing.")
+        val ciphertext = fields[KEY_SERVER_PIN_CIPHER] ?: throw SecurityException("Saved server profile identity is incomplete.")
+        val record = try { decrypt(decode(iv), decode(ciphertext)) } catch (_: Exception) {
+            throw SecurityException("Saved server profile identity failed integrity validation.")
+        }
+        val separator = record.indexOf('\n')
+        if (separator <= 0 || separator == record.lastIndex) throw SecurityException("Saved server profile identity is malformed.")
+        val der = try { decode(record.substring(separator + 1)) } catch (_: Exception) {
+            throw SecurityException("Saved server public key is malformed.")
+        }
+        return validateServerIdentity(der, record.substring(0, separator))
+    }
+
+    private fun applyProfileFields(edit: android.content.SharedPreferences.Editor, fields: Map<String, String>) {
+        fields.forEach { (key, value) ->
+            if (key !in PROFILE_FIELD_KEYS) throw SecurityException("Unsupported saved server profile field.")
+            edit.putString(key, value)
+        }
     }
 
     fun pinnedServerIdentity(): PinnedServerIdentity? {
@@ -186,7 +302,16 @@ class SecureStore(context: Context) {
     }
 
     fun clearPairing() {
-        prefs.edit().remove(KEY_DEVICE_ID).remove(KEY_TOKEN_IV).remove(KEY_TOKEN_CIPHER).apply()
+        val current = pinnedServerIdentity()
+        val profiles = ServerProfileRecords.parse(prefs.getString(KEY_SERVER_PROFILES, null))
+        current?.let { profiles.remove(ServerProfileRecords.id(it.fingerprint)) }
+        prefs.edit()
+            .remove(KEY_DEVICE_ID).remove(KEY_TOKEN_IV).remove(KEY_TOKEN_CIPHER)
+            .remove(KEY_SERVER_PIN_IV).remove(KEY_SERVER_PIN_CIPHER)
+            .remove(KEY_WIFI_PIN_IV).remove(KEY_WIFI_PIN_CIPHER)
+            .remove(KEY_ACTIVE_SERVER_PROFILE)
+            .putString(KEY_SERVER_PROFILES, ServerProfileRecords.encode(profiles))
+            .apply()
     }
 
     fun pushNotificationsEnabled(): Boolean =
@@ -372,6 +497,12 @@ class SecureStore(context: Context) {
         private const val KEY_SERVER_PIN_CIPHER = "server_pin_ciphertext"
         private const val KEY_WIFI_PIN_IV = "wifi_pin_iv"
         private const val KEY_WIFI_PIN_CIPHER = "wifi_pin_ciphertext"
+        private const val KEY_SERVER_PROFILES = "paired_server_profiles_v1"
+        private const val KEY_ACTIVE_SERVER_PROFILE = "active_server_profile_fingerprint"
+        private val PROFILE_FIELD_KEYS = setOf(
+            KEY_BASE_URL, KEY_DEVICE_ID, KEY_TOKEN_IV, KEY_TOKEN_CIPHER,
+            KEY_SERVER_PIN_IV, KEY_SERVER_PIN_CIPHER, KEY_WIFI_PIN_IV, KEY_WIFI_PIN_CIPHER,
+        )
         private const val KEY_MAC_CONNECTED_AT = "mac_connected_at"
         private const val KEY_MAC_TRANSPORT = "mac_transport"
         private const val KEY_PUSH_NOTIFICATIONS_ENABLED = "push_notifications_enabled"

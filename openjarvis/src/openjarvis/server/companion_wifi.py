@@ -25,6 +25,16 @@ from cryptography.x509.oid import NameOID
 
 _LOCAL_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local$")
 _WIFI_PORT = 8443
+SUPPORTED_WIFI_PORTS = frozenset({8443, 8444})
+WIFI_LOOPBACK_PORTS = {8443: 8001, 8444: 8002}
+
+
+def local_gateway_loopback_port(tls_port: int) -> int:
+    """Return only the fixed TLS-to-restricted-gateway port mapping."""
+    try:
+        return WIFI_LOOPBACK_PORTS[int(tls_port)]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Local companion gateway port is unsupported") from exc
 _SSID_HELPER_TIMEOUT_SECONDS = 3
 _MAX_SSID_UTF8_BYTES = 32
 _MAX_SSID_HELPER_OUTPUT_BYTES = 64
@@ -94,8 +104,9 @@ def verify_local_gateway_tls_listener(
     the trust check performed by the Android client as well.
     """
     bind_address = validate_wifi_bind_host(address)
-    if not _LOCAL_HOST_RE.fullmatch(hostname) or int(port) != _WIFI_PORT:
+    if not _LOCAL_HOST_RE.fullmatch(hostname):
         raise ValueError("local gateway TLS endpoint is invalid")
+    local_gateway_loopback_port(port)
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_certificate_sha256):
         raise ValueError("local gateway TLS fingerprint is invalid")
     if not 0.05 <= timeout <= 3.0:

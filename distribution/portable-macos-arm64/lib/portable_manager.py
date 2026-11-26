@@ -30,6 +30,8 @@ LOCK = RUN / "server.lock"
 WEB_AUTH = DATA / "config" / "web-auth.json"
 GATEWAY_POLICY = DATA / "config" / "gateway-policy.json"
 SERVER_IDENTITY = DATA / "config" / "server-identity.json"
+PORTABLE_TLS_PORT = 8444
+PORTABLE_LOOPBACK_GATEWAY_PORT = 8002
 
 
 class PortableError(RuntimeError):
@@ -248,18 +250,27 @@ def _prepare_gateway(
         hostname = hostname or f"thozha-{secrets.token_hex(16)[:12]}.local"
         from openjarvis.server.companion_wifi import ensure_local_gateway_tls_identity
 
-        identity = ensure_local_gateway_tls_identity(DATA / "openjarvis" / "companion-wifi", hostname, port=8443)
+        identity = ensure_local_gateway_tls_identity(
+            DATA / "openjarvis" / "companion-wifi", hostname, port=PORTABLE_TLS_PORT
+        )
         policy = {
             "interface": interface,
             "allowed_ssid": ssid,
             "bind_ipv4": address,
             "hostname": identity.hostname,
             "certificate_sha256": identity.certificate_sha256,
+            "gateway_port": PORTABLE_TLS_PORT,
+            "loopback_port": PORTABLE_LOOPBACK_GATEWAY_PORT,
         }
         _atomic_private_json(GATEWAY_POLICY, policy)
     else:
         if policy.get("interface") != interface or policy.get("allowed_ssid") != ssid:
             raise PortableError("Current network differs from the saved allowlist; gateway remains disabled.")
+        if (
+            policy.get("gateway_port") != PORTABLE_TLS_PORT
+            or policy.get("loopback_port") != PORTABLE_LOOPBACK_GATEWAY_PORT
+        ):
+            raise PortableError("Saved gateway port pair is unsupported; refusing to rewrite its policy.")
         policy["bind_ipv4"] = address  # DHCP change on the same verified interface/SSID.
         _atomic_private_json(GATEWAY_POLICY, policy)
     return policy
@@ -269,6 +280,15 @@ def _port_available(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
         return sock.connect_ex((host, port)) != 0
+
+
+def _bind_available(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+        return True
 
 
 def _health(port: int) -> bool:
@@ -482,7 +502,10 @@ def start(args) -> int:
     local_only = args.local_only or os.environ.get("THOZHA_PORTABLE_LOCAL_ONLY") == "1"
     if not 1024 <= api_port <= 65535 or not _port_available("127.0.0.1", api_port):
         raise PortableError(f"Loopback API port {api_port} is unavailable; no service was started.")
-    if not local_only and (not _port_available("127.0.0.1", 8001) or not _port_available("127.0.0.1", 8443)):
+    if not local_only and (
+        not _bind_available("127.0.0.1", PORTABLE_LOOPBACK_GATEWAY_PORT)
+        or not _bind_available("0.0.0.0", PORTABLE_TLS_PORT)
+    ):
         raise PortableError("A gateway port is already in use; refusing to create a duplicate service.")
 
     # Authentication is an explicit first-run owner action. Run it before
@@ -505,6 +528,7 @@ def start(args) -> int:
             "THOZHA_WEB_ORIGIN": f"http://127.0.0.1:{api_port}",
             "THOZHA_WEB_SESSION_DB": str(DATA / "openjarvis/thozha_web_sessions.db"),
             "THOZHA_WEB_ALLOW_INSECURE_LOOPBACK_DEV": "1",
+            "JARVIS_COMPANION_BACKEND_URL": f"http://127.0.0.1:{api_port}",
         }
     )
     if gateway_policy:
@@ -514,7 +538,9 @@ def start(args) -> int:
                 "JARVIS_COMPANION_WIFI_INTERFACE": gateway_policy["interface"],
                 "JARVIS_COMPANION_WIFI_ALLOWED_SSID": gateway_policy["allowed_ssid"],
                 "JARVIS_COMPANION_WIFI_BIND_HOST": gateway_policy["bind_ipv4"],
-                "JARVIS_COMPANION_WIFI_PORT": "8443",
+                "JARVIS_COMPANION_WIFI_PORT": str(gateway_policy["gateway_port"]),
+                "JARVIS_COMPANION_WIFI_LOOPBACK_PORT": str(gateway_policy["loopback_port"]),
+                "JARVIS_COMPANION_LOOPBACK_API_BASE_URL": f"http://127.0.0.1:{api_port}",
                 "JARVIS_COMPANION_WIFI_HOSTNAME": gateway_policy["hostname"],
                 "JARVIS_COMPANION_WIFI_TLS_CERT_SHA256": gateway_policy["certificate_sha256"],
                 "JARVIS_COMPANION_TLS_PROXY_PYTHON": str(ROOT / "runtime/tls-python/bin/python3.14"),
@@ -606,7 +632,10 @@ def start(args) -> int:
                     _write_state(state_doc)
                     _wait_api(api_port, children[name], timeout=40)
                 else:
-                    if not _port_available("127.0.0.1", 8001) or not _port_available("127.0.0.1", 8443):
+                    if (
+                        not _bind_available("127.0.0.1", PORTABLE_LOOPBACK_GATEWAY_PORT)
+                        or not _bind_available("0.0.0.0", PORTABLE_TLS_PORT)
+                    ):
                         raise PortableError("Gateway ports were claimed after a crash; refusing to attach to an unknown service.")
                     children[name] = subprocess.Popen(
                         [python, "-m", "openjarvis.server.companion_wifi_gateway"],

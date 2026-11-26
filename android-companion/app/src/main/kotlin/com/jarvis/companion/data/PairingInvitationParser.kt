@@ -17,7 +17,9 @@ internal object PairingInvitationParser {
         "protocol", "server_url", "server_fingerprint", "server_public_key",
         "invitation_id", "challenge", "expires_at", "server_signature",
     )
-    private val v2Keys = v1Keys + setOf("gateway_address", "gateway_port", "gateway_certificate_sha256")
+    private val v2LegacyKeys = v1Keys + setOf("gateway_address", "gateway_port", "gateway_certificate_sha256")
+    private val v2Keys = v2LegacyKeys + "loopback_url"
+    private val supportedWifiPorts = setOf(8443, 8444)
     private val localHostname = Regex("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.local")
 
     fun parse(rawPayload: String): PairingInvitation {
@@ -31,7 +33,7 @@ internal object PairingInvitationParser {
         }
         val protocol = json.optString("protocol")
         if ((protocol == "openjarvis-pairing-v1" && actualKeys != v1Keys) ||
-            (protocol == "openjarvis-pairing-v2" && actualKeys != v2Keys) ||
+            (protocol == "openjarvis-pairing-v2" && actualKeys !in setOf(v2LegacyKeys, v2Keys)) ||
             protocol !in setOf("openjarvis-pairing-v1", "openjarvis-pairing-v2")
         ) throw ApiException("The invitation QR has unexpected or missing fields. Scan a fresh Jarvis QR.")
 
@@ -77,6 +79,11 @@ internal object PairingInvitationParser {
                 requiredString(json, "gateway_certificate_sha256"),
             )
         } else null
+        val loopbackBaseUrl = if (protocol == "openjarvis-pairing-v2" && json.has("loopback_url")) {
+            validateLoopbackBaseUrl(requiredString(json, "loopback_url"))
+        } else if (protocol == "openjarvis-pairing-v2") {
+            "http://127.0.0.1:8000"
+        } else null
 
         val publicDer = Base64.getDecoder().decode(serverKey)
         return PairingInvitation(
@@ -91,6 +98,7 @@ internal object PairingInvitationParser {
             gatewayAddress = local?.address,
             gatewayPort = local?.port,
             gatewayCertificateSha256 = local?.certificateSha256,
+            loopbackBaseUrl = loopbackBaseUrl,
         )
     }
 
@@ -107,7 +115,7 @@ internal object PairingInvitationParser {
         }
         val hostname = uri.host?.lowercase().orEmpty()
         val port = portText.toIntOrNull()
-        if (!uri.scheme.equals("https", true) || !localHostname.matches(hostname) || uri.port != 8443 || port != 8443 ||
+        if (!uri.scheme.equals("https", true) || !localHostname.matches(hostname) || port !in supportedWifiPorts || uri.port != port ||
             uri.userInfo != null || uri.query != null || uri.fragment != null ||
             (!uri.path.isNullOrBlank() && uri.path != "/")
         ) throw ApiException("This Wi-Fi invitation does not target a supported local Mac gateway.")

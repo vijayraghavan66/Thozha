@@ -75,9 +75,10 @@ def _pairing_app(tmp_path, monkeypatch):
         supervisor_routes,
         "_local_wifi_pairing_parameters",
         lambda _store: {
-            "server_url": "https://thozha-test.local:8443",
+            "server_url": "https://thozha-test.local:8444",
+            "loopback_url": "http://127.0.0.1:8000",
             "gateway_address": "192.168.1.44",
-            "gateway_port": "8443",
+            "gateway_port": "8444",
             "gateway_certificate_sha256": "sha256:" + "1" * 64,
         },
     )
@@ -191,7 +192,7 @@ def test_web_owner_creates_wifi_qr_and_android_pairs_through_real_gateway_routes
     assert response.headers["cache-control"] == "no-store"
     qr = response.json()["qr_payload"]
     assert qr["protocol"] == "openjarvis-pairing-v2"
-    assert qr["server_url"] == "https://thozha-test.local:8443"
+    assert qr["server_url"] == "https://thozha-test.local:8444"
     assert qr["gateway_address"] == "192.168.1.44"
     assert qr["gateway_certificate_sha256"] == "sha256:" + "1" * 64
     server_der = base64.b64decode(qr["server_public_key"], validate=True)

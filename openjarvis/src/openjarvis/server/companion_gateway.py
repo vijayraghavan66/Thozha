@@ -47,6 +47,30 @@ _TASK_EVENTS_REAUTH_SECONDS = 10.0
 _TASK_EVENTS_HEARTBEAT_SECONDS = 15.0
 
 
+def configured_gateway_backend_url(environ: dict[str, str] | None = None) -> str:
+    """Resolve a loopback-only raw API URL for supervised gateway deployments."""
+    source = os.environ if environ is None else environ
+    value = source.get("JARVIS_COMPANION_BACKEND_URL", BACKEND_URL).strip()
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Gateway backend URL is malformed") from exc
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or port is None
+        or not 1024 <= port <= 65535
+    ):
+        raise ValueError("Gateway backend URL must be a port-qualified HTTP loopback address")
+    return f"http://127.0.0.1:{port}"
+
+
 class ReadOnlyGatewayStore:
     """Read the shared device table without running task restart recovery."""
 
@@ -222,7 +246,17 @@ def create_gateway_app(
 ) -> FastAPI:
     """Create the strict companion-only ASGI app; no catch-all routes exist."""
     backend = urlsplit(backend_url)
-    if backend.scheme != "http" or backend.hostname not in {"127.0.0.1", "localhost", "::1"}:
+    if (
+        backend.scheme != "http"
+        or backend.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or backend.username is not None
+        or backend.password is not None
+        or backend.path not in {"", "/"}
+        or backend.query
+        or backend.fragment
+        or backend.port is None
+        or not 1024 <= backend.port <= 65535
+    ):
         raise ValueError("Gateway backend must be an HTTP loopback URL")
     app = FastAPI(
         title="Jarvis Companion Gateway",

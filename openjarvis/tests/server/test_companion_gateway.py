@@ -20,6 +20,7 @@ from starlette.websockets import WebSocketDisconnect
 from openjarvis.server.companion_gateway import (
     ReadOnlyGatewayStore,
     _TASK_EVENTS_SUBPROTOCOL,
+    configured_gateway_backend_url,
     create_gateway_app,
     validate_bind_host,
 )
@@ -27,6 +28,19 @@ from openjarvis.server.supervisor_routes import _canonical_pairing_payload
 from openjarvis.tasks.supervisor import SupervisorStore
 import openjarvis.tasks.supervisor as supervisor_module
 from openjarvis.server.supervisor_routes import router as supervisor_router
+
+
+def test_gateway_backend_url_accepts_only_loopback_with_explicit_port():
+    assert configured_gateway_backend_url({}) == "http://127.0.0.1:8000"
+    assert configured_gateway_backend_url({"JARVIS_COMPANION_BACKEND_URL": "http://127.0.0.1:18000"}) == "http://127.0.0.1:18000"
+    for value in (
+        "http://192.168.1.8:18000",
+        "https://127.0.0.1:18000",
+        "http://127.0.0.1:18000/path",
+        "http://user:secret@127.0.0.1:18000",
+    ):
+        with pytest.raises(ValueError):
+            configured_gateway_backend_url({"JARVIS_COMPANION_BACKEND_URL": value})
 
 
 @pytest.fixture

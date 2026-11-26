@@ -260,6 +260,24 @@ describe('device pairing and conversation attachments', () => {
     expect(fetcher.mock.calls.every(([, init]) => init?.credentials === 'same-origin')).toBe(true);
   });
 
+  it('accepts a signed portable gateway QR on the compatible alternate port', async () => {
+    const portablePayload = {
+      ...qrPayload,
+      server_url: 'https://thozha-portable.local:8444',
+      loopback_url: 'http://127.0.0.1:18000',
+      gateway_port: '8444',
+    };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      Response.json({ ...portablePayload, qr_payload: portablePayload })
+    );
+    const api = createWebApi(fetcher).authorized('test-csrf', vi.fn());
+    await expect(api.createPairingInvitation()).resolves.toMatchObject({
+      gateway_port: '8444',
+      loopback_url: 'http://127.0.0.1:18000',
+      qr_payload: portablePayload,
+    });
+  });
+
   it('uploads raw bytes with an idempotency key and safe metadata headers', async () => {
     const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
     const file = new File([bytes], 'report-测试.png', { type: 'image/png' });

@@ -65,6 +65,8 @@ data class PairingInvitation(
     val gatewayAddress: String? = null,
     val gatewayPort: Int? = null,
     val gatewayCertificateSha256: String? = null,
+    /** Signed local API URL used only when the existing development USB reverse route is active. */
+    val loopbackBaseUrl: String? = null,
 )
 
 data class PairingSession(val invitation: PairingInvitation) {

@@ -17,7 +17,14 @@ import time
 from pathlib import Path
 
 UPSTREAM_HOST = "127.0.0.1"
-UPSTREAM_PORT = 8001
+TLS_UPSTREAM_PORTS = {8443: 8001, 8444: 8002}
+
+
+def validate_gateway_port_pair(tls_port: int, upstream_port: int | None = None) -> tuple[int, int]:
+    expected = TLS_UPSTREAM_PORTS.get(tls_port)
+    if expected is None or (upstream_port is not None and upstream_port != expected):
+        raise ValueError("The local companion TLS frontend requires a supported TLS/loopback port pair")
+    return tls_port, expected
 MAX_CONNECTIONS = 32
 MAX_BYTES_PER_DIRECTION = 12 * 1024 * 1024
 IDLE_TIMEOUT_SECONDS = 120
@@ -67,11 +74,10 @@ async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, l
             print(f"tls_proxy_first_chunk direction={label} bytes={total} elapsed_ms={elapsed}", file=sys.stderr, flush=True)
 
 
-async def serve(host: str, port: int, certificate: Path, private_key: Path, *, debug: bool = False) -> None:
+async def serve(host: str, port: int, certificate: Path, private_key: Path, *, upstream_port: int | None = None, debug: bool = False) -> None:
     require_supported_runtime()
     bind_host = validate_private_bind_host(host)
-    if port != 8443:
-        raise ValueError("The local companion TLS frontend uses fixed port 8443")
+    _, upstream_port = validate_gateway_port_pair(port, upstream_port)
     if not certificate.is_file() or not private_key.is_file():
         raise ValueError("TLS identity files are unavailable")
 
@@ -91,7 +97,7 @@ async def serve(host: str, port: int, certificate: Path, private_key: Path, *, d
                 raise PermissionError("client is outside private address ranges")
             async with active:
                 upstream_reader, upstream_writer = await asyncio.wait_for(
-                    asyncio.open_connection(UPSTREAM_HOST, UPSTREAM_PORT), timeout=3,
+                    asyncio.open_connection(UPSTREAM_HOST, upstream_port), timeout=3,
                 )
                 client_to_upstream = asyncio.create_task(
                     _pipe(client_reader, upstream_writer, label="client_to_loopback", debug=debug),
@@ -140,12 +146,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Private-interface TLS frontend for the companion gateway")
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, default=8443)
+    parser.add_argument("--upstream-port", type=int)
     parser.add_argument("--certificate", required=True)
     parser.add_argument("--private-key", required=True)
     parser.add_argument("--debug", action="store_true", help="Log connection exception types only")
     args = parser.parse_args()
     try:
-        asyncio.run(serve(args.host, args.port, Path(args.certificate), Path(args.private_key), debug=args.debug))
+        asyncio.run(serve(args.host, args.port, Path(args.certificate), Path(args.private_key), upstream_port=args.upstream_port, debug=args.debug))
     except KeyboardInterrupt:
         return 0
     except Exception as exc:

@@ -1969,8 +1969,9 @@ components:
       properties:
         protocol: { type: string, const: openjarvis-pairing-v2 }
         server_url: { type: string, format: uri }
+        loopback_url: { type: string, format: uri, description: Optional signed loopback API URL used only by an explicitly configured USB reverse tunnel. }
         gateway_address: { type: string, format: ipv4 }
-        gateway_port: { type: string, const: '8443' }
+        gateway_port: { type: string, enum: ['8443', '8444'] }
         gateway_certificate_sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
         server_fingerprint: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
         server_public_key: { type: string, contentEncoding: base64 }
@@ -1985,8 +1986,9 @@ components:
       properties:
         protocol: { type: string, const: openjarvis-pairing-v2 }
         server_url: { type: string, format: uri }
+        loopback_url: { type: string, format: uri, description: Optional signed loopback API URL used only by an explicitly configured USB reverse tunnel. }
         gateway_address: { type: string, format: ipv4 }
-        gateway_port: { type: string, const: '8443' }
+        gateway_port: { type: string, enum: ['8443', '8444'] }
         gateway_certificate_sha256: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
         server_fingerprint: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
         server_public_key: { type: string, contentEncoding: base64 }
