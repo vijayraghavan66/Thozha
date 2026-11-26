@@ -842,6 +842,8 @@ def test_wifi_qr_signs_every_connection_parameter_and_requires_live_gateway(tmp_
     client, store = _pairing_test_client(tmp_path, monkeypatch)
     policy_path, helper = _write_gateway_policy(tmp_path, port=str(tls_port))
     _use_gateway_policy(monkeypatch, policy_path)
+    # DHCP may move the address on the approved interface. The QR binds the
+    # current address only after the pinned listener passes the TLS probe.
     monkeypatch.setenv("JARVIS_COMPANION_WIFI_LOOPBACK_PORT", str(loopback_port))
     monkeypatch.setenv("JARVIS_COMPANION_LOOPBACK_API_BASE_URL", "http://127.0.0.1:18000")
     monkeypatch.setattr(wifi, "wifi_interface_ipv4_address", lambda _interface: "192.168.1.7")
