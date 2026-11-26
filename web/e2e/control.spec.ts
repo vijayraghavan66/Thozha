@@ -638,6 +638,12 @@ test('uses only the nested invitation payload and reviews identity before granti
   await expect(qr).toBeVisible();
   await expect(pairing).toContainText(payload.server_fingerprint);
   await expect(pairing).toContainText('Pairing never automatically authorizes Web task execution');
+  await expect(
+    pairing.getByRole('button', { name: 'Copy signed invitation for manual import' })
+  ).toBeVisible();
+  await pairing.getByText('Manual import JSON', { exact: true }).click();
+  await expect(pairing.getByLabel('Signed pairing invitation JSON')).toHaveValue(JSON.stringify(payload));
+  await expect(pairing).toContainText('never into a search engine');
   await page.screenshot({
     path: testInfo.outputPath('pairing-invitation.png'),
     animations: 'disabled',

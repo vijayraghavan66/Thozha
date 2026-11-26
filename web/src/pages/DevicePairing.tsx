@@ -130,6 +130,7 @@ export default function DevicePairing({
   const [invitation, setInvitation] = useState<PairingInvitation>();
   const [review, setReview] = useState<PairingRequest>();
   const [notice, setNotice] = useState('');
+  const [payloadCopyNotice, setPayloadCopyNotice] = useState('');
   const [now, setNow] = useState(() => Date.now());
   const [setupOpen, setSetupOpen] = useState(false);
   const requests = useQuery({
@@ -435,9 +436,44 @@ export default function DevicePairing({
                   <p className="text-sm font-medium">
                     Expires in <span>{remainingText(remaining)}</span>
                   </p>
+                  <p className={`max-w-lg text-center text-xs ${muted}`}>
+                    Scan inside Thozha. This private .local server has no verified Android App Link;
+                    a normal camera may send raw JSON to a search app.
+                  </p>
                   <p className={`max-w-full break-all text-center font-mono text-[10px] ${muted}`}>
                     Host fingerprint: {invitation.server_fingerprint}
                   </p>
+                  <button
+                    type="button"
+                    className={outline}
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(JSON.stringify(invitation.qr_payload));
+                        setPayloadCopyNotice('Signed invitation copied. Paste it only into Thozha’s in-app pairing screen.');
+                      } catch {
+                        setPayloadCopyNotice('Clipboard access is unavailable. Select the signed JSON in Manual import below.');
+                      }
+                    }}
+                  >
+                    Copy signed invitation for manual import
+                  </button>
+                  {payloadCopyNotice && (
+                    <p role="status" className={`max-w-lg text-center text-xs ${muted}`}>
+                      {payloadCopyNotice}
+                    </p>
+                  )}
+                  <details className="w-full max-w-lg rounded-xl border border-white/10 p-3">
+                    <summary className="cursor-pointer text-sm font-medium">Manual import JSON</summary>
+                    <p className={`mt-2 text-xs ${muted}`}>
+                      This short-lived signed invitation contains no device token. Paste it only in the Thozha app; never into a search engine or unrelated site.
+                    </p>
+                    <textarea
+                      aria-label="Signed pairing invitation JSON"
+                      readOnly
+                      value={JSON.stringify(invitation.qr_payload)}
+                      className="mt-2 min-h-32 w-full select-all resize-y rounded-lg bg-black/30 p-2 font-mono text-[10px] text-[#d8d9df]"
+                    />
+                  </details>
                 </div>
               ) : (
                 <p role="status" className={muted}>

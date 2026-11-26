@@ -189,7 +189,8 @@ fun JarvisApp(store: JarvisStore) {
                                 onPairAnotherServer = {
                                     context.startActivity(
                                         Intent(context, AdvancedActivity::class.java)
-                                            .putExtra("open_device_pairing", true),
+                                            .putExtra("open_device_pairing", true)
+                                            .putExtra("open_pairing_scanner", true),
                                     )
                                 },
                             )

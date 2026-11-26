@@ -1,6 +1,7 @@
 package com.jarvis.companion
 
 import android.app.AlertDialog
+import android.content.ClipboardManager
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -100,17 +101,23 @@ class AdvancedActivity : ComponentActivity() {
         store = SecureStore(this)
         api = JarvisApi(this, store)
         worker = Executors.newSingleThreadExecutor()
-        if (intent.getBooleanExtra("open_device_pairing", false)) screen = Screen.DEVICE
+        val startPairingScanner = intent.getBooleanExtra("open_pairing_scanner", false)
+        if (intent.getBooleanExtra("open_device_pairing", false) || startPairingScanner) screen = Screen.DEVICE
         LinkAlerts.ensureChannels(this)
         openApprovalFrom(intent)
         render()
+        if (startPairingScanner) window.decorView.post { requestCameraAndScan() }
         if (isPaired()) refreshCurrent()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        val startPairingScanner = intent.getBooleanExtra("open_pairing_scanner", false)
+        if (intent.getBooleanExtra("open_device_pairing", false) || startPairingScanner) screen = Screen.DEVICE
         openApprovalFrom(intent)
         render()
+        if (startPairingScanner) window.decorView.post { requestCameraAndScan() }
     }
 
     /** Opening the app (or a notification) syncs Link once, debounced, so approvals appear without a manual refresh. */
@@ -619,6 +626,9 @@ class AdvancedActivity : ComponentActivity() {
                 addView(actionButton("Pair another Thozha server", R.color.signal, secondary = true) {
                     requestCameraAndScan()
                 }.apply { setPadding(0, dp(12), 0, 0) })
+                addView(actionButton("Paste signed invitation JSON", R.color.muted, secondary = true) {
+                    pastePairingInvitation()
+                }.apply { setPadding(0, dp(8), 0, 0) })
             }
             gap(page, 12)
             invitation?.let { drawAdditionalServerInvitation(page, it) }
@@ -636,10 +646,17 @@ class AdvancedActivity : ComponentActivity() {
                     addView(actionButton(if (isBusy) "Preparing scanner…" else "Scan Mac invitation QR", R.color.signal) {
                         requestCameraAndScan()
                     })
+                    addView(actionButton("Paste signed invitation JSON", R.color.muted, secondary = true) {
+                        pastePairingInvitation()
+                    }.apply { setPadding(0, dp(8), 0, 0) })
                     addView(text(
                         "QR scanning happens on this phone. Camera frames are used only to read the invitation and are not saved or uploaded.",
                         12, color(R.color.muted),
                     ).apply { setPadding(0, dp(10), 0, 0) })
+                    addView(text(
+                        "Open this scanner from Thozha. This private .local server has no verified Android App Link, so the normal camera may treat raw invitation JSON as a search.",
+                        12, color(R.color.muted),
+                    ).apply { setPadding(0, dp(8), 0, 0) })
                     if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
                         addView(actionButton("Run Mac signature test vector", R.color.muted, secondary = true) {
                             runInvitationVectorSelfTest()
@@ -786,6 +803,11 @@ class AdvancedActivity : ComponentActivity() {
         card(page) {
             addView(text("Review new Mac server", 19, color(R.color.paper), bold = true))
             addView(labelValue("SERVER URL", currentInvitation.serverUrl))
+            addView(labelValue("MAC SERVER FINGERPRINT", currentInvitation.serverFingerprint))
+            addView(labelValue(
+                "VERIFIED SERVER KEY FINGERPRINT",
+                currentInvitation.verifiedServerKeyFingerprint ?: "Not verified",
+            ))
             if (currentInvitation.gatewayAddress != null) {
                 addView(labelValue("SIGNED PRIVATE ADDRESS", "${currentInvitation.gatewayAddress}:${currentInvitation.gatewayPort}"))
                 addView(labelValue("TLS CERTIFICATE SHA-256", currentInvitation.gatewayCertificateSha256.orEmpty()))
@@ -1161,6 +1183,58 @@ class AdvancedActivity : ComponentActivity() {
             return
         }
         startQrScanner()
+    }
+
+    private fun pastePairingInvitation() {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(4))
+        }
+        val input = EditText(this).apply {
+            hint = "Paste the signed Thozha invitation JSON"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            minLines = 4
+            maxLines = 8
+            gravity = Gravity.TOP or Gravity.START
+            setTextSize(13f)
+        }
+        content.addView(input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(150)))
+        val clipboardStatus = TextView(this).apply {
+            setTextSize(12f)
+            setTextColor(color(R.color.muted))
+        }
+        content.addView(clipboardStatus, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        content.addView(actionButton("Paste from clipboard", R.color.muted, secondary = true) {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            val text = clipboard.primaryClip
+                ?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)
+                ?.coerceToText(this)
+                ?.toString()
+                .orEmpty()
+            if (text.isBlank()) {
+                clipboardStatus.text = "Clipboard has no invitation. Copy the signed JSON from Thozha Web or scan its QR."
+            } else {
+                input.setText(text)
+                input.setSelection(input.text.length)
+            }
+        })
+        AlertDialog.Builder(this)
+            .setTitle("Import signed invitation")
+            .setMessage("Use only the invitation copied from the intended Thozha Device Hub. It is verified locally; no pairing request is sent until you review it and tap Request pairing.")
+            .setView(content)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Review invitation") { _, _ ->
+                val raw = input.text?.toString()?.trim().orEmpty()
+                if (raw.isBlank()) {
+                    statusMessage = "Paste a signed invitation or scan the Mac QR. No request was sent."
+                    errorMessage = ""
+                    render()
+                } else {
+                    handleInvitationQr(raw)
+                }
+            }
+            .show()
     }
 
     private fun startQrScanner() {
