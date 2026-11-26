@@ -1,13 +1,19 @@
 import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Chip, Head, Line, Modal, Notice, Panel, Row, Loading, Unavailable } from '../components/ui';
+import {
+  Chip,
+  Head,
+  Line,
+  Modal,
+  Notice,
+  Panel,
+  Row,
+  Loading,
+  Unavailable,
+} from '../components/ui';
 import { field, formatDate, muted, outline, solid } from '../components/styles';
 import { type WorkspaceApi } from '../api/client';
-import {
-  type SupervisorTask,
-  type SupervisorEvent,
-  type TaskInput,
-} from '../api/control';
+import { type SupervisorTask, type SupervisorEvent, type TaskInput } from '../api/control';
 import { approvalsKey, controlError, tasksKey } from './controlState';
 import { isTerminalTask, useTaskProgress } from './useTaskProgress';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
@@ -50,63 +56,67 @@ function TaskList({
   });
 
   return (
-    <Panel cls="p-5">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-semibold">Supervisor tasks</h2>
-        <div className="flex flex-wrap gap-2">
-          {(['all', 'active', 'waiting-approval', 'failed', 'completed'] as TaskFilter[]).map(f => (
-            <button
-              key={f}
-              type="button"
-              className={f === filter ? solid : outline}
-              onClick={() => setFilter(f)}
-            >
-              {f.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
-            </button>
-          ))}
-          <button
-            type="button"
-            className={outline}
-            disabled={!connected || list.isFetching}
-            onClick={() => void list.refetch()}
-          >
-            Refresh
-          </button>
-        </div>
-      </div>
-      {list.isPending && connected && <Loading label="Loading supervisor tasks…" />}
-      {list.isError && <Notice error>{controlError(list.error, 'list supervisor tasks')}</Notice>}
-      {list.isSuccess && filtered.length === 0 && (
-        <p className={`py-10 text-center ${muted}`}>
-          {filter === 'all'
-            ? 'No supervisor tasks were returned for this owner.'
-            : `No ${filter.replace(/-/g, ' ')} tasks found.`}
-        </p>
-      )}
-      {filtered.map(task => {
-        const label = task.state.replace(/_/g, ' ');
-        return (
-          <Row
-            key={task.task_id}
-            main={task.summary || `Task ${task.task_id.slice(0, 8)}`}
-            sub={`${label} · ${formatDate(task.idempotent_replay ? '1970-01-01T00:00:00Z' : new Date().toISOString())}`}
-            right={
-              <div className="flex flex-wrap gap-2">
-                <Chip>{label}</Chip>
+    <section aria-label="Supervisor task history">
+      <Panel cls="p-5">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-semibold">Supervisor tasks</h2>
+          <div className="flex flex-wrap gap-2">
+            {(['all', 'active', 'waiting-approval', 'failed', 'completed'] as TaskFilter[]).map(
+              f => (
                 <button
+                  key={f}
                   type="button"
-                  className={outline}
-                  onClick={() => onSelect(task.task_id)}
-                  aria-label={`Open details for ${task.summary || task.task_id}`}
+                  className={f === filter ? solid : outline}
+                  onClick={() => setFilter(f)}
                 >
-                  Open
+                  {f.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
                 </button>
-              </div>
-            }
-          />
-        );
-      })}
-    </Panel>
+              )
+            )}
+            <button
+              type="button"
+              className={outline}
+              disabled={!connected || list.isFetching}
+              onClick={() => void list.refetch()}
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+        {list.isPending && connected && <Loading label="Loading supervisor tasks…" />}
+        {list.isError && <Notice error>{controlError(list.error, 'list supervisor tasks')}</Notice>}
+        {list.isSuccess && filtered.length === 0 && (
+          <p className={`py-10 text-center ${muted}`}>
+            {filter === 'all'
+              ? 'No supervisor tasks were returned for this owner.'
+              : `No ${filter.replace(/-/g, ' ')} tasks found.`}
+          </p>
+        )}
+        {filtered.map(task => {
+          const label = task.state.replace(/_/g, ' ');
+          return (
+            <Row
+              key={task.task_id}
+              main={task.summary || `Task ${task.task_id.slice(0, 8)}`}
+              sub={`${label} · ${task.task_id.slice(0, 8)}`}
+              right={
+                <div className="flex flex-wrap gap-2">
+                  <Chip>{label}</Chip>
+                  <button
+                    type="button"
+                    className={outline}
+                    onClick={() => onSelect(task.task_id)}
+                    aria-label={`Open details for ${task.summary || task.task_id}`}
+                  >
+                    Open
+                  </button>
+                </div>
+              }
+            />
+          );
+        })}
+      </Panel>
+    </section>
   );
 }
 
@@ -114,12 +124,16 @@ function NewTaskForm({
   api,
   devices,
   connected,
+  initialObjective,
+  clearDraft,
   onSuccess,
   onClose,
 }: {
   api: WorkspaceApi;
   devices: { device_id: string; device_name: string }[];
   connected: boolean;
+  initialObjective?: string;
+  clearDraft: () => void;
   onSuccess: (taskId: string) => void;
   onClose: () => void;
 }) {
@@ -128,6 +142,7 @@ function NewTaskForm({
   const submit = useMutation({
     mutationFn: (input: TaskInput) => api.submitTask(input),
     onSuccess: data => {
+      clearDraft();
       onSuccess(data.task_id);
       void cache.invalidateQueries({ queryKey: tasksKey });
       void cache.invalidateQueries({ queryKey: approvalsKey });
@@ -164,7 +179,12 @@ function NewTaskForm({
   }
 
   return (
-    <Modal title="Submit a supervisor task" close={onClose} locked={submit.isPending} cls="max-w-[620px]">
+    <Modal
+      title="Submit a supervisor task"
+      close={onClose}
+      locked={submit.isPending}
+      cls="max-w-[620px]"
+    >
       <form onSubmit={handleForm} className="space-y-4">
         <label className="block text-xs">
           Goal
@@ -174,6 +194,7 @@ function NewTaskForm({
             rows={5}
             maxLength={2000}
             placeholder="Build me a portfolio website, test it, fix any issues and give me a working preview."
+            defaultValue={initialObjective}
             required
           />
         </label>
@@ -195,7 +216,12 @@ function NewTaskForm({
           <div className="mt-2 space-y-1">
             {['read_only', 'mac_read', 'assistant', 'development'].map(cap => (
               <label key={cap} className="flex items-center gap-2">
-                <input type="checkbox" name="capability" value={cap} defaultChecked={cap === 'read_only'} />
+                <input
+                  type="checkbox"
+                  name="capability"
+                  value={cap}
+                  defaultChecked={cap === 'read_only'}
+                />
                 <span className={muted}>{cap.replace(/_/g, ' ')}</span>
               </label>
             ))}
@@ -446,13 +472,19 @@ export function AutonomousWorkspace({
   api,
   devices,
   connected,
+  initialTaskId,
+  draft,
+  clearDraft,
 }: {
   api: WorkspaceApi;
   devices: { device_id: string; device_name: string }[];
   connected: boolean;
+  initialTaskId?: string;
+  draft?: string;
+  clearDraft: () => void;
 }) {
-  const [selectedTask, setSelectedTask] = useState<string>();
-  const [showNewTask, setShowNewTask] = useState(false);
+  const [selectedTask, setSelectedTask] = useState<string | undefined>(initialTaskId);
+  const [showNewTask, setShowNewTask] = useState(Boolean(draft));
   const [filter, setFilter] = useState<TaskFilter>('all');
 
   function onTaskCreated(taskId: string) {
@@ -535,6 +567,8 @@ export function AutonomousWorkspace({
           api={api}
           devices={devices}
           connected={connected}
+          initialObjective={draft}
+          clearDraft={clearDraft}
           onSuccess={onTaskCreated}
           onClose={() => setShowNewTask(false)}
         />

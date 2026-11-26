@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import openapiTS, { astToString } from 'openapi-typescript';
 import { parse } from 'yaml';
 
-const revision = '0e4cd9341ecf40ddf4b0232322421d5e77c3380c';
+const revision = '0f0541d903d1aaa5144dda79881d853aa1ff8443';
 const path = 'openapi/thozha-v1.yaml';
 const sourceRevision = process.argv[3] || (process.argv[2] ? 'supplied OpenAPI file' : revision);
 const document = parse(

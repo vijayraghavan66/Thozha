@@ -286,9 +286,16 @@ export default function DeveloperStudio({
             : 'Inspect persisted supervisor activity and execution evidence.'
         }
         action={
-          <button type="button" className={solid} onClick={() => setComposerOpen(true)}>
-            New task
-          </button>
+          <div className="flex flex-wrap gap-2">
+            {view === 'tasks' && (
+              <a className={outline} href="#/autonomous-workspace">
+                Open Autonomous Workspace
+              </a>
+            )}
+            <button type="button" className={solid} onClick={() => setComposerOpen(true)}>
+              New task
+            </button>
+          </div>
         }
       />
       {(composerOpen || Boolean(draft)) && (

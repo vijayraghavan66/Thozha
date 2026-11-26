@@ -24,6 +24,71 @@ const pairedDevice = async (page: Page) => {
   await picker.selectOption(value!);
 };
 
+test('Tasks exposes the authenticated autonomous workspace using supervisor data', async ({
+  page,
+}) => {
+  const deviceId = 'd'.repeat(32);
+  const taskId = 'a'.repeat(32);
+  await page.route(/\/v1\/web\/devices$/, route =>
+    route.fulfill({
+      json: {
+        count: 1,
+        devices: [
+          {
+            device_id: deviceId,
+            device_name: 'Isolated test pairing',
+            created_at: '2026-11-26T07:00:00Z',
+            expires_at: '2026-12-30T07:00:00Z',
+            status: 'active',
+          },
+        ],
+      },
+    })
+  );
+  await page.route(/\/v1\/web\/tasks\?/, route =>
+    route.fulfill({
+      json: {
+        tasks: [
+          {
+            task_id: taskId,
+            state: 'COMPLETED',
+            summary: 'Verified portfolio preview',
+            result_text: 'The artifact was verified.',
+            idempotent_replay: false,
+          },
+        ],
+      },
+    })
+  );
+  await signIn(page, '/#/tasks');
+  await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Open Autonomous Workspace', exact: true }).click();
+  await expect(page).toHaveURL(/#\/autonomous-workspace$/);
+  await expect(
+    page.getByRole('heading', { name: 'Assign a goal. Watch it execute.', exact: true })
+  ).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Supervisor task history' })).toContainText(
+    'Verified portfolio preview'
+  );
+  await expect(page.getByRole('region', { name: 'Supervisor task history' })).toContainText(
+    'COMPLETED'
+  );
+
+  let submissions = 0;
+  page.on('request', request => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === taskPath) submissions++;
+  });
+  await page.getByRole('button', { name: /New task/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Submit a supervisor task' });
+  await dialog.getByLabel('Goal').fill('Review a disposable local portfolio preview');
+  await expect(dialog.getByLabel('Target device (required for execution)')).toContainText(
+    'Isolated test pairing'
+  );
+  await expect(dialog.getByRole('button', { name: 'Submit task', exact: true })).toBeVisible();
+  expect(submissions).toBe(0);
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+});
+
 async function submitTask(page: Page, objective?: string, scope = 'read_only') {
   if (objective) {
     await page.getByRole('button', { name: 'New task', exact: true }).click();

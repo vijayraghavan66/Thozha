@@ -34,6 +34,11 @@ const ConversationWorkspace = lazy(() => import('../../chat/ConversationWorkspac
 const TradingLab = lazy(() => import('../../trading/TradingLab'));
 const MemoryCenter = lazy(() => import('../../memory/MemoryCenter'));
 const DeveloperStudio = lazy(() => import('../../pages/DeveloperStudio'));
+const AutonomousWorkspace = lazy(() =>
+  import('../../pages/AutonomousWorkspace').then(module => ({
+    default: module.AutonomousWorkspace,
+  }))
+);
 const DeviceHub = lazy(() => import('../../pages/DeviceHub'));
 const AutomationStudio = lazy(() => import('../../pages/AutomationStudio'));
 const sections = [
@@ -48,8 +53,12 @@ const sections = [
   ['Settings', 'settings', '⚙'],
 ] as const;
 type Section = (typeof sections)[number][0];
+const isAutonomousWorkspaceRoute = (hash: string) =>
+  hash.split('?')[0] === '#/autonomous-workspace';
 const currentPage = (hash: string) =>
-  sections.find(([, slug]) => hash.split('?')[0] === `#/${slug}`)?.[0] ?? 'AI Workspace';
+  isAutonomousWorkspaceRoute(hash)
+    ? 'Tasks'
+    : (sections.find(([, slug]) => hash.split('?')[0] === `#/${slug}`)?.[0] ?? 'AI Workspace');
 const motionKey = 'thozha-web.motion.v1';
 
 function SearchGlyph({ open }: { open: boolean }) {
@@ -377,6 +386,7 @@ export function ThozhaWebWorkspaceConcept({
 }) {
   const [hash, setHash] = useState(() => window.location.hash);
   const page = currentPage(hash);
+  const showAutonomousWorkspace = isAutonomousWorkspaceRoute(hash);
   const taskParam = new URLSearchParams(hash.split('?')[1]).get('task');
   const taskId = taskParam && /^[0-9a-f]{32}$/.test(taskParam) ? taskParam : undefined;
   const [taskDraft, setTaskDraft] = useState<string>();
@@ -453,7 +463,7 @@ export function ThozhaWebWorkspaceConcept({
   });
   const tasks = useTasks(api, 'active', !problem && (page === 'AI Workspace' || page === 'Tasks'));
   const approvals = useApprovals(api, !problem && page === 'AI Workspace');
-  const devices = useDevices(api, !problem && page === 'Approvals');
+  const devices = useDevices(api, !problem && (page === 'Approvals' || page === 'Tasks'));
   const supervisorIdentity: IdentityState = problem
     ? 'failed'
     : approvals.data?.approvals.some(item => item.status === 'PENDING') ||
@@ -1121,7 +1131,20 @@ export function ThozhaWebWorkspaceConcept({
                       <MemoryCenter api={api} connected={!problem} />
                     </Suspense>
                   )}
-                  {(page === 'Developer Studio' || page === 'Tasks') && (
+                  {page === 'Tasks' && showAutonomousWorkspace && (
+                    <Suspense fallback={<Loading label="Loading Autonomous Workspace…" />}>
+                      <AutonomousWorkspace
+                        api={api}
+                        devices={devices.data?.devices ?? []}
+                        connected={!problem}
+                        initialTaskId={taskId}
+                        draft={taskDraft}
+                        clearDraft={() => setTaskDraft(undefined)}
+                      />
+                    </Suspense>
+                  )}
+                  {(page === 'Developer Studio' ||
+                    (page === 'Tasks' && !showAutonomousWorkspace)) && (
                     <Suspense fallback={<Loading label="Loading Developer Studio…" />}>
                       <DeveloperStudio
                         api={api}
