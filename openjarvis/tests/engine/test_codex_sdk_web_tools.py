@@ -4,10 +4,24 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from types import SimpleNamespace
 
 from openjarvis.core.types import Message, Role
 from openjarvis.engine import codex_sdk
+
+
+def test_configured_codex_python_preserves_venv_launcher_symlink(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    launcher = tmp_path / ".venv" / "bin" / "python"
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(sys.executable)
+    monkeypatch.setenv("OPENJARVIS_PYTHON", str(launcher))
+
+    assert codex_sdk._resolve_codex_python() == launcher
 
 
 class _FakeThread:

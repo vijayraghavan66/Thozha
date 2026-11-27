@@ -155,6 +155,62 @@ def test_link_runner_requires_loopback_auth_and_supported_scope(link_client):
     ).status_code == 403
 
 
+def test_development_submission_uses_owner_selected_server_workspace(link_client, tmp_path, monkeypatch):
+    import base64
+
+    client, store, _agent = link_client
+    workspace = tmp_path / "owner-project"
+    workspace.mkdir()
+    (workspace / "calculator.py").write_text("def add(a, b): return -1\n")
+    monkeypatch.setenv("JARVIS_DEV_WORKSPACE", str(workspace))
+    monkeypatch.setenv("JARVIS_DEV_WORKSPACE_PATHS", json.dumps(["calculator.py"]))
+    body = {
+        "objective": "Build a calculator project and fix addition",
+        "capability_scope": ["development"],
+        "idempotency_key": "development-owner-workspace-01",
+        "requester_device_id": "9" * 32,
+    }
+
+    response = client.post(
+        "/v1/jarvis/link/tasks",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json=body,
+    )
+
+    assert response.status_code == 200, response.json()
+    task_id = response.json()["task_id"]
+    binding = store._db.execute(
+        "SELECT workspace_id,snapshot_json FROM workspace_task_snapshots WHERE task_id=?",
+        (task_id,),
+    ).fetchone()
+    assert binding
+    encoded = json.loads(binding["snapshot_json"])
+    snapshot = {name: base64.b64decode(data) for name, data in encoded.items()}
+    assert snapshot == {"calculator.py": b"def add(a, b): return -1\n"}
+    event_types = [event["event_type"] for event in store.events(task_id)]
+    assert "workspace.snapshot_registered" in event_types
+    assert "workspace.owner_registered" in event_types
+
+
+def test_development_submission_fails_closed_without_selected_workspace(link_client, monkeypatch):
+    client, store, agent = link_client
+    monkeypatch.delenv("JARVIS_DEV_WORKSPACE", raising=False)
+    monkeypatch.delenv("JARVIS_DEV_WORKSPACE_PATHS", raising=False)
+    response = client.post(
+        "/v1/jarvis/link/tasks",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json={
+            "objective": "Build a calculator project and fix addition",
+            "capability_scope": ["development"],
+            "idempotency_key": "development-no-workspace-01",
+            "requester_device_id": "8" * 32,
+        },
+    )
+    assert response.status_code == 503
+    assert store._db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    assert agent.calls == []
+
+
 def test_link_task_submit_requires_and_binds_verified_requester_device(link_client):
     client, store, agent = link_client
     headers = {"Authorization": "Bearer link-test-admin-key"}
@@ -620,10 +676,19 @@ def test_link_engine_context_selects_basic_mcp_mode(monkeypatch):
 
 def test_development_codex_cwd_and_registered_mcp_are_workspace_scoped(tmp_path, monkeypatch):
     from pathlib import Path
+    from openjarvis.engine import codex_sdk
     from openjarvis.engine.codex_sdk import _config_overrides, _working_directory_for_current_task
 
     workspace = tmp_path / "taskflow"
     workspace.mkdir()
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        '[mcp_servers.untrusted]\ncommand="/usr/bin/true"\n'
+        '[mcp_servers.jarvis_mac]\ncommand="/usr/bin/true"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_sdk, "CODEX_HOME", codex_home)
     monkeypatch.setenv("JARVIS_DEV_WORKSPACE", str(workspace))
     with bind_task(
         "a" * 32,
@@ -634,7 +699,11 @@ def test_development_codex_cwd_and_registered_mcp_are_workspace_scoped(tmp_path,
         assert Path(_working_directory_for_current_task()) == workspace.resolve()
         overrides = _config_overrides("control")
         assert any("mcp_servers.jarvis_dev.command" in entry for entry in overrides)
-        assert not any("mcp_servers.jarvis_mac." in entry for entry in overrides)
+        assert "mcp_servers.jarvis_dev.enabled=true" in overrides
+        assert "mcp_servers.jarvis_mac.enabled=false" in overrides
+        assert "mcp_servers.untrusted.enabled=false" in overrides
+        assert 'mcp_servers.jarvis_mac.command="/usr/bin/false"' in overrides
+        assert "mcp_servers.jarvis_mac.args=[]" in overrides
         assert "features.shell_tool=false" in overrides
         assert "features.unified_exec=false" in overrides
         assert 'mcp_servers.jarvis_dev.env.JARVIS_DEV_EXECUTION_MODE="vm"' in overrides

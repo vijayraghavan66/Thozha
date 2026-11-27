@@ -40,7 +40,10 @@ def _resolve_codex_home() -> Path:
 def _resolve_codex_python() -> Path:
     configured = os.environ.get("OPENJARVIS_PYTHON", "").strip()
     if configured:
-        return Path(configured).expanduser().resolve()
+        # Preserve the virtual-environment launcher path. Resolving venv/bin/python
+        # follows its symlink to the base interpreter and drops that venv's packages
+        # from MCP child processes (for example cryptography in jarvis_dev_mcp).
+        return Path(configured).expanduser()
     source_venv_python = get_config_dir() / "src" / ".venv" / "bin" / "python"
     if source_venv_python.is_file():
         return source_venv_python
@@ -317,13 +320,21 @@ def _config_overrides(mode: str, *, disable_tools: bool = False) -> tuple[str, .
         and context.scope == "development"
     ):
         # Development tasks get only the bounded project server. The Mac-control server is not registered at all.
+        names = _configured_mcp_server_names() | {"jarvis_mac", "jarvis_dev"}
         overrides = [
+            f"mcp_servers.{name}.enabled={'true' if name == 'jarvis_dev' else 'false'}"
+            for name in sorted(names)
+        ] + [
             f'mcp_servers.jarvis_dev.command="{PYTHON}"',
             f'mcp_servers.jarvis_dev.args=["{DEV_MCP}"]',
             f'mcp_servers.jarvis_dev.env.JARVIS_SUPERVISOR_TASK_ID="{context.task_id}"',
             'mcp_servers.jarvis_dev.env.JARVIS_SUPERVISOR_TASK_SOURCE="jarvis_link"',
             'mcp_servers.jarvis_dev.env.JARVIS_SUPERVISOR_TASK_SCOPE="development"',
             'mcp_servers.jarvis_dev.env.JARVIS_DEV_EXECUTION_MODE="vm"',
+            # Even in an isolated Codex home, keep the reserved Mac-control
+            # server inert and provide a complete table if it was absent.
+            'mcp_servers.jarvis_mac.command="/usr/bin/false"',
+            "mcp_servers.jarvis_mac.args=[]",
             # No development task may fall back to the Mac executor. The MCP
             # itself fails closed unless the fixed, pinned guest bridge exists.
             'features.shell_tool=false',

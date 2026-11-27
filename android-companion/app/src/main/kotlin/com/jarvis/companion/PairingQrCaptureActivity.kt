@@ -20,6 +20,7 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -215,6 +216,7 @@ class PairingQrCaptureActivity : ComponentActivity() {
         Log.i(TAG, "decoder_ready engine=MLKIT attempt=$attemptId max_zoom=$maxZoom auto_zoom=${maxZoom > 1f} formats=QR")
     }
 
+    @androidx.annotation.OptIn(markerClass = [ExperimentalGetImage::class])
     private fun analyzeFrame(proxy: androidx.camera.core.ImageProxy) {
         val mediaImage = proxy.image
         if (mediaImage == null || finished.get()) {

@@ -870,6 +870,26 @@ async def run_link_task(request: Request) -> JSONResponse:
             detail="Authenticated device does not match the Link task requester",
         )
 
+    if capability_scope == ["development"] and workspace_request is None:
+        # The phone must never supply a Mac filesystem path. A host owner selects
+        # the project root and relative files in the server's private config;
+        # the authenticated Link task binds that selection before Codex starts.
+        configured_root = os.environ.get("JARVIS_DEV_WORKSPACE", "").strip()
+        configured_paths = os.environ.get("JARVIS_DEV_WORKSPACE_PATHS", "").strip()
+        try:
+            selected_paths = json.loads(configured_paths) if configured_paths else None
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="The owner-selected development workspace configuration is invalid",
+            ) from exc
+        if not configured_root or not isinstance(selected_paths, list):
+            raise HTTPException(
+                status_code=503,
+                detail="The owner has not selected a workspace for development tasks",
+            )
+        workspace_request = {"root": configured_root, "paths": selected_paths}
+
     if workspace_request is not None:
         if capability_scope != ["development"] or not isinstance(workspace_request, dict) or set(workspace_request) != {"root", "paths"}:
             raise HTTPException(status_code=422, detail="workspace must contain root and selected paths for a development task")

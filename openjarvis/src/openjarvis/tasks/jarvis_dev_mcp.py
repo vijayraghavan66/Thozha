@@ -46,7 +46,6 @@ from openjarvis.tasks.dev_capability import (
     MAX_TOTAL_BYTES_HARD,
     MAX_WRITES_HARD,
     capability_db_path,
-    _under_allowed,
     plan_approval_arguments,
     plan_approval_target,
 )
@@ -417,16 +416,12 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             or os.environ.get("JARVIS_SUPERVISOR_OPERATION_DIGEST") != expected_digest
         ):
             return _text("The consumed approval did not match this exact plan. No capability was issued.", True)
-        # The consumed plan approval authorizes only this registered, hash-verified
-        # snapshot to enter the task-scoped Linux workspace.
+        # The owner-selected source snapshot is staged read-only as task input.
+        # Plan paths and byte quotas constrain model writes and artifact export;
+        # the transfer itself is bounded by the snapshot and guest hard limits.
         from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
         registry = WorkspaceRegistry(_store())
         workspace_id, snapshot, manifest = registry.snapshot_for_task(adapter.task_id, adapter.user_id)
-        if any(
-            not _under_allowed(path, spec.allowed_paths) or len(content) > spec.max_file_bytes
-            for path, content in snapshot.items()
-        ) or sum(map(len, snapshot.values())) > spec.max_total_bytes:
-            return _text("Registered project snapshot exceeds the approved plan scope or size limits.", True)
         staging = workspace.stage_snapshot(snapshot, manifest)
         registry.mark_staged(adapter.task_id, workspace_id)
         _record_task_event("development.snapshot_staged", {
