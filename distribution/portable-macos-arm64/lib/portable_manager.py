@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
+import hashlib
 import hmac
 import json
 import os
@@ -243,12 +245,41 @@ def _rotate_web_password(
         except sqlite3.Error as exc:
             raise PortableError("Portable Web sessions could not be checked; no change was made.") from exc
 
-    from openjarvis.server.thozha_web_auth import hash_password
+    from openjarvis.server.thozha_web_auth import (
+        DEFAULT_PASSWORD_HASH_ITERATIONS,
+        MAX_PASSWORD_HASH_ITERATIONS,
+        MIN_PASSWORD_HASH_ITERATIONS,
+        PASSWORD_HASH_SCHEME,
+        hash_password,
+    )
 
     try:
-        replacement = hash_password(password)
+        # Explicit portable-only recovery allowance: the owner may choose a
+        # 5-character password. Normal Web password creation stays at 12+.
+        if not isinstance(password, str) or not 5 <= len(password) <= 1024:
+            raise ValueError("portable reset password length")
+        if len(password) >= 12:
+            replacement = hash_password(password)
+        else:
+            if not MIN_PASSWORD_HASH_ITERATIONS <= DEFAULT_PASSWORD_HASH_ITERATIONS <= MAX_PASSWORD_HASH_ITERATIONS:
+                raise ValueError("Web password hash iterations")
+            salt = secrets.token_bytes(16)
+            digest = hashlib.pbkdf2_hmac(
+                "sha256", password.encode("utf-8"), salt,
+                DEFAULT_PASSWORD_HASH_ITERATIONS, dklen=32,
+            )
+
+            def encode(value: bytes) -> str:
+                return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+            replacement = "$".join((
+                PASSWORD_HASH_SCHEME,
+                str(DEFAULT_PASSWORD_HASH_ITERATIONS),
+                encode(salt),
+                encode(digest),
+            ))
     except ValueError as exc:
-        raise PortableError("New portable Web password must be 12–1024 characters; no change was made.") from exc
+        raise PortableError("New portable Web password must be 5–1024 characters; no change was made.") from exc
     previous = current.copy()
     updated = current.copy()
     updated["password_hash"] = replacement
@@ -269,7 +300,7 @@ def reset_web_password(_args) -> int:
         raise PortableError("Stop this portable server first; no credential was changed.")
     if not sys.stdin.isatty():
         raise PortableError("Run ./bin/reset-web-password.sh in an interactive Terminal; no credential was changed.")
-    password = getpass.getpass("New portable Web password (12+ characters): ")
+    password = getpass.getpass("New portable Web password (5+ characters): ")
     confirmation = getpass.getpass("Confirm new portable Web password: ")
     _rotate_web_password(
         password,

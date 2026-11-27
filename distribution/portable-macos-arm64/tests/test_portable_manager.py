@@ -158,16 +158,18 @@ class PortableManagerTests(unittest.TestCase):
             supervisor.chmod(0o600)
 
             manager._rotate_web_password(
-                "new-portable-password-2026",
-                "new-portable-password-2026",
+                "five5",
+                "five5",
                 web_auth_path=auth,
                 session_db_path=sessions,
             )
 
             updated = json.loads(auth.read_text(encoding="utf-8"))
             self.assertEqual(updated["owner_id"], "owner")
-            self.assertTrue(verify_password("new-portable-password-2026", updated["password_hash"]))
+            self.assertTrue(verify_password("five5", updated["password_hash"]))
             self.assertFalse(verify_password("old-password-long", updated["password_hash"]))
+            with self.assertRaises(ValueError):
+                hash_password("five5")
             self.assertEqual(auth.stat().st_mode & 0o777, 0o600)
             with sqlite3.connect(sessions) as connection:
                 self.assertEqual(connection.execute("SELECT count(*) FROM web_sessions").fetchone()[0], 0)

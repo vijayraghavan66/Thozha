@@ -32,9 +32,12 @@ stored hash. Stop this portable instance, then run `./bin/reset-web-password.sh`
 from the same extracted bundle in an interactive Terminal. The command prompts
 for a replacement twice without echoing or saving it in plaintext, changes only
 this bundle's Web password hash, and invalidates this bundle's Web sessions.
-It does not alter device pairing, task history, the server identity, TLS
-certificate, or other Thozha installations. Restart with the same `start.sh`
-command and sign in using owner ID `owner` and the replacement password.
+The owner-authorized portable recovery flow accepts 5 or more characters; this
+is weaker than the normal 12-character Web password creation minimum and applies
+only to this portable account. It does not alter device pairing, task history,
+the server identity, TLS certificate, or other Thozha installations. Restart
+with the same `start.sh` command and sign in using owner ID `owner` and the
+replacement password.
 
 ## Local-only and gateway
 
