@@ -453,7 +453,6 @@ def _portable_tls_frontend_command_matches(command: list[str]) -> bool:
     if len(command) < 2:
         return False
     try:
-        Path(command[0]).resolve().relative_to((ROOT / "runtime" / "tls-python").resolve())
         script = Path(command[1]).resolve()
         script.relative_to((ROOT / "runtime" / "server-venv").resolve())
     except (OSError, ValueError):

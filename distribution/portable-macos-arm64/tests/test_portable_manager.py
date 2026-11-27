@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,6 +107,41 @@ class PortableManagerTests(unittest.TestCase):
                 wrong_key_command = command.copy()
                 wrong_key_command[wrong_key_command.index("--private-key") + 1] = "/Users/test/.openjarvis/tls-key.pem"
                 self.assertFalse(manager._portable_tls_frontend_command_matches(wrong_key_command))
+
+    def test_stop_cleans_only_this_bundles_detached_tls_child(self):
+        with tempfile.TemporaryDirectory() as root:
+            bundle = Path(root) / "bundle"
+            data = Path(root) / "data"
+            script = bundle / "runtime/server-venv/lib/python3.13/site-packages/openjarvis/server/companion_wifi_tls_proxy.py"
+            cert = data / "openjarvis/companion-wifi/tls-cert.pem"
+            key = data / "openjarvis/companion-wifi/tls-key.pem"
+            script.parent.mkdir(parents=True)
+            cert.parent.mkdir(parents=True)
+            script.write_text("import time; time.sleep(60)\n", encoding="utf-8")
+            cert.write_text("fixture", encoding="utf-8")
+            key.write_text("fixture", encoding="utf-8")
+            command = [
+                sys.executable, str(script), "--host", "192.168.1.7", "--port", "8444",
+                "--certificate", str(cert), "--private-key", str(key), "--upstream-port", "8002",
+            ]
+            with patch.object(manager, "ROOT", bundle), patch.object(manager, "DATA", data):
+                tls_child = subprocess.Popen(command)
+                unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+                try:
+                    self.assertTrue(manager._portable_tls_frontend_command_matches(command))
+                    matches = manager._portable_tls_frontend_processes()
+                    self.assertIn(tls_child.pid, [item.pid for item in matches])
+                    self.assertNotIn(unrelated.pid, [item.pid for item in matches])
+                    stopped, count = manager._stop_portable_tls_frontends()
+                    self.assertTrue(stopped)
+                    self.assertEqual(count, 1)
+                    self.assertIsNotNone(tls_child.poll())
+                    self.assertIsNone(unrelated.poll())
+                finally:
+                    for process in (tls_child, unrelated):
+                        if process.poll() is None:
+                            process.terminate()
+                            process.wait(timeout=3)
 
     def test_gateway_fails_closed_when_ssid_cannot_be_verified(self):
         with tempfile.TemporaryDirectory() as root:
