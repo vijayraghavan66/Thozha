@@ -830,7 +830,7 @@ async def run_link_task(request: Request) -> JSONResponse:
     required = {
         "objective", "capability_scope", "idempotency_key", "requester_device_id",
     }
-    optional = {"conversation_id"}
+    optional = {"conversation_id", "workspace"}
     if not isinstance(body, dict) or not required.issubset(body) or set(body) - required - optional:
         raise HTTPException(
             status_code=422,
@@ -841,6 +841,7 @@ async def run_link_task(request: Request) -> JSONResponse:
     idempotency_key = body.get("idempotency_key")
     requester_device_id = body.get("requester_device_id")
     conversation_id = body.get("conversation_id", "") or ""
+    workspace_request = body.get("workspace")
     if not isinstance(conversation_id, str) or (
         conversation_id and not re.fullmatch(r"[0-9a-f]{32}", conversation_id)
     ):
@@ -868,6 +869,12 @@ async def run_link_task(request: Request) -> JSONResponse:
             status_code=403,
             detail="Authenticated device does not match the Link task requester",
         )
+
+    if workspace_request is not None:
+        if capability_scope != ["development"] or not isinstance(workspace_request, dict) or set(workspace_request) != {"root", "paths"}:
+            raise HTTPException(status_code=422, detail="workspace must contain root and selected paths for a development task")
+        if not isinstance(workspace_request.get("root"), str) or not isinstance(workspace_request.get("paths"), list) or any(not isinstance(path, str) for path in workspace_request["paths"]):
+            raise HTTPException(status_code=422, detail="workspace root and selected paths are invalid")
 
     agent = getattr(request.app.state, "agent", None)
     engine = getattr(request.app.state, "engine", None)
@@ -901,6 +908,21 @@ async def run_link_task(request: Request) -> JSONResponse:
         task_id=str(task_id or "")[:8],
         state=str(run.get("status") or "CREATED"),
     )
+    if run.get("created") and workspace_request is not None:
+        try:
+            from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
+            binding = WorkspaceRegistry(store).register_for_task(
+                task_id, "device:" + requester_device_id,
+                workspace_request["root"], workspace_request["paths"],
+            )
+            store.record_event(task_id, "workspace.owner_registered", {
+                "workspace_id": binding["workspace_id"], "files": binding["file_count"],
+                "manifest_sha256": hashlib.sha256(json.dumps(binding["manifest"], sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            })
+        except Exception as exc:
+            # The task is durable but must not run with an unbound or partial workspace.
+            store.cancel_link_task(task_id, actor="device:" + requester_device_id)
+            raise HTTPException(status_code=422, detail="Selected project could not be safely registered") from exc
     if not run.get("created"):
         status = run.get("status")
         if status == "COMPLETED":
@@ -1706,6 +1728,28 @@ async def cancel_link_task(idempotency_key: str, request: Request) -> dict[str, 
             # Task cancellation remains durable; every capability operation also checks task state.
             logger.warning("Development capability revocation after cancellation failed (%s)", type(exc).__name__)
         result["development_capabilities_revoked"] = capability_revoked
+        # Stop any active isolated worker and remove only the task-ID-derived guest
+        # directory. Cancellation is already durable even if SSH cleanup is unavailable.
+        try:
+            task_id = record["task_id"]
+            task = store.get_task(task_id) or {}
+            metadata = json.loads(task.get("recovery_json") or "{}")
+            from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
+            registry = WorkspaceRegistry(store)
+            if registry.is_staged(task_id, metadata.get("owner_actor", "")):
+                from openjarvis.tasks.remote_dev_worker import RemoteMcpWorkerClient, RemoteWorkerConfig
+                config_path = os.environ.get("JARVIS_DEV_WORKER_CONFIG", "")
+                config = RemoteWorkerConfig.load(config_path)
+                RemoteMcpWorkerClient(config, task_id=task_id).cancel_task()
+                registry.mark_cancelled(task_id, cleanup_succeeded=True)
+            else:
+                registry.mark_cancelled(task_id, cleanup_succeeded=True)
+        except Exception as exc:
+            try:
+                registry.mark_cancelled(record["task_id"], cleanup_succeeded=False, error_type=type(exc).__name__)
+            except Exception:
+                pass
+            logger.warning("Guest workspace cleanup after cancellation failed (%s)", type(exc).__name__)
         result["summary"] = (
             "Task cancelled. A Mac action had already started; check its result before retrying."
             if result["action_may_have_started"]
@@ -2005,7 +2049,7 @@ async def _decide_approval_for_actor(
         mcp_tool = operation.removeprefix(f"mcp:{server}:")
         if server == "jarvis_dev":
             # Development operations exist only for a development Link task; nothing else may dispatch them.
-            allowed_mcp_tools = {"approve_plan", "write_project_file", "run_project_tests"}
+            allowed_mcp_tools = {"approve_plan", "write_project_file", "run_project_tests", "import_project_patch"}
             source_ok = is_link_task and metadata.get("source") == "jarvis_link" and metadata.get("scope") == "development"
         else:
             allowed_mcp_tools = {"click", "type_text", "press_key", "scroll", "open_app", "open_browser_workspace"}

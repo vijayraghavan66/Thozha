@@ -24,7 +24,10 @@ from openjarvis.tasks.remote_dev_worker import (
 def test_remote_worker_defaults_follow_the_current_home_directory():
     lab = Path.home() / "Documents/Jarvis-Lab"
     assert Path(DEFAULT_WORKSPACE) == lab / "agent-evaluation/taskflow"
-    assert Path(GUEST_HOST_SENTINEL_PATH) == lab / "agent-evaluation/vm-run-20261121/host-only-canary.txt"
+    assert (
+        Path(GUEST_HOST_SENTINEL_PATH)
+        == lab / "agent-evaluation/vm-run-20261121/host-only-canary.txt"
+    )
 
 
 def test_guest_workspace_reads_writes_and_reports_manifest(tmp_path):
@@ -187,7 +190,7 @@ def test_remote_client_fails_closed_for_unknown_tools_without_transport(tmp_path
         client.call_tool("shell_exec", {"command": "anything"})
 
 
-def test_remote_client_cancellation_stops_only_its_random_guest_unit(tmp_path):
+def test_remote_client_cancellation_stops_only_its_task_guest_unit(tmp_path):
     identity = tmp_path / "id"
     identity.write_text("test-only")
     identity.chmod(0o600)
@@ -222,12 +225,40 @@ def test_remote_client_cancellation_stops_only_its_random_guest_unit(tmp_path):
             self.returncode = -9
 
     client = RemoteMcpWorkerClient(config, process_factory=FakeProcess, task_id=task_id)
+    client._ensure_guest_task_workspace = lambda _workspace: None
     client._stop_guest_unit = lambda unit: units.append(unit)
     with pytest.raises(RemoteWorkerError, match="was cancelled"):
-        client.call_tool("run_project_tests", {"command": "unittest-tests"}, cancel_event=cancel)
+        client.call_tool(
+            "run_project_tests", {"command": "unittest-tests"}, cancel_event=cancel
+        )
     assert len(units) == 1
     assert units[0].startswith("jarvis-dev-")
-    assert len(units[0]) == len("jarvis-dev-") + 16
+    assert units[0] == "jarvis-dev-" + task_id
+
+
+def test_task_cancellation_stops_and_cleans_only_its_workspace(tmp_path):
+    identity = tmp_path / "id"
+    identity.write_text("test-only")
+    identity.chmod(0o600)
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("pin\n")
+    client = RemoteMcpWorkerClient(
+        RemoteWorkerConfig(identity, known_hosts, Path(DEFAULT_WORKSPACE)),
+        runner=lambda *a, **k: pytest.fail("cancellation should use scoped helpers"),
+        task_id="c" * 32,
+    )
+    operations = []
+    client._stop_guest_unit = lambda unit: operations.append(("stop", unit))
+    client.cleanup_task_workspace = lambda: operations.append(
+        ("cleanup", client.task_id)
+    )
+
+    client.cancel_task()
+
+    assert operations == [
+        ("stop", "jarvis-dev-" + client.task_id),
+        ("cleanup", client.task_id),
+    ]
 
 
 def test_worker_config_requires_fixed_root_and_private_identity(tmp_path):

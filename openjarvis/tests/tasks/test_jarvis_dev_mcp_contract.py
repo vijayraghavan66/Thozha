@@ -9,6 +9,8 @@ def test_plan_capability_tool_descriptions_preserve_independent_boundaries():
     write = tools["write_project_file"]["description"].lower()
     tests = tools["run_project_tests"]["description"].lower()
     export = tools["export_project_artifacts"]["description"].lower()
+    patch_export = tools["export_project_patch"]["description"].lower()
+    patch_import = tools["import_project_patch"]["description"].lower()
 
     assert "approval" in approve and "no files are changed" in approve and "until approval" in approve
     assert "valid plan capability" in write
@@ -25,3 +27,5 @@ def test_plan_capability_tool_descriptions_preserve_independent_boundaries():
     assert "artifact_export" in approve
     assert "explicitly listed files" in export
     assert "only the final artifact metadata" in export
+    assert "unified diff" in patch_export and "owner approval" in patch_export
+    assert "only after the supervisor consumes" in patch_import

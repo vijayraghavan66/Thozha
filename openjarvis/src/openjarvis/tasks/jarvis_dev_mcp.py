@@ -46,6 +46,7 @@ from openjarvis.tasks.dev_capability import (
     MAX_TOTAL_BYTES_HARD,
     MAX_WRITES_HARD,
     capability_db_path,
+    _under_allowed,
     plan_approval_arguments,
     plan_approval_target,
 )
@@ -122,6 +123,10 @@ TOOLS = [
      "inputSchema": {"type": "object", "required": ["capability_id", "paths"], "properties": {"capability_id": {"type": "string"}, "paths": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": False}},
     {"name": "export_project_artifacts", "description": "Package explicitly listed files from the active approved development plan for the same paired device. This requires artifact_export in the digest-approved plan; only the final artifact metadata is returned to the model.",
      "inputSchema": {"type": "object", "required": ["capability_id", "paths"], "properties": {"capability_id": {"type": "string"}, "paths": {"type": "array", "minItems": 1, "maxItems": 2000, "items": {"type": "string", "maxLength": 240}}}, "additionalProperties": False}},
+    {"name": "export_project_patch", "description": "Generate a unified diff from the registered baseline and staged VM project, then request exact owner approval before importing it into the host project. Requires artifact_export in the approved plan.",
+     "inputSchema": {"type": "object", "required": ["capability_id"], "properties": {"capability_id": {"type": "string"}}, "additionalProperties": False}},
+    {"name": "import_project_patch", "description": "Import one exact verified project patch. This tool is available only after the supervisor consumes its owner approval.",
+     "inputSchema": {"type": "object", "required": ["patch_id", "workspace_id", "patch_sha256"], "properties": {"patch_id": {"type": "string"}, "workspace_id": {"type": "string"}, "patch_sha256": {"type": "string"}}, "additionalProperties": False}},
 ]
 WRITE_TOOLS = {"write_project_file", "run_project_tests"}
 
@@ -215,17 +220,49 @@ def _capability_adapter() -> DevelopmentCapabilityMCPAdapter:
     owner = metadata.get("owner_actor")
     if not isinstance(owner, str) or not re.fullmatch(r"device:[0-9a-f]{32}", owner):
         raise PermissionError("development task is not paired to a valid device")
+    from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
+    workspace_root = WorkspaceRegistry(_store()).root_for_task(task_id, owner)
     return DevelopmentCapabilityMCPAdapter.from_task_environment(
         _store(),
         _capability_store(),
         user_id=owner,
-        workspace_root=str(_workspace().root),
+        workspace_root=workspace_root,
     )
 
 
 def _record_task_event(event: str, fields: dict[str, Any]) -> None:
     task_id, _, _ = _bound_task()
     _store().record_event(task_id, event, fields)
+
+
+def _registered_snapshot() -> tuple[dict[str, bytes], bool]:
+    """Return the task's fixed owner-approved snapshot before staging, never a model path."""
+    task_id, _, _ = _bound_task()
+    task = _store().get_task(task_id) or {}
+    try:
+        owner = json.loads(task.get("recovery_json") or "{}").get("owner_actor", "")
+        from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
+        registry = WorkspaceRegistry(_store())
+        _workspace_id, files, _manifest = registry.snapshot_for_task(task_id, owner)
+        return files, registry.is_staged(task_id, owner)
+    except Exception as exc:
+        raise PermissionError("no owner-authorized project snapshot is bound to this task") from exc
+
+
+def _snapshot_directory(files: dict[str, bytes], relative: str) -> list[str]:
+    from openjarvis.tasks.dev_capability import _check_relative
+    parts = [] if relative in {"", "."} else _check_relative(relative)
+    prefix = "/".join(parts)
+    entries: set[str] = set()
+    for path in files:
+        if prefix and not path.startswith(prefix + "/"):
+            continue
+        remainder = path[len(prefix) + 1:] if prefix else path
+        if not remainder:
+            continue
+        first, separator, _tail = remainder.partition("/")
+        entries.add(first + ("/" if separator else ""))
+    return sorted(entries)
 
 
 def manifest_sha256(workspace: Any) -> str:
@@ -311,9 +348,21 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         _audit("vm_execution_context_verified", **evidence)
         return _text(json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     if name == "list_project_files":
-        return _text(json.dumps(workspace.list_dir(str(args.get("dir", "."))), ensure_ascii=False))
+        directory = str(args.get("dir", "."))
+        files, staged = _registered_snapshot()
+        entries = workspace.list_dir(directory) if staged else _snapshot_directory(files, directory)
+        return _text(json.dumps(entries, ensure_ascii=False))
     if name == "read_project_file":
-        return _text(workspace.read_text(str(args.get("path", ""))))
+        path = str(args.get("path", ""))
+        files, staged = _registered_snapshot()
+        if staged:
+            return _text(workspace.read_text(path))
+        if path not in files:
+            return _text("File was not included in the owner-authorized snapshot.", True)
+        try:
+            return _text(files[path].decode("utf-8", "strict"))
+        except UnicodeDecodeError:
+            return _text("Selected project file is not UTF-8 text.", True)
     if name == "approve_plan":
         approved_dispatch = os.environ.get("JARVIS_SUPERVISOR_APPROVED_OPERATION") == "1"
         if approved_dispatch:
@@ -368,6 +417,23 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             or os.environ.get("JARVIS_SUPERVISOR_OPERATION_DIGEST") != expected_digest
         ):
             return _text("The consumed approval did not match this exact plan. No capability was issued.", True)
+        # The consumed plan approval authorizes only this registered, hash-verified
+        # snapshot to enter the task-scoped Linux workspace.
+        from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
+        registry = WorkspaceRegistry(_store())
+        workspace_id, snapshot, manifest = registry.snapshot_for_task(adapter.task_id, adapter.user_id)
+        if any(
+            not _under_allowed(path, spec.allowed_paths) or len(content) > spec.max_file_bytes
+            for path, content in snapshot.items()
+        ) or sum(map(len, snapshot.values())) > spec.max_total_bytes:
+            return _text("Registered project snapshot exceeds the approved plan scope or size limits.", True)
+        staging = workspace.stage_snapshot(snapshot, manifest)
+        registry.mark_staged(adapter.task_id, workspace_id)
+        _record_task_event("development.snapshot_staged", {
+            "workspace_id": workspace_id, "files": staging["files"],
+            "total_bytes": staging["total_bytes"],
+            "manifest_sha256": hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        })
         capability_id = adapter.issue_approved_plan(approval_id)
         _record_task_event("development.plan_capability_issued", {
             "approval_id": approval_id,
@@ -537,6 +603,59 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             "duration_ms": round((time.perf_counter_ns() - export_started_ns) / 1_000_000, 3),
         })
         return _text(json.dumps(artifact.to_wire(), ensure_ascii=False, separators=(",", ":")))
+    if name == "export_project_patch":
+        capability_id = args.get("capability_id")
+        if not isinstance(capability_id, str) or not getattr(workspace, "is_remote", False):
+            return _text("Patch export requires an active capability and the isolated VM workspace.", True)
+        adapter = _capability_adapter()
+        task_id, _, _ = _bound_task()
+        try:
+            from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
+            registry = WorkspaceRegistry(_store())
+            patch = registry.build_patch(
+                task_id, adapter.user_id,
+                lambda path, max_bytes: workspace.read_bytes(path, max_bytes=max_bytes),
+            )
+            changed = sorted(patch["_contents"])
+            if not changed:
+                return _text(json.dumps({"changed": False, "workspace_id": patch["workspace_id"]}, separators=(",", ":")))
+            # Consume the approved artifact-export quota and re-read each changed file
+            # through the bounded VM reader before persisting the patch for review.
+            adapter.artifact_export(
+                capability_id, op_id=uuid.uuid4().hex, rel_paths=changed,
+                file_reader=lambda path, max_bytes: workspace.read_bytes(path, max_bytes=max_bytes),
+            )
+            approval_id, digest = registry.request_patch_approval(task_id, adapter.user_id, patch)
+            _record_task_event("development.patch_approval_requested", {
+                "approval_id": approval_id, "patch_id": patch["patch_id"],
+                "patch_sha256": patch["patch_sha256"], "files": changed,
+            })
+            return _text(json.dumps({
+                "changed": True, "workspace_id": patch["workspace_id"],
+                "patch_id": patch["patch_id"], "patch_sha256": patch["patch_sha256"],
+                "files": patch["files"], "unified_diff": patch["patch"],
+                "approval_id": approval_id, "operation_digest": digest,
+                "status": "waiting_for_owner_approval",
+            }, ensure_ascii=False, separators=(",", ":")))
+        except CapabilityError as exc:
+            return _text(f"Patch export refused ({exc.code}).", True)
+    if name == "import_project_patch":
+        required = {"patch_id", "workspace_id", "patch_sha256"}
+        if set(args) != required or any(not isinstance(args.get(key), str) for key in required):
+            return _text("Patch import identity is invalid.", True)
+        target = f"workspace:{args['workspace_id']}:patch:{args['patch_sha256']}"
+        try:
+            _claim_approved(name, args, target)
+            task_id, _, _ = _bound_task()
+            task = _store().get_task(task_id) or {}
+            owner = json.loads(task.get("recovery_json") or "{}").get("owner_actor", "")
+            from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
+            result = WorkspaceRegistry(_store()).apply_approved_patch(
+                task_id, owner, args, approval_id=os.environ.get("JARVIS_SUPERVISOR_APPROVAL_ID", ""),
+            )
+            return _text(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        except CapabilityError as exc:
+            return _text(f"Patch import refused ({exc.code}).", True)
     return _text(f"Unknown tool: {name}", True)
 
 

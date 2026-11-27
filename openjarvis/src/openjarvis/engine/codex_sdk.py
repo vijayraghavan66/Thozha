@@ -72,7 +72,8 @@ _WEB_CHAT_INSTRUCTIONS = """You are Thozha in an informational browser conversat
 
 _DEVELOPMENT_MCP_TOOLS = frozenset({
     "get_execution_context", "list_project_files", "read_project_file", "approve_plan", "write_project_file",
-    "run_project_tests", "consume_repair", "artifact_manifest",
+    "run_project_tests", "consume_repair", "artifact_manifest", "export_project_artifacts",
+    "export_project_patch", "import_project_patch",
 })
 
 

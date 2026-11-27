@@ -31,7 +31,8 @@ PROTOCOL = "2025-03-26"
 DEFAULT_WORKSPACE = str(Path.home() / "Documents/Jarvis-Lab/agent-evaluation/taskflow")
 GUEST_WORKSPACE_ROOT = "/workspace/taskflow"
 GUEST_HOST_SENTINEL_PATH = str(
-    Path.home() / "Documents/Jarvis-Lab/agent-evaluation/vm-run-20261121/host-only-canary.txt"
+    Path.home()
+    / "Documents/Jarvis-Lab/agent-evaluation/vm-run-20261121/host-only-canary.txt"
 )
 DEFAULT_GUEST_WORKER = "/usr/local/libexec/jarvis-dev-worker.py"
 DEFAULT_SSH_TARGET = "vmadmin@127.0.0.1"
@@ -153,7 +154,11 @@ class RemoteMcpWorkerClient:
         self.runner = runner
         self.process_factory = process_factory
         self.task_id = task_id
-        self.trace_id = trace_id if isinstance(trace_id, str) and re.fullmatch(r"[0-9a-f]{12}", trace_id) else hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:12]
+        self.trace_id = (
+            trace_id
+            if isinstance(trace_id, str) and re.fullmatch(r"[0-9a-f]{12}", trace_id)
+            else hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:12]
+        )
 
     def call_tool(
         self,
@@ -164,10 +169,18 @@ class RemoteMcpWorkerClient:
         cancel_event: Event | None = None,
     ) -> dict[str, Any]:
         call_started_ns = time.perf_counter_ns()
-        safe_name = name if isinstance(name, str) and re.fullmatch(r"[a-z_]{1,40}", name) else "invalid"
+        safe_name = (
+            name
+            if isinstance(name, str) and re.fullmatch(r"[a-z_]{1,40}", name)
+            else "invalid"
+        )
         PERF_LOGGER.info(
             "perf trace=%s event=vm_rpc_started wall_ms=%d mono_ns=%d task_id=%s operation=%s",
-            self.trace_id, int(time.time() * 1000), call_started_ns, self.task_id[:8], safe_name,
+            self.trace_id,
+            int(time.time() * 1000),
+            call_started_ns,
+            self.task_id[:8],
+            safe_name,
         )
         if name not in {
             "list_project_files",
@@ -216,8 +229,11 @@ class RemoteMcpWorkerClient:
         if len(payload.encode("utf-8")) > MAX_MESSAGE_BYTES:
             raise RemoteWorkerError("remote worker request exceeds the size limit")
 
-        unit = "jarvis-dev-" + uuid.uuid4().hex[:16]
-        workspace = GUEST_WORKSPACE_ROOT
+        unit = "jarvis-dev-" + self.task_id
+        workspace = f"{GUEST_WORKSPACE_ROOT}/.tasks/{self.task_id}"
+        self.guest_workspace = workspace
+        if self.runner is None:
+            self._ensure_guest_task_workspace(workspace)
         remote_args = [
             "sudo",
             "-n",
@@ -420,8 +436,134 @@ class RemoteMcpWorkerClient:
         )
         return structured
 
+    def _ensure_guest_task_workspace(self, workspace: str) -> None:
+        """Create only the UUID-derived private project directory in the pinned guest."""
+        if workspace != f"{GUEST_WORKSPACE_ROOT}/.tasks/{self.task_id}":
+            raise RemoteWorkerError("guest workspace identity is invalid")
+        remote_command = (
+            shlex.join(
+                [
+                    "sudo",
+                    "-n",
+                    "install",
+                    "-d",
+                    "-o",
+                    "codex",
+                    "-g",
+                    "codex",
+                    "-m",
+                    "0700",
+                    workspace,
+                ]
+            )
+            + " && "
+            + shlex.join(
+                [
+                    "sudo",
+                    "-n",
+                    "install",
+                    "-o",
+                    "codex",
+                    "-g",
+                    "codex",
+                    "-m",
+                    "0600",
+                    f"{GUEST_WORKSPACE_ROOT}/preflight-sentinel.txt",
+                    f"{workspace}/preflight-sentinel.txt",
+                ]
+            )
+        )
+        argv = [
+            "/usr/bin/ssh",
+            "-T",
+            "-F",
+            "/dev/null",
+            "-p",
+            str(self.config.port),
+            "-i",
+            str(self.config.identity_file),
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "IdentityAgent=none",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={self.config.known_hosts_file}",
+            "-o",
+            "ConnectTimeout=5",
+            f"{self.config.ssh_user}@{self.config.host}",
+            remote_command,
+        ]
+        try:
+            result = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=12,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RemoteWorkerError(
+                "task-scoped guest workspace could not be prepared"
+            ) from exc
+        if result.returncode != 0:
+            raise RemoteWorkerError("task-scoped guest workspace could not be prepared")
+
+    def cleanup_task_workspace(self) -> None:
+        """Remove only this task's UUID-derived directory under the pinned guest root."""
+        workspace = f"{GUEST_WORKSPACE_ROOT}/.tasks/{self.task_id}"
+        remote_command = shlex.join(["sudo", "-n", "rm", "-rf", "--", workspace])
+        argv = [
+            "/usr/bin/ssh",
+            "-T",
+            "-F",
+            "/dev/null",
+            "-p",
+            str(self.config.port),
+            "-i",
+            str(self.config.identity_file),
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "IdentityAgent=none",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={self.config.known_hosts_file}",
+            "-o",
+            "ConnectTimeout=5",
+            f"{self.config.ssh_user}@{self.config.host}",
+            remote_command,
+        ]
+        try:
+            result = subprocess.run(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=12,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RemoteWorkerError(
+                "task-scoped guest workspace cleanup failed"
+            ) from exc
+        if result.returncode != 0:
+            raise RemoteWorkerError("task-scoped guest workspace cleanup failed")
+
+    def cancel_task(self) -> None:
+        """Stop the task's active guest unit, then remove only its scoped directory."""
+        self._stop_guest_unit("jarvis-dev-" + self.task_id)
+        self.cleanup_task_workspace()
+
     def _stop_guest_unit(self, unit: str) -> None:
-        if not re.fullmatch(r"jarvis-dev-[0-9a-f]{16}", unit):
+        if not re.fullmatch(r"jarvis-dev-[0-9a-f]{16}|jarvis-dev-[0-9a-f]{32}", unit):
             return
         argv = [
             "/usr/bin/ssh",
@@ -550,6 +692,68 @@ class RemoteWorkspace:
             )
         return response
 
+    def stage_snapshot(
+        self, files: dict[str, bytes], expected_manifest: dict[str, str]
+    ) -> dict[str, Any]:
+        """Transfer an owner-approved snapshot after verifying its per-file hashes."""
+        if not isinstance(files, dict) or not files or len(files) > MAX_FILES:
+            raise RemoteWorkerError("approved workspace snapshot is malformed")
+        total = 0
+        validated: list[tuple[str, str, str, int]] = []
+        for relative, data in sorted(files.items()):
+            if not isinstance(data, bytes):
+                raise RemoteWorkerError(
+                    "approved workspace snapshot contains invalid bytes"
+                )
+            parts = _relative_parts(relative)
+            if relative == "preflight-sentinel.txt" or any(
+                part.startswith(".") for part in parts
+            ):
+                raise RemoteWorkerError(
+                    "hidden files and Git metadata cannot be staged"
+                )
+            total += len(data)
+            digest = hashlib.sha256(data).hexdigest()
+            if (
+                total > MAX_TOTAL_BYTES
+                or len(data) > MAX_FILE_BYTES
+                or expected_manifest.get(relative) != digest
+            ):
+                raise RemoteWorkerError(
+                    "approved workspace snapshot failed integrity or size validation"
+                )
+            try:
+                content = data.decode("utf-8", "strict")
+            except UnicodeDecodeError as exc:
+                raise RemoteWorkerError(
+                    "binary files cannot be staged into the text workspace"
+                ) from exc
+            validated.append((relative, content, digest, len(data)))
+        try:
+            for relative, content, digest, size in validated:
+                receipt = self.client.call_tool(
+                    "write_project_file",
+                    {
+                        "path": relative,
+                        "content": content,
+                        "content_sha256": digest,
+                        "size": size,
+                    },
+                    timeout_s=60,
+                )
+                if (
+                    receipt.get("path") != relative
+                    or receipt.get("sha256") != digest
+                    or receipt.get("bytes") != size
+                ):
+                    raise RemoteWorkerError(
+                        "guest staging receipt failed integrity validation"
+                    )
+        except Exception:
+            self.client.cleanup_task_workspace()
+            raise
+        return {"files": len(files), "total_bytes": total}
+
     def run_tests(self) -> dict[str, Any]:
         result = self.client.call_tool(
             "run_project_tests", {"command": "unittest-tests"}, timeout_s=300
@@ -601,7 +805,9 @@ class RemoteWorkspace:
             raise RemoteWorkerError(
                 "worker execution context is not the approved ARM64 Linux guest"
             )
-        if response.get("cwd") != GUEST_WORKSPACE_ROOT:
+        if response.get("cwd") != getattr(
+            self.client, "guest_workspace", GUEST_WORKSPACE_ROOT
+        ):
             raise RemoteWorkerError(
                 "worker current directory is outside the approved workspace"
             )

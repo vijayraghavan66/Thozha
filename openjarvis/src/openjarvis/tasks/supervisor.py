@@ -639,7 +639,7 @@ class SupervisorStore:
         with self._tx() as db:
             task = db.execute("SELECT state,recovery_json FROM tasks WHERE id=?", (task_id,)).fetchone()
             run = db.execute("SELECT status FROM link_task_runs WHERE task_id=?", (task_id,)).fetchone()
-            approval = db.execute("SELECT task_id,status,operation,target FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
+            approval = db.execute("SELECT task_id,status,operation,target,arguments_json FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
             if task is None or run is None or approval is None:
                 raise KeyError("Link approval task record is missing")
             metadata = json.loads(task["recovery_json"] or "{}")
@@ -650,6 +650,7 @@ class SupervisorStore:
                     and approval["operation"] == "mcp:jarvis_dev:approve_plan"
                     and approval["target"].startswith("taskflow:plan:")
                 )
+                or self._is_registered_patch_approval(db, task_id, metadata, approval)
             )
             if metadata.get("source") != "jarvis_link" or not allowed_approval:
                 raise PermissionError("This Link task and approval type cannot enter the approval wait state")
@@ -665,7 +666,7 @@ class SupervisorStore:
         with self._tx() as db:
             task = db.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
             run = db.execute("SELECT status FROM link_task_runs WHERE task_id=?", (task_id,)).fetchone()
-            approval = db.execute("SELECT task_id,status,operation,target FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
+            approval = db.execute("SELECT task_id,status,operation,target,arguments_json FROM operation_approvals WHERE id=?", (approval_id,)).fetchone()
             if task is None or run is None or approval is None:
                 raise KeyError("Link approval task record is missing")
             if task["state"] != "RUNNING" or run["status"] != "WAITING_APPROVAL":
@@ -690,6 +691,7 @@ class SupervisorStore:
                     and approval["operation"] == "mcp:jarvis_dev:approve_plan"
                     and approval["target"].startswith("taskflow:plan:")
                 )
+                or self._is_registered_patch_approval(db, task_id, metadata, approval)
             )
             if metadata.get("source") != "jarvis_link" or not allowed_approval:
                 raise PermissionError("This Link task and approval type cannot record plan rejection")
@@ -699,6 +701,38 @@ class SupervisorStore:
                 raise PermissionError("Supervisor did not record this task approval as rejected")
             db.execute("UPDATE link_task_runs SET status='REJECTED',objective_text=NULL,last_error='approval_rejected' WHERE task_id=?", (task_id,))
             self._event(db, task_id, "link_task.approval_rejected", {"approval_id": approval_id})
+
+    @staticmethod
+    def _is_registered_patch_approval(db: sqlite3.Connection, task_id: str, metadata: dict[str, Any], approval: sqlite3.Row) -> bool:
+        """Accept a patch-import wait only when the durable patch and owner binding match."""
+        if metadata.get("scope") != "development" or approval["operation"] != "mcp:jarvis_dev:import_project_patch":
+            return False
+        match = re.fullmatch(r"workspace:([0-9a-f]{32}):patch:([0-9a-f]{64})", approval["target"] or "")
+        if not match:
+            return False
+        try:
+            arguments = json.loads(approval["arguments_json"] or "null")
+        except (TypeError, json.JSONDecodeError):
+            return False
+        workspace_id, patch_digest = match.groups()
+        if arguments != {"patch_id": arguments.get("patch_id") if isinstance(arguments, dict) else None,
+                         "workspace_id": workspace_id, "patch_sha256": patch_digest}:
+            return False
+        patch_id = arguments.get("patch_id") if isinstance(arguments, dict) else None
+        if not isinstance(patch_id, str) or not re.fullmatch(r"[0-9a-f]{32}", patch_id):
+            return False
+        owner = metadata.get("owner_actor", "")
+        try:
+            bound = db.execute(
+                "SELECT 1 FROM workspace_task_snapshots s JOIN authorized_workspaces w USING(workspace_id) "
+                "JOIN workspace_patches p ON p.task_id=s.task_id AND p.workspace_id=s.workspace_id "
+                "WHERE s.task_id=? AND s.workspace_id=? AND s.state='STAGED' AND w.owner_actor=? AND w.revoked_at IS NULL "
+                "AND p.patch_id=? AND p.state='EXPORTED' AND json_extract(p.patch_json,'$.patch_sha256')=?",
+                (task_id, workspace_id, owner, patch_id, patch_digest),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return False
+        return bound is not None
 
     def link_task_run(self, task_id: str) -> dict[str, Any] | None:
         with self._lock:
