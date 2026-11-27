@@ -84,6 +84,28 @@ class PortableManagerTests(unittest.TestCase):
             self.assertEqual(updated["gateway_port"], 8444)
             self.assertEqual(updated["loopback_port"], 8002)
 
+    def test_portable_tls_frontend_match_is_scoped_to_bundle_identity_and_ports(self):
+        with tempfile.TemporaryDirectory() as root:
+            bundle = Path(root) / "bundle"
+            data = Path(root) / "data"
+            with patch.object(manager, "ROOT", bundle), patch.object(manager, "DATA", data):
+                python = bundle / "runtime/tls-python/bin/python3.14"
+                script = bundle / "runtime/server-venv/lib/python3.13/site-packages/openjarvis/server/companion_wifi_tls_proxy.py"
+                cert = data / "openjarvis/companion-wifi/tls-cert.pem"
+                key = data / "openjarvis/companion-wifi/tls-key.pem"
+                command = [
+                    str(python), str(script), "--host", "192.168.1.7", "--port", "8444",
+                    "--certificate", str(cert), "--private-key", str(key), "--upstream-port", "8002",
+                ]
+                self.assertTrue(manager._portable_tls_frontend_command_matches(command))
+                production_command = command.copy()
+                production_command[production_command.index("--port") + 1] = "8443"
+                production_command[production_command.index("--upstream-port") + 1] = "8001"
+                self.assertFalse(manager._portable_tls_frontend_command_matches(production_command))
+                wrong_key_command = command.copy()
+                wrong_key_command[wrong_key_command.index("--private-key") + 1] = "/Users/test/.openjarvis/tls-key.pem"
+                self.assertFalse(manager._portable_tls_frontend_command_matches(wrong_key_command))
+
     def test_gateway_fails_closed_when_ssid_cannot_be_verified(self):
         with tempfile.TemporaryDirectory() as root:
             policy_path = Path(root) / "gateway-policy.json"

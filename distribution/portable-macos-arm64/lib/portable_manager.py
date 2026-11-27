@@ -417,6 +417,78 @@ def _managed_child_matches(pid: int) -> bool:
         return False
 
 
+def _portable_tls_frontend_command_matches(command: list[str]) -> bool:
+    """Match only this bundle's detached TLS child, never another gateway."""
+    if len(command) < 2:
+        return False
+    try:
+        Path(command[0]).resolve().relative_to((ROOT / "runtime" / "tls-python").resolve())
+        script = Path(command[1]).resolve()
+        script.relative_to((ROOT / "runtime" / "server-venv").resolve())
+    except (OSError, ValueError):
+        return False
+    if script.name != "companion_wifi_tls_proxy.py":
+        return False
+
+    def value_after(name: str) -> str | None:
+        indexes = [index for index, value in enumerate(command) if value == name]
+        if len(indexes) != 1 or indexes[0] + 1 >= len(command):
+            return None
+        return command[indexes[0] + 1]
+
+    def path_after_matches(name: str, expected: Path) -> bool:
+        value = value_after(name)
+        if value is None:
+            return False
+        try:
+            return Path(value).resolve() == expected.resolve()
+        except OSError:
+            return False
+
+    return (
+        value_after("--port") == str(PORTABLE_TLS_PORT)
+        and value_after("--upstream-port") == str(PORTABLE_LOOPBACK_GATEWAY_PORT)
+        and path_after_matches("--certificate", DATA / "openjarvis" / "companion-wifi" / "tls-cert.pem")
+        and path_after_matches("--private-key", DATA / "openjarvis" / "companion-wifi" / "tls-key.pem")
+    )
+
+
+def _portable_tls_frontend_processes() -> list[Any]:
+    try:
+        import psutil
+    except ImportError:
+        return []
+    matches = []
+    for process in psutil.process_iter():
+        try:
+            if process.uids().real == os.getuid() and _portable_tls_frontend_command_matches(process.cmdline()):
+                matches.append(process)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return matches
+
+
+def _stop_portable_tls_frontends() -> tuple[bool, int]:
+    import psutil
+
+    processes = _portable_tls_frontend_processes()
+    if not processes:
+        return True, 0
+    for process in processes:
+        try:
+            process.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    _gone, alive = psutil.wait_procs(processes, timeout=3)
+    for process in alive:
+        try:
+            process.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    _gone, alive = psutil.wait_procs(alive, timeout=2)
+    return not alive, len(processes)
+
+
 def _stop_stale_children(state: dict[str, Any]) -> bool:
     pids = state.get("managed_children", {})
     if not isinstance(pids, dict):
@@ -438,7 +510,9 @@ def _stop_stale_children(state: dict[str, Any]) -> bool:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-    return not any(_managed_child_matches(pid) for pid in pids.values() if isinstance(pid, int))
+    children_stopped = not any(_managed_child_matches(pid) for pid in pids.values() if isinstance(pid, int))
+    tls_stopped, _ = _stop_portable_tls_frontends()
+    return children_stopped and tls_stopped
 
 
 def _write_state(value: dict[str, Any]) -> None:
@@ -510,6 +584,9 @@ def doctor(args) -> int:
 def status(args) -> int:
     state = _read_json(STATE)
     if not state:
+        if _portable_tls_frontend_processes():
+            print("ORPHANED (portable TLS frontend; run stop.sh to clean up this bundle)")
+            return 1
         print("STOPPED" if not LOCK.exists() else "STOPPED (stale lock)")
         return 0 if not LOCK.exists() else 1
     pid = state.get("manager_pid")
@@ -531,6 +608,9 @@ def status(args) -> int:
         gateway_pid = pids.get("gateway") if isinstance(pids, dict) else None
         gateway_ok = isinstance(gateway_pid, int) and _managed_child_matches(gateway_pid)
         print(f"Gateway process: {'RUNNING' if gateway_ok else 'FAILED'}")
+        tls_ok = bool(_portable_tls_frontend_processes())
+        print(f"Gateway TLS frontend: {'RUNNING' if tls_ok else 'FAILED'}")
+        gateway_ok = gateway_ok and tls_ok
     healthy = _health(api_port) and gateway_ok
     print(f"API health: {'healthy' if _health(api_port) else 'unhealthy'}")
     return 0 if healthy else 1
@@ -539,6 +619,12 @@ def status(args) -> int:
 def stop(args) -> int:
     state = _read_json(STATE)
     if not state:
+        stopped, count = _stop_portable_tls_frontends()
+        if not stopped:
+            raise PortableError("An orphaned TLS frontend from this portable bundle could not be stopped safely.")
+        if count:
+            print("STOPPED (orphaned portable TLS frontend cleaned up)")
+            return 0
         print("STOPPED")
         return 0
     pid = state.get("manager_pid")
@@ -559,6 +645,11 @@ def stop(args) -> int:
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if not _process_matches(pid):
+            stopped, count = _stop_portable_tls_frontends()
+            if not stopped:
+                raise PortableError("Portable manager stopped, but its TLS frontend could not be cleaned up safely.")
+            if count:
+                print("Portable TLS frontend stopped.")
             print("STOPPED")
             return 0
         time.sleep(0.2)
@@ -591,6 +682,9 @@ def start(args) -> int:
             LOCK.rmdir()
         except OSError as exc:
             raise PortableError("A stale or active lock exists without state; inspect data/run before retrying.") from exc
+
+    if _portable_tls_frontend_processes():
+        raise PortableError("An orphaned TLS frontend from this portable bundle remains; run ./bin/stop.sh before starting.")
 
     api_port = int(os.environ.get("THOZHA_PORTABLE_API_PORT", "8000"))
     local_only = args.local_only or os.environ.get("THOZHA_PORTABLE_LOCAL_ONLY") == "1"
