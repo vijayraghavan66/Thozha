@@ -7,13 +7,15 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from collections.abc import AsyncIterator
-from contextlib import aclosing
+from contextlib import ExitStack, aclosing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,265 @@ from openjarvis.security.mac_mcp_policy import (
 from openjarvis.server.performance import PERF_LOGGER
 
 MODEL = "gpt-6-luna"
+
+_ACTIVE_CODEX_LOCK = threading.RLock()
+_ACTIVE_CODEX_CLIENTS: dict[str, Any] = {}
+_ACTIVE_DEVELOPMENT_MCP_PROCESSES: dict[str, set[subprocess.Popen]] = {}
+_CODEX_TASK_CANCEL_EVENTS: dict[str, threading.Event] = {}
+
+
+def _codex_task_cancel_event(task_id: str) -> threading.Event:
+    with _ACTIVE_CODEX_LOCK:
+        return _CODEX_TASK_CANCEL_EVENTS.setdefault(task_id, threading.Event())
+
+
+def _clear_codex_task_cancel_event(
+    task_id: str, event: threading.Event | None
+) -> None:
+    if not task_id or event is None:
+        return
+    with _ACTIVE_CODEX_LOCK:
+        if _CODEX_TASK_CANCEL_EVENTS.get(task_id) is event:
+            _CODEX_TASK_CANCEL_EVENTS.pop(task_id, None)
+
+
+@contextmanager
+def _codex_task_startup_guard(
+    task_id: str,
+    *,
+    cancellation_event: threading.Event | None = None,
+    supervisor_store: Any | None = None,
+):
+    """Fence Codex startup against a durable Link-task cancellation.
+
+    The transaction stays open until the app-server process is created and
+    registered. A cancellation that wins first makes the task ineligible; one
+    that follows can see and terminate the registered process.
+    """
+    if not task_id:
+        yield
+        return
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise EngineConnectionError("Link task was cancelled before Codex startup.")
+    if supervisor_store is None:
+        from openjarvis.tasks.supervisor import get_supervisor_store
+
+        supervisor_store = get_supervisor_store()
+    with supervisor_store._tx() as db:
+        task = db.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if task is None or task["state"] != "RUNNING":
+            raise EngineConnectionError("Link task is no longer active; Codex was not started.")
+        if cancellation_event is not None and cancellation_event.is_set():
+            raise EngineConnectionError("Link task was cancelled before Codex startup.")
+        yield
+
+
+def _register_development_mcp_process(task_id: str, process: subprocess.Popen) -> None:
+    with _ACTIVE_CODEX_LOCK:
+        _ACTIVE_DEVELOPMENT_MCP_PROCESSES.setdefault(task_id, set()).add(process)
+
+
+def _unregister_development_mcp_process(task_id: str, process: subprocess.Popen) -> None:
+    with _ACTIVE_CODEX_LOCK:
+        processes = _ACTIVE_DEVELOPMENT_MCP_PROCESSES.get(task_id)
+        if processes is None:
+            return
+        processes.discard(process)
+        if not processes:
+            _ACTIVE_DEVELOPMENT_MCP_PROCESSES.pop(task_id, None)
+
+
+def _register_codex_client(task_id: str, codex: Any) -> None:
+    if task_id:
+        with _ACTIVE_CODEX_LOCK:
+            cancellation_event = _CODEX_TASK_CANCEL_EVENTS.get(task_id)
+            if cancellation_event is not None and cancellation_event.is_set():
+                raise EngineConnectionError("Link task was cancelled before Codex startup.")
+            _ACTIVE_CODEX_CLIENTS[task_id] = codex
+
+
+def _unregister_codex_client(task_id: str, codex: Any) -> None:
+    if not task_id:
+        return
+    with _ACTIVE_CODEX_LOCK:
+        if _ACTIVE_CODEX_CLIENTS.get(task_id) is codex:
+            _ACTIVE_CODEX_CLIENTS.pop(task_id, None)
+
+
+def _process_table() -> list[tuple[int, int, int, str]] | None:
+    """Read a bounded, credential-free process table for task child cleanup."""
+    ps = shutil.which("ps")
+    if not ps:
+        return None
+    try:
+        result = subprocess.run(
+            [ps, "-axo", "pid=,ppid=,uid=,command="],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or len(result.stdout) > 2 * 1024 * 1024:
+        return None
+    rows: list[tuple[int, int, int, str]] = []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) != 4:
+            continue
+        try:
+            rows.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3]))
+        except ValueError:
+            continue
+    return rows
+
+
+def _terminate_task_process_tree(root_pids: set[int]) -> bool:
+    """Terminate only current-user descendants of a task-bound Codex process."""
+    table = _process_table()
+    if table is None:
+        return False
+    uid = os.getuid()
+    parents = {pid: ppid for pid, ppid, process_uid, _ in table if process_uid == uid}
+    descendants: set[int] = set()
+    frontier = set(root_pids)
+    while frontier:
+        children = {pid for pid, ppid in parents.items() if ppid in frontier} - descendants - root_pids
+        if not children:
+            break
+        descendants.update(children)
+        frontier = children
+        if len(descendants) > 128:
+            return False
+
+    # Stop leaves before the app-server so its MCP children and SSH transports
+    # cannot outlive an Android cancellation.
+    ordered = sorted(descendants, reverse=True) + sorted(root_pids, reverse=True)
+    for pid in ordered:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            return False
+    deadline = time.monotonic() + 2
+    pending = set(ordered)
+    while pending and time.monotonic() < deadline:
+        pending = {pid for pid in pending if pid in parents and _pid_is_running(pid)}
+        if pending:
+            time.sleep(0.05)
+    for pid in pending:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            return False
+    return all(not _pid_is_running(pid) for pid in ordered)
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def cancel_active_codex_task(task_id: str) -> dict[str, Any]:
+    """Interrupt this task's Codex app-server and its task-scoped MCP subprocesses.
+
+    This is an in-process cancellation hook called only after the supervisor
+    has durably transitioned the owned Link task to CANCELLED. It never uses a
+    PID or process name supplied by the phone.
+    """
+    if not re.fullmatch(r"[0-9a-f]{32}", task_id):
+        return {"active": False, "confirmed": False, "mcp_processes_stopped": 0}
+    with _ACTIVE_CODEX_LOCK:
+        cancellation_event = _CODEX_TASK_CANCEL_EVENTS.setdefault(
+            task_id, threading.Event()
+        )
+        cancellation_event.set()
+        codex = _ACTIVE_CODEX_CLIENTS.get(task_id)
+        mcp_processes = list(_ACTIVE_DEVELOPMENT_MCP_PROCESSES.get(task_id, set()))
+
+    table = _process_table()
+    root_pids: set[int] = set()
+    if table is not None:
+        task_marker = f'mcp_servers.jarvis_dev.env.JARVIS_SUPERVISOR_TASK_ID="{task_id}"'
+        root_pids = {
+            pid
+            for pid, _ppid, process_uid, command in table
+            if process_uid == os.getuid()
+            and task_marker in command
+            and "app-server" in command
+        }
+
+    client = getattr(codex, "_client", None) if codex is not None else None
+    codex_process = getattr(client, "_proc", None)
+    if codex_process is not None and codex_process.poll() is None:
+        root_pids.add(codex_process.pid)
+    active = (
+        codex is not None
+        or bool(root_pids)
+        or any(process.poll() is None for process in mcp_processes)
+    )
+    if not active:
+        _clear_codex_task_cancel_event(task_id, cancellation_event)
+        return {
+            "active": False,
+            "confirmed": table is not None,
+            "mcp_processes_stopped": 0,
+        }
+
+    # Include MCP servers and transport helpers spawned beneath the task-bound
+    # app-server. The process arguments bind that app-server to this exact task.
+    process_tree_stopped = _terminate_task_process_tree(root_pids) if root_pids else table is not None
+    codex_stopped = True
+    if client is not None:
+        try:
+            client.close()
+            if codex_process is not None and codex_process.poll() is None:
+                codex_process.kill()
+                codex_process.wait(timeout=2)
+            codex_stopped = codex_process is None or codex_process.poll() is not None
+        except Exception:
+            codex_stopped = codex_process is not None and codex_process.poll() is not None
+
+    stopped = 0
+    mcp_stopped = True
+    for process in mcp_processes:
+        if process.poll() is not None:
+            stopped += 1
+            continue
+        try:
+            process.terminate()
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except Exception:
+                mcp_stopped = False
+        except Exception:
+            mcp_stopped = False
+        if process.poll() is None:
+            mcp_stopped = False
+        else:
+            stopped += 1
+        _unregister_development_mcp_process(task_id, process)
+    if codex is not None:
+        _unregister_codex_client(task_id, codex)
+    return {
+        "active": True,
+        "confirmed": codex_stopped and mcp_stopped and process_tree_stopped,
+        "mcp_processes_stopped": stopped,
+    }
 
 
 def _resolve_codex_home() -> Path:
@@ -549,6 +810,7 @@ def _call_local_dev_mcp(
         bufsize=1,
         env=env,
     )
+    _register_development_mcp_process(supervisor_task_id, proc)
     try:
         assert proc.stdin is not None and proc.stdout is not None
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n")
@@ -575,6 +837,7 @@ def _call_local_dev_mcp(
             "structuredContent": result.get("structuredContent"),
         }
     finally:
+        _unregister_development_mcp_process(supervisor_task_id, proc)
         if proc.stdin:
             proc.stdin.close()
         proc.terminate()
@@ -871,6 +1134,8 @@ class CodexSDKEngine(InferenceEngine):
         started_ns = time.perf_counter_ns()
         task_id = ""
         trace_id = "unlinked"
+        linked_task = False
+        task_cancel_event: threading.Event | None = None
         try:
             from openjarvis.tasks.supervisor import (
                 current_task_context,
@@ -880,6 +1145,7 @@ class CodexSDKEngine(InferenceEngine):
             task_context = current_task_context()
             if task_context is not None:
                 task_id = task_context.task_id
+                linked_task = task_context.source == "jarvis_link"
                 link_run = get_supervisor_store().link_task_run(task_id) or {}
                 idempotency_key = link_run.get("idempotency_key")
                 if isinstance(idempotency_key, str) and idempotency_key:
@@ -916,8 +1182,33 @@ class CodexSDKEngine(InferenceEngine):
             len(prompt),
             MODEL,
         )
+        active_codex = None
+        if linked_task and re.fullmatch(r"[0-9a-f]{32}", task_id):
+            task_cancel_event = _codex_task_cancel_event(task_id)
+            if task_cancel_event.is_set():
+                _clear_codex_task_cancel_event(task_id, task_cancel_event)
+                raise EngineConnectionError("Link task was cancelled before Codex startup.")
         try:
-            with Codex(config=config) as codex:
+            with ExitStack() as codex_stack:
+                if linked_task and re.fullmatch(r"[0-9a-f]{32}", task_id):
+                    from openjarvis.tasks.supervisor import get_supervisor_store
+
+                    supervisor_store = get_supervisor_store()
+                    with _codex_task_startup_guard(
+                        task_id,
+                        cancellation_event=task_cancel_event,
+                        supervisor_store=supervisor_store,
+                    ):
+                        codex = codex_stack.enter_context(Codex(config=config))
+                        active_codex = codex
+                        _register_codex_client(task_id, codex)
+                else:
+                    codex = codex_stack.enter_context(Codex(config=config))
+                    active_codex = codex
+                    _register_codex_client(task_id, codex)
+
+                if task_cancel_event is not None and task_cancel_event.is_set():
+                    raise EngineConnectionError("Link task was cancelled before the Codex turn.")
                 # Replace the SDK's default server-request handler so this
                 # bridge never silently approves shell or file-change requests.
                 codex._client._approval_handler = _approval_handler(mode)
@@ -932,6 +1223,8 @@ class CodexSDKEngine(InferenceEngine):
                         _WEB_CHAT_INSTRUCTIONS if disable_tools else _INSTRUCTIONS
                     ),
                 )
+                if task_cancel_event is not None and task_cancel_event.is_set():
+                    raise EngineConnectionError("Link task was cancelled before the Codex turn.")
                 PERF_LOGGER.info(
                     "perf trace=%s event=model_thread_ready wall_ms=%d mono_ns=%d elapsed_ms=%.3f task_id=%s",
                     trace_id, int(time.time() * 1000), time.perf_counter_ns(),
@@ -972,6 +1265,11 @@ class CodexSDKEngine(InferenceEngine):
                 (time.perf_counter_ns() - started_ns) / 1_000_000, task_id[:8] or "none", type(exc).__name__,
             )
             raise EngineConnectionError(f"Codex turn failed: {type(exc).__name__}: {exc}") from exc
+        finally:
+            if active_codex is not None:
+                _unregister_codex_client(task_id, active_codex)
+            if linked_task:
+                _clear_codex_task_cancel_event(task_id, task_cancel_event)
 
         usage = getattr(result, "usage", None)
         usage_dict: dict[str, Any] = {}

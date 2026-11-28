@@ -564,42 +564,63 @@ class RemoteMcpWorkerClient:
 
     def _stop_guest_unit(self, unit: str) -> None:
         if not re.fullmatch(r"jarvis-dev-[0-9a-f]{16}|jarvis-dev-[0-9a-f]{32}", unit):
+            raise RemoteWorkerError("task-scoped guest unit identity is invalid")
+
+        def systemctl(*arguments: str) -> subprocess.CompletedProcess[bytes]:
+            argv = [
+                "/usr/bin/ssh",
+                "-T",
+                "-F",
+                "/dev/null",
+                "-p",
+                str(self.config.port),
+                "-i",
+                str(self.config.identity_file),
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "IdentityAgent=none",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                f"UserKnownHostsFile={self.config.known_hosts_file}",
+                "-o",
+                "ConnectTimeout=5",
+                f"{self.config.ssh_user}@{self.config.host}",
+                shlex.join(["sudo", "-n", "systemctl", *arguments, unit]),
+            ]
+            try:
+                return subprocess.run(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=8,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RemoteWorkerError(
+                    "task-scoped guest unit state could not be confirmed"
+                ) from exc
+
+        # systemctl is-active uses 0 for active, 3 for inactive, and 4 for an
+        # unknown unit. Anything else means the remote state is indeterminate;
+        # do not remove the workspace while a worker might still be running.
+        before = systemctl("is-active", "--quiet")
+        if before.returncode in {3, 4}:
             return
-        argv = [
-            "/usr/bin/ssh",
-            "-T",
-            "-F",
-            "/dev/null",
-            "-p",
-            str(self.config.port),
-            "-i",
-            str(self.config.identity_file),
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            "IdentityAgent=none",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            f"UserKnownHostsFile={self.config.known_hosts_file}",
-            "-o",
-            "ConnectTimeout=5",
-            f"{self.config.ssh_user}@{self.config.host}",
-            shlex.join(["sudo", "-n", "systemctl", "stop", unit]),
-        ]
-        try:
-            subprocess.run(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=8,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        if before.returncode != 0:
+            raise RemoteWorkerError("task-scoped guest unit state could not be confirmed")
+
+        stopped = systemctl("stop")
+        if stopped.returncode != 0:
+            raise RemoteWorkerError("task-scoped guest unit did not stop successfully")
+
+        after = systemctl("is-active", "--quiet")
+        if after.returncode not in {3, 4}:
+            raise RemoteWorkerError("task-scoped guest unit is still active after stop")
 
 
 class RemoteWorkspace:

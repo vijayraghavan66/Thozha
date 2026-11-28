@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import os
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
+import pytest
 from openjarvis.core.types import Message, Role
 from openjarvis.engine import codex_sdk
+from openjarvis.tasks.supervisor import SupervisorStore
 
 
 def test_configured_codex_python_preserves_venv_launcher_symlink(
@@ -22,6 +28,152 @@ def test_configured_codex_python_preserves_venv_launcher_symlink(
     monkeypatch.setenv("OPENJARVIS_PYTHON", str(launcher))
 
     assert codex_sdk._resolve_codex_python() == launcher
+
+
+def test_cancel_active_codex_task_stops_its_app_server_and_dev_mcp_children(monkeypatch):
+    task_id = "e" * 32
+
+    class FakeProcess:
+        def __init__(self, pid):
+            self.pid = pid
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    codex_process = FakeProcess(2_000_000)
+    mcp_process = FakeProcess(2_000_001)
+
+    class FakeClient:
+        _proc = codex_process
+
+        def close(self):
+            codex_process.terminate()
+
+    codex = SimpleNamespace(_client=FakeClient())
+    monkeypatch.setitem(codex_sdk._ACTIVE_CODEX_CLIENTS, task_id, codex)
+    monkeypatch.setitem(codex_sdk._ACTIVE_DEVELOPMENT_MCP_PROCESSES, task_id, {mcp_process})
+    monkeypatch.setattr(codex_sdk, "_process_table", lambda: [])
+
+    result = codex_sdk.cancel_active_codex_task(task_id)
+
+    assert result == {"active": True, "confirmed": True, "mcp_processes_stopped": 1}
+    assert codex_process.poll() is not None
+    assert mcp_process.poll() is not None
+    assert task_id not in codex_sdk._ACTIVE_CODEX_CLIENTS
+    assert task_id not in codex_sdk._ACTIVE_DEVELOPMENT_MCP_PROCESSES
+
+
+def test_cancel_active_codex_task_finds_task_process_after_server_registry_restart(monkeypatch):
+    task_id = "f" * 32
+    task_process = 321
+    captured = []
+    monkeypatch.setattr(
+        codex_sdk,
+        "_process_table",
+        lambda: [
+            (task_process, 1, os.getuid(), f"codex --config mcp_servers.jarvis_dev.env.JARVIS_SUPERVISOR_TASK_ID=\"{task_id}\" app-server"),
+            (task_process + 1, task_process, os.getuid(), "python jarvis_dev_mcp.py"),
+        ],
+    )
+    monkeypatch.setattr(
+        codex_sdk,
+        "_terminate_task_process_tree",
+        lambda roots: captured.extend(sorted(roots)) or True,
+    )
+
+    result = codex_sdk.cancel_active_codex_task(task_id)
+
+    assert result["active"] is True
+    assert result["confirmed"] is True
+    assert captured == [task_process]
+
+
+def _running_link_task(store, owner_actor: str) -> dict[str, str]:
+    objective = "Summarize the selected development workspace"
+    idempotency_key = "codex-start-barrier-" + hashlib.sha256(owner_actor.encode()).hexdigest()[:16]
+    created = store.create_link_task(
+        objective,
+        capability_scope=["development"],
+        idempotency_key=idempotency_key,
+        owner_actor=owner_actor,
+    )
+    digest = hashlib.sha256(objective.encode()).hexdigest()
+    store.start_link_task(
+        created["task_id"],
+        objective_digest=digest,
+        objective_text_digest=digest,
+        capability_scope=["development"],
+        idempotency_key=idempotency_key,
+    )
+    return {"task_id": created["task_id"], "idempotency_key": idempotency_key}
+
+
+def test_codex_startup_guard_refuses_cancelled_task(tmp_path):
+    store = SupervisorStore(str(tmp_path / "supervisor.db"), run_recovery=False)
+    owner = "device:" + "a" * 32
+    task = _running_link_task(store, owner)
+    cancel_event = codex_sdk._codex_task_cancel_event(task["task_id"])
+    cancel_event.set()
+
+    with pytest.raises(codex_sdk.EngineConnectionError, match="cancelled"):
+        with codex_sdk._codex_task_startup_guard(
+            task["task_id"], cancellation_event=cancel_event, supervisor_store=store
+        ):
+            pytest.fail("a cancelled task must not start Codex")
+    assert task["task_id"] not in codex_sdk._ACTIVE_CODEX_CLIENTS
+    codex_sdk._clear_codex_task_cancel_event(task["task_id"], cancel_event)
+    store.close()
+
+
+def test_codex_startup_guard_serializes_process_registration_with_cancel(tmp_path):
+    database = tmp_path / "supervisor.db"
+    store = SupervisorStore(str(database), run_recovery=False)
+    owner = "device:" + "b" * 32
+    task = _running_link_task(store, owner)
+    cancel_store = SupervisorStore(str(database), run_recovery=False)
+    cancel_started = threading.Event()
+    cancel_finished = threading.Event()
+    registration = []
+    result = {}
+
+    def cancel_task():
+        cancel_started.set()
+        result["cancel"] = cancel_store.cancel_link_task(task["task_id"], actor=owner)
+        cancel_finished.set()
+
+    with codex_sdk._codex_task_startup_guard(
+        task["task_id"], supervisor_store=store
+    ):
+        # This represents creating/entering the Codex app-server and registering
+        # its process while the startup transaction fences supervisor cancel.
+        registration.append(task["task_id"])
+        thread = threading.Thread(target=cancel_task)
+        thread.start()
+        assert cancel_started.wait(timeout=5)
+        time.sleep(0.05)
+        assert not cancel_finished.is_set()
+
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert registration == [task["task_id"]]
+    assert result["cancel"]["cancelled"] is True
+    with pytest.raises(codex_sdk.EngineConnectionError, match="no longer active"):
+        with codex_sdk._codex_task_startup_guard(
+            task["task_id"], supervisor_store=store
+        ):
+            pytest.fail("Codex must not launch after cancellation commits")
+    cancel_store.close()
+    store.close()
 
 
 class _FakeThread:

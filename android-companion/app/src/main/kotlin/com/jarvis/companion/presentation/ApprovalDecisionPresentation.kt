@@ -30,6 +30,13 @@ data class ApprovalDecisionStatus(
 )
 
 object ApprovalDecisionPresentation {
+    /** A rejected approval is a terminal rejection, never a generic execution failure. */
+    fun resultingTaskState(decision: String, authoritativeState: String?): String {
+        val state = authoritativeState?.trim()?.uppercase().orEmpty()
+        if (state.isNotBlank()) return state
+        return if (decision.trim().equals("reject", ignoreCase = true)) "REJECTED" else "RUNNING"
+    }
+
     /**
      * Retry only an authoritative status read after a local decision request failed.
      * The server's pending/consumed/rejected state decides whether that prior tap

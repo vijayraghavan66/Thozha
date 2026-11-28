@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import base64
 import difflib
+import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
 from openjarvis.tasks.dev_capability import (
@@ -47,8 +49,35 @@ def _ensure_schema(store: SupervisorStore) -> None:
             """CREATE TABLE IF NOT EXISTS workspace_patches(
             patch_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),
             workspace_id TEXT NOT NULL, patch_json TEXT NOT NULL,
-            state TEXT NOT NULL, created_at TEXT NOT NULL)"""
+            state TEXT NOT NULL, created_at TEXT NOT NULL,
+            import_journal_json TEXT)"""
         )
+        patch_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(workspace_patches)")
+        }
+        if "import_journal_json" not in patch_columns:
+            db.execute("ALTER TABLE workspace_patches ADD COLUMN import_journal_json TEXT")
+
+
+@contextmanager
+def _exclusive_patch_import(db_path: str, patch_id: str):
+    """Serialize import and recovery across threads and server processes."""
+    if not re.fullmatch(r"[0-9a-f]{32}", patch_id):
+        raise CapabilityError("PATCH_INVALID", "patch identity is invalid")
+    lock_path = os.path.join(
+        os.path.dirname(os.path.abspath(db_path)), f".workspace-patch-{patch_id}.lock"
+    )
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 class WorkspaceRegistry:
@@ -246,6 +275,26 @@ class WorkspaceRegistry:
             )
         return row["state"] == "STAGED"
 
+    def has_task_workspace(self, task_id: str, owner_actor: str) -> bool:
+        """Whether this owner has a registered guest workspace for the task.
+
+        A snapshot is marked STAGED only after every file transfer completes. The
+        guest unit can already be active while that transfer is in progress, so
+        cancellation must also clean SNAPSHOTTED registrations. CLEANUP_PENDING
+        is included so recovery can retry after a previous cancellation failure.
+        """
+        row = self.supervisor._db.execute(
+            "SELECT s.state,w.owner_actor,w.scope FROM workspace_task_snapshots s "
+            "JOIN authorized_workspaces w USING(workspace_id) WHERE s.task_id=?",
+            (task_id,),
+        ).fetchone()
+        return bool(
+            row
+            and row["owner_actor"] == owner_actor
+            and row["scope"] == "development"
+            and row["state"] in {"SNAPSHOTTED", "STAGED", "CLEANUP_PENDING"}
+        )
+
     def mark_staged(self, task_id: str, workspace_id: str) -> None:
         with self.supervisor._tx() as db:
             updated = db.execute(
@@ -299,6 +348,213 @@ class WorkspaceRegistry:
                 else "workspace.guest_cleanup_pending",
                 {"workspace_id": row["workspace_id"], "error_type": error_type},
             )
+
+    def pending_cleanup_workspaces(self, *, limit: int = 100) -> list[dict[str, str]]:
+        """Return bounded task-owned guest workspaces whose cancellation cleanup failed.
+
+        Startup recovery can use these stable IDs to retry stopping each fixed
+        systemd unit and removing only its UUID-derived guest directory.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            raise ValueError("cleanup recovery limit must be an integer")
+        limit = min(max(limit, 1), 1000)
+        with self.supervisor._lock:
+            rows = self.supervisor._db.execute(
+                "SELECT s.task_id,s.workspace_id,w.owner_actor "
+                "FROM workspace_task_snapshots s "
+                "JOIN authorized_workspaces w USING(workspace_id) "
+                "WHERE s.state='CLEANUP_PENDING' "
+                "ORDER BY s.updated_at,s.task_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "task_id": str(row["task_id"]),
+                "workspace_id": str(row["workspace_id"]),
+                "owner_actor": str(row["owner_actor"]),
+            }
+            for row in rows
+        ]
+
+    def recover_incomplete_imports(self, *, limit: int = 100) -> dict[str, list[str]]:
+        """Recover imports interrupted after their durable journal was committed.
+
+        Files are restored only if every target still matches either its exact
+        baseline bytes or the exact approved patch bytes. Unknown host edits are
+        never overwritten and leave an explicit IMPORT_RECOVERY_CONFLICT state.
+        """
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            raise ValueError("patch recovery limit must be an integer")
+        limit = min(max(limit, 1), 1000)
+        with self.supervisor._lock:
+            rows = self.supervisor._db.execute(
+                "SELECT patch_id FROM workspace_patches "
+                "WHERE state IN ('IMPORTING','IMPORT_RECOVERY_PENDING') "
+                "ORDER BY created_at,patch_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        outcomes = {"recovered": [], "pending": [], "conflicts": []}
+        for row in rows:
+            patch_id = str(row["patch_id"])
+            try:
+                with _exclusive_patch_import(self.supervisor.db_path, patch_id):
+                    status = self._recover_incomplete_patch_import(patch_id)
+            except Exception:
+                status = "pending"
+            outcomes[status].append(patch_id)
+        return outcomes
+
+    def _recover_incomplete_patch_import(self, patch_id: str) -> str:
+        """Restore known partial imports; called with this patch's flock held."""
+        status = "recovered"
+        with self.supervisor._tx() as db:
+            row = db.execute(
+                "SELECT p.task_id,p.workspace_id,p.patch_json,p.state,p.import_journal_json,"
+                "s.snapshot_json,s.manifest_json,w.owner_actor,w.canonical_root,w.scope "
+                "FROM workspace_patches p "
+                "JOIN workspace_task_snapshots s ON s.task_id=p.task_id "
+                "JOIN authorized_workspaces w ON w.workspace_id=p.workspace_id "
+                "WHERE p.patch_id=?",
+                (patch_id,),
+            ).fetchone()
+            if row is None or row["state"] not in {
+                "IMPORTING", "IMPORT_RECOVERY_PENDING"
+            }:
+                return "recovered"
+            task_id = str(row["task_id"])
+            workspace_id = str(row["workspace_id"])
+            try:
+                persisted = json.loads(row["patch_json"])
+                journal = json.loads(row["import_journal_json"] or "{}")
+                encoded_original = json.loads(row["snapshot_json"])
+                original = {
+                    name: base64.b64decode(content, validate=True)
+                    for name, content in encoded_original.items()
+                }
+                manifest = json.loads(row["manifest_json"])
+                encoded_contents = persisted["contents"]
+                contents = {
+                    name: base64.b64decode(content, validate=True)
+                    for name, content in encoded_contents.items()
+                }
+                patch_text = persisted["patch"]
+                digest = hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
+                valid = (
+                    row["scope"] == "development"
+                    and row["owner_actor"]
+                    and persisted.get("patch_id") == patch_id
+                    and persisted.get("workspace_id") == workspace_id
+                    and persisted.get("patch_sha256") == digest
+                    and journal.get("version") == 1
+                    and journal.get("patch_sha256") == digest
+                    and journal.get("files") == sorted(contents)
+                    and journal.get("base_manifest") == manifest
+                    and persisted.get("base_manifest") == manifest
+                    and snapshot_manifest(original) == manifest
+                    and set(contents) <= set(original)
+                    and set(persisted.get("files", {})) == set(contents)
+                )
+                for rel, new_content in contents.items():
+                    if (
+                        not isinstance(new_content, bytes)
+                        or persisted["files"][rel]
+                        != {
+                            "bytes": len(new_content),
+                            "sha256": hashlib.sha256(new_content).hexdigest(),
+                        }
+                    ):
+                        valid = False
+                        break
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                valid = False
+                persisted = {}
+                original = {}
+                contents = {}
+                digest = ""
+            if not valid:
+                db.execute(
+                    "UPDATE workspace_patches SET state='IMPORT_RECOVERY_CONFLICT' "
+                    "WHERE patch_id=?",
+                    (patch_id,),
+                )
+                self.supervisor._event(
+                    db,
+                    task_id,
+                    "workspace.patch_import_recovery_conflict",
+                    {"patch_id": patch_id, "patch_sha256": digest or None},
+                )
+                return "conflicts"
+
+            root = canonical_workspace(row["canonical_root"])
+            plans: list[tuple[str, bytes, bytes]] = []
+            try:
+                # Preflight all files before the first rollback write. A file
+                # edited after the interrupted rename is a conflict, not a
+                # reason to overwrite the owner's newer content.
+                for rel in sorted(contents):
+                    parts = _check_relative(rel)
+                    if any(part.startswith(".") or part == ".git" for part in parts):
+                        raise CapabilityError("PATCH_SCOPE", "recovery path is not permitted")
+                    current = snapshot_files(
+                        root, [rel], max_bytes=MAX_SNAPSHOT_BYTES
+                    )[rel]
+                    before = original[rel]
+                    after = contents[rel]
+                    if current == after:
+                        plans.append((rel, after, before))
+                    elif current != before:
+                        raise CapabilityError(
+                            "PATCH_RECOVERY_CONFLICT",
+                            "workspace file differs from both import journal states",
+                        )
+            except Exception:
+                db.execute(
+                    "UPDATE workspace_patches SET state='IMPORT_RECOVERY_CONFLICT' "
+                    "WHERE patch_id=?",
+                    (patch_id,),
+                )
+                self.supervisor._event(
+                    db,
+                    task_id,
+                    "workspace.patch_import_recovery_conflict",
+                    {"patch_id": patch_id, "patch_sha256": digest},
+                )
+                return "conflicts"
+
+            try:
+                for rel, after, before in plans:
+                    _atomic_replace(root, rel, after, before)
+            except Exception as exc:
+                db.execute(
+                    "UPDATE workspace_patches SET state='IMPORT_RECOVERY_PENDING' "
+                    "WHERE patch_id=?",
+                    (patch_id,),
+                )
+                self.supervisor._event(
+                    db,
+                    task_id,
+                    "workspace.patch_import_recovery_pending",
+                    {"patch_id": patch_id, "error_type": type(exc).__name__},
+                )
+                return "pending"
+
+            db.execute(
+                "UPDATE workspace_patches SET state='EXPORTED',import_journal_json=NULL "
+                "WHERE patch_id=?",
+                (patch_id,),
+            )
+            self.supervisor._event(
+                db,
+                task_id,
+                "workspace.patch_import_recovered",
+                {
+                    "workspace_id": workspace_id,
+                    "patch_id": patch_id,
+                    "patch_sha256": digest,
+                    "restored_files": [rel for rel, _after, _before in plans],
+                },
+            )
+        return status
 
     def build_patch(
         self, task_id: str, owner_actor: str, read_guest_file
@@ -436,6 +692,31 @@ class WorkspaceRegistry:
     def apply_approved_patch(
         self, task_id: str, owner_actor: str, patch: dict[str, Any], *, approval_id: str
     ) -> dict[str, Any]:
+        patch_id = patch.get("patch_id") if isinstance(patch, dict) else None
+        if not isinstance(patch_id, str) or not re.fullmatch(r"[0-9a-f]{32}", patch_id):
+            raise CapabilityError("PATCH_INVALID", "patch identity is invalid")
+        with _exclusive_patch_import(self.supervisor.db_path, patch_id):
+            self._recover_incomplete_patch_import(patch_id)
+            try:
+                return self._apply_approved_patch_locked(
+                    task_id, owner_actor, patch, approval_id=approval_id
+                )
+            except Exception:
+                # If the database commit failed after filesystem changes, the
+                # committed IMPORTING journal lets this process compensate now.
+                # A process crash releases the flock and startup recovery does
+                # the same work later.
+                try:
+                    self._recover_incomplete_patch_import(patch_id)
+                except Exception:
+                    # Keep the original operation error visible. The durable
+                    # journal remains pending for the startup retry loop.
+                    pass
+                raise
+
+    def _apply_approved_patch_locked(
+        self, task_id: str, owner_actor: str, patch: dict[str, Any], *, approval_id: str
+    ) -> dict[str, Any]:
         """Apply VM changes only after owner approval binds the patch digest."""
         workspace_id, original, _manifest = self.snapshot_for_task(
             task_id, owner_actor, require_staged=True
@@ -501,7 +782,6 @@ class WorkspaceRegistry:
                 "PATCH_INVALID",
                 "unified diff does not match the proposed file contents",
             )
-        approval = self.supervisor.approval(approval_id)
         expected_args = {
             "patch_id": patch_id,
             "workspace_id": workspace_id,
@@ -511,29 +791,6 @@ class WorkspaceRegistry:
         expected_digest = operation_digest(
             "mcp:jarvis_dev:import_project_patch", expected_target, expected_args
         )
-        if (
-            not approval
-            or approval.get("task_id") != task_id
-            or approval.get("operation") != "mcp:jarvis_dev:import_project_patch"
-            or approval.get("target") != expected_target
-            or approval.get("args_digest") != expected_digest
-            or approval.get("status") != "CONSUMED"
-            or approval.get("decided_by") != owner_actor
-        ):
-            raise CapabilityError(
-                "PATCH_APPROVAL_REQUIRED",
-                "a consumed owner approval for this exact patch is required",
-            )
-        root_row = self.supervisor._db.execute(
-            "SELECT canonical_root FROM authorized_workspaces "
-            "WHERE workspace_id=? AND owner_actor=? AND revoked_at IS NULL",
-            (workspace_id, owner_actor),
-        ).fetchone()
-        if not root_row:
-            raise CapabilityError(
-                "WORKSPACE_NOT_AUTHORIZED", "workspace authorization has been revoked"
-            )
-        root = canonical_workspace(root_row["canonical_root"])
         if set(contents) - set(original):
             raise CapabilityError(
                 "PATCH_SCOPE", "patch adds files outside the registered snapshot"
@@ -542,40 +799,271 @@ class WorkspaceRegistry:
             raise CapabilityError(
                 "PATCH_INVALID", "patch file manifest does not match content"
             )
-        # Validate every baseline before any write, so stale projects are untouched.
-        for rel in contents:
-            _verify_current(root, rel, original[rel])
-        for rel, new_content in contents.items():
-            parts = _check_relative(rel)
-            if any(
-                part.startswith(".") or part == ".git" for part in parts
-            ) or not isinstance(new_content, bytes):
-                raise CapabilityError(
-                    "PATCH_SCOPE", "patch path or content is not permitted"
-                )
-            if patch["files"][rel] != {
-                "bytes": len(new_content),
-                "sha256": hashlib.sha256(new_content).hexdigest(),
-            }:
-                raise CapabilityError(
-                    "PATCH_INVALID", "patch manifest failed validation"
-                )
-            _atomic_replace(root, rel, original[rel], new_content)
-        self.supervisor.record_event(
-            task_id,
-            "workspace.patch_applied",
-            {
-                "workspace_id": workspace_id,
-                "patch_sha256": digest,
-                "files": sorted(contents),
-            },
-        )
-        with self.supervisor._tx() as db:
-            db.execute(
-                "UPDATE workspace_patches SET state='IMPORTED' "
-                "WHERE patch_id=? AND state='EXPORTED'",
-                (patch_id,),
+
+        def validate_import_context(db, expected_patch_state: str):
+            task_row = db.execute(
+                "SELECT state,recovery_json,capabilities_json FROM tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise CapabilityError("TASK_UNKNOWN", "supervisor task does not exist")
+            try:
+                task_metadata = json.loads(task_row["recovery_json"] or "{}")
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise CapabilityError("TASK_INVALID", "supervisor task metadata is invalid") from exc
+            if (
+                task_row["state"] not in {
+                    "CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING_APPROVAL"
+                }
+                or task_metadata.get("owner_actor") != owner_actor
+                or task_metadata.get("scope") != "development"
+            ):
+                raise CapabilityError("TASK_INACTIVE", "task is no longer authorized to import a patch")
+
+            # Revalidate all database bindings inside the cancellation lock.
+            staged_workspace_id, current_original, _manifest = self.snapshot_for_task(
+                task_id, owner_actor, require_staged=True
             )
+            if staged_workspace_id != workspace_id or current_original != original:
+                raise CapabilityError("PATCH_STALE", "workspace snapshot changed before import")
+            current_patch = db.execute(
+                "SELECT patch_json,state,import_journal_json FROM workspace_patches "
+                "WHERE patch_id=? AND task_id=? AND workspace_id=?",
+                (patch_id, task_id, workspace_id),
+            ).fetchone()
+            if (
+                not current_patch
+                or current_patch["state"] != expected_patch_state
+                or json.loads(current_patch["patch_json"]).get("patch_sha256") != digest
+            ):
+                raise CapabilityError("PATCH_INVALID", "patch import state is unavailable")
+            approval_row = db.execute(
+                "SELECT task_id,operation,target,args_digest,status,decided_by "
+                "FROM operation_approvals WHERE id=?",
+                (approval_id,),
+            ).fetchone()
+            if (
+                not approval_row
+                or approval_row["task_id"] != task_id
+                or approval_row["operation"] != "mcp:jarvis_dev:import_project_patch"
+                or approval_row["target"] != expected_target
+                or approval_row["args_digest"] != expected_digest
+                or approval_row["status"] != "CONSUMED"
+                or approval_row["decided_by"] != owner_actor
+            ):
+                raise CapabilityError(
+                    "PATCH_APPROVAL_REQUIRED",
+                    "a consumed owner approval for this exact patch is required",
+                )
+            root_row = db.execute(
+                "SELECT canonical_root FROM authorized_workspaces "
+                "WHERE workspace_id=? AND owner_actor=? AND revoked_at IS NULL",
+                (workspace_id, owner_actor),
+            ).fetchone()
+            if not root_row:
+                raise CapabilityError(
+                    "WORKSPACE_NOT_AUTHORIZED", "workspace authorization has been revoked"
+                )
+            return (
+                canonical_workspace(root_row["canonical_root"]),
+                current_original,
+                current_patch,
+            )
+
+        # Commit a recovery journal before touching host files. The exclusive
+        # patch flock is held by the public wrapper across both transactions, so
+        # recovery cannot mistake this live two-phase import for a crash.
+        with self.supervisor._tx() as db:
+            root, current_original, _current_patch = validate_import_context(
+                db, "EXPORTED"
+            )
+            if current_original != original:
+                raise CapabilityError("PATCH_STALE", "workspace snapshot changed before import")
+            for rel in contents:
+                _verify_current(root, rel, original[rel])
+            journal = json.dumps(
+                {
+                    "version": 1,
+                    "patch_sha256": digest,
+                    "files": sorted(contents),
+                    "base_manifest": persisted.get("base_manifest", {}),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            updated = db.execute(
+                "UPDATE workspace_patches SET state='IMPORTING',import_journal_json=? "
+                "WHERE patch_id=? AND task_id=? AND state='EXPORTED'",
+                (journal, patch_id, task_id),
+            ).rowcount
+            if updated != 1:
+                raise CapabilityError("PATCH_INVALID", "patch import could not be reserved")
+            self.supervisor._event(
+                db,
+                task_id,
+                "workspace.patch_import_started",
+                {"workspace_id": workspace_id, "patch_id": patch_id, "patch_sha256": digest},
+            )
+
+        failure: CapabilityError | None = None
+        with self.supervisor._tx() as db:
+            try:
+                root, current_original, current_patch = validate_import_context(
+                    db, "IMPORTING"
+                )
+                if current_original != original:
+                    raise CapabilityError(
+                        "PATCH_STALE", "workspace snapshot changed during import"
+                    )
+                journal = json.loads(current_patch["import_journal_json"] or "{}")
+                if (
+                    journal.get("version") != 1
+                    or journal.get("patch_sha256") != digest
+                    or journal.get("files") != sorted(contents)
+                ):
+                    raise CapabilityError("PATCH_INVALID", "patch import journal is invalid")
+                for rel in contents:
+                    _verify_current(root, rel, original[rel])
+            except CapabilityError as exc:
+                # No host file has been touched in this transaction. Clear the
+                # reservation while preserving cancellation/stale-baseline
+                # semantics and a durable audit reason.
+                db.execute(
+                    "UPDATE workspace_patches SET state='EXPORTED',import_journal_json=NULL "
+                    "WHERE patch_id=? AND task_id=? AND state='IMPORTING'",
+                    (patch_id, task_id),
+                )
+                self.supervisor._event(
+                    db,
+                    task_id,
+                    "workspace.patch_import_aborted",
+                    {"patch_id": patch_id, "reason": exc.code},
+                )
+                failure = exc
+            else:
+                attempted: list[str] = []
+
+                def rollback_attempted() -> list[str]:
+                    failures: list[str] = []
+                    for changed_rel in reversed(attempted):
+                        try:
+                            _verify_current(root, changed_rel, contents[changed_rel])
+                        except CapabilityError:
+                            # The atomic rename may not have happened, or an
+                            # external edit may have replaced the target. Leave an
+                            # already-original file alone; never overwrite a new
+                            # owner edit while attempting compensation.
+                            try:
+                                _verify_current(root, changed_rel, original[changed_rel])
+                                continue
+                            except CapabilityError:
+                                failures.append("PATCH_STALE")
+                                continue
+                        try:
+                            _atomic_replace(
+                                root,
+                                changed_rel,
+                                contents[changed_rel],
+                                original[changed_rel],
+                            )
+                        except Exception as rollback_exc:
+                            failures.append(type(rollback_exc).__name__)
+                    return failures
+
+                try:
+                    for rel, new_content in contents.items():
+                        parts = _check_relative(rel)
+                        if any(
+                            part.startswith(".") or part == ".git" for part in parts
+                        ) or not isinstance(new_content, bytes):
+                            raise CapabilityError(
+                                "PATCH_SCOPE", "patch path or content is not permitted"
+                            )
+                        if patch["files"][rel] != {
+                            "bytes": len(new_content),
+                            "sha256": hashlib.sha256(new_content).hexdigest(),
+                        }:
+                            raise CapabilityError(
+                                "PATCH_INVALID", "patch manifest failed validation"
+                            )
+                        # Track before the call because a parent-directory fsync
+                        # error can be reported after os.replace already succeeded.
+                        attempted.append(rel)
+                        _atomic_replace(root, rel, original[rel], new_content)
+                except Exception as exc:
+                    rollback_errors = rollback_attempted()
+                    if rollback_errors:
+                        db.execute(
+                            "UPDATE workspace_patches SET state='IMPORT_RECOVERY_PENDING' "
+                            "WHERE patch_id=? AND task_id=? AND state='IMPORTING'",
+                            (patch_id, task_id),
+                        )
+                        self.supervisor._event(
+                            db,
+                            task_id,
+                            "workspace.patch_import_recovery_pending",
+                            {
+                                "patch_id": patch_id,
+                                "patch_sha256": digest,
+                                "rollback_errors": rollback_errors,
+                            },
+                        )
+                        failure = CapabilityError(
+                            "PATCH_ROLLBACK_PENDING",
+                            "patch import failed; durable recovery will reconcile changed files",
+                        )
+                    else:
+                        db.execute(
+                            "UPDATE workspace_patches SET state='EXPORTED',import_journal_json=NULL "
+                            "WHERE patch_id=? AND task_id=? AND state='IMPORTING'",
+                            (patch_id, task_id),
+                        )
+                        self.supervisor._event(
+                            db,
+                            task_id,
+                            "workspace.patch_import_failed",
+                            {"patch_id": patch_id, "error_type": type(exc).__name__},
+                        )
+                        failure = (
+                            exc
+                            if isinstance(exc, CapabilityError)
+                            else CapabilityError(
+                                "PATCH_IMPORT_FAILED",
+                                "patch import failed; changed files were restored",
+                            )
+                        )
+                else:
+                    updated = db.execute(
+                        "UPDATE workspace_patches SET state='IMPORTED',import_journal_json=NULL "
+                        "WHERE patch_id=? AND task_id=? AND state='IMPORTING'",
+                        (patch_id, task_id),
+                    ).rowcount
+                    if updated != 1:
+                        rollback_errors = rollback_attempted()
+                        state = "IMPORT_RECOVERY_PENDING" if rollback_errors else "EXPORTED"
+                        journal_sql = ",import_journal_json=NULL" if not rollback_errors else ""
+                        db.execute(
+                            f"UPDATE workspace_patches SET state=?{journal_sql} "
+                            "WHERE patch_id=? AND task_id=?",
+                            (state, patch_id, task_id),
+                        )
+                        failure = CapabilityError(
+                            "PATCH_ROLLBACK_PENDING" if rollback_errors else "PATCH_INVALID",
+                            "patch import state changed before commit",
+                        )
+                    else:
+                        self.supervisor._event(
+                            db,
+                            task_id,
+                            "workspace.patch_applied",
+                            {
+                                "workspace_id": workspace_id,
+                                "patch_sha256": digest,
+                                "files": sorted(contents),
+                            },
+                        )
+        if failure is not None:
+            raise failure
         return {
             "workspace_id": workspace_id,
             "patch_sha256": digest,

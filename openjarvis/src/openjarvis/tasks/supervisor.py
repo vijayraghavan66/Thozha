@@ -316,6 +316,12 @@ class SupervisorStore:
               task_id TEXT NOT NULL REFERENCES tasks(id), operation TEXT NOT NULL,
               target TEXT NOT NULL, args_digest TEXT NOT NULL, claimed_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS task_process_cleanup(
+              task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+              state TEXT NOT NULL CHECK(state IN ('PENDING','CONFIRMED')),
+              attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+              updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS device_pairings(
               id TEXT PRIMARY KEY, challenge TEXT NOT NULL, created_at TEXT NOT NULL,
               expires_at TEXT NOT NULL, used_at TEXT,
@@ -864,6 +870,54 @@ class SupervisorStore:
             for approval in pending:
                 self._event(db, task_id, "approval.expired", {"approval_id": approval["id"], "reason": "task_cancelled"})
             return {"state": "CANCELLED", "cancelled": True, "action_may_have_started": claimed}
+
+    def record_model_process_cleanup(
+        self, task_id: str, *, confirmed: bool, error_type: str | None = None
+    ) -> None:
+        """Persist host Codex/MCP process cleanup status for restart recovery."""
+        now = utc_now()
+        state = "CONFIRMED" if confirmed else "PENDING"
+        safe_error = (
+            error_type[:80]
+            if isinstance(error_type, str) and error_type
+            else None
+        )
+        with self._tx() as db:
+            task = db.execute("SELECT state FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if task is None:
+                raise KeyError(task_id)
+            if task["state"] != "CANCELLED":
+                raise RuntimeError("process cleanup can only be recorded for a cancelled task")
+            db.execute(
+                "INSERT INTO task_process_cleanup(task_id,state,attempts,last_error,updated_at) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET "
+                "state=excluded.state,attempts=task_process_cleanup.attempts+?,"
+                "last_error=excluded.last_error,updated_at=excluded.updated_at",
+                (task_id, state, 1 if not confirmed else 0, safe_error, now, 1 if not confirmed else 0),
+            )
+            self._event(
+                db,
+                task_id,
+                "task.model_process_cleanup_confirmed"
+                if confirmed
+                else "task.model_process_cleanup_pending",
+                {"error_type": safe_error},
+            )
+
+    def pending_model_process_cleanup_tasks(self, limit: int = 100) -> list[str]:
+        """Return cancelled Link tasks whose host process tree still needs cleanup."""
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            raise ValueError("process cleanup limit must be an integer")
+        limit = min(max(limit, 1), 1000)
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT c.task_id FROM task_process_cleanup c "
+                "JOIN tasks t ON t.id=c.task_id "
+                "WHERE c.state='PENDING' AND t.state='CANCELLED' "
+                "ORDER BY c.updated_at,c.task_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [str(row["task_id"]) for row in rows]
 
     def create_approval(self, task_id: str, operation: str, target: str, arguments: dict[str, Any], reason: str, ttl_seconds: int = 600) -> tuple[str, str]:
         if not self.task_exists(task_id):

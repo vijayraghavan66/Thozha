@@ -29,6 +29,7 @@ router = APIRouter(prefix="/v1/jarvis", tags=["jarvis-supervisor"])
 logger = logging.getLogger(__name__)
 _ARTIFACT_STORE = None
 _DEVICE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_APPROVED_TEST_RUNS: set[asyncio.Task] = set()
 
 
 def _artifact_store():
@@ -139,6 +140,346 @@ def _link_task_progress_summary(store: Any, task_id: str, state: str, task: dict
         if kind == "link_task.started":
             return "The assistant is working on the task."
     return "Working on the task."
+
+
+def _safe_workspace_event_paths(value: Any) -> list[str]:
+    """Return only relative project paths suitable for display in the companion app."""
+    if not isinstance(value, list):
+        return []
+    paths: set[str] = set()
+    for path in value:
+        if not isinstance(path, str) or not path or len(path) > 240 or "\\" in path:
+            continue
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in path):
+            continue
+        parts = path.split("/")
+        if path.startswith("/") or any(part in {"", ".", ".."} or part.startswith(".") for part in parts):
+            continue
+        paths.add(path)
+    return sorted(paths)
+
+
+def _safe_error_label(value: Any) -> str | None:
+    """Display only symbolic supervisor error labels, never arbitrary exception text."""
+    if (
+        isinstance(value, str)
+        and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,79}", value)
+        and ".." not in value
+    ):
+        return value
+    return None
+
+
+def _development_result_evidence(
+    store: Any, task_id: str, state: str, *, last_error: str | None = None
+) -> str:
+    """Render bounded task evidence from durable allowlisted supervisor events.
+
+    This deliberately ignores model-authored prose and host path fields. It never
+    claims a file reached the owner workspace unless `workspace.patch_applied`
+    confirms that exact action.
+    """
+    try:
+        events = store.events_after(task_id, 0, 200)
+    except Exception:
+        events = []
+
+    test_runs: list[dict[str, Any]] = []
+    test_execution_started = False
+    vm_writes: set[str] = set()
+    exported: list[dict[str, Any]] = []
+    imported: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+    cancellation_recorded = False
+    test_execution_cancelled = False
+    model_cleanup: tuple[bool, str | None] | None = None
+    mcp_processes_stopped: int | None = None
+    guest_cleanup: tuple[bool, str | None] | None = None
+    revoked_capabilities: int | None = None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("event_type")
+        payload = event.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if kind == "development.tests_completed":
+            tests_ran = payload.get("tests_ran")
+            failures = payload.get("failures")
+            errors = payload.get("errors")
+            passed = payload.get("passed")
+            if (
+                isinstance(tests_ran, int) and not isinstance(tests_ran, bool)
+                and isinstance(failures, int) and not isinstance(failures, bool)
+                and isinstance(errors, int) and not isinstance(errors, bool)
+                and isinstance(passed, bool)
+            ):
+                test_runs.append({
+                    "tests_ran": max(0, tests_ran),
+                    "failures": max(0, failures),
+                    "errors": max(0, errors),
+                    "passed": passed,
+                    "timed_out": bool(payload.get("timed_out", False)),
+                })
+        elif kind == "development.test_execution_scheduled":
+            test_execution_started = True
+        elif kind == "development.operation_started" and payload.get("operation") == "run_tests":
+            test_execution_started = True
+        elif kind == "development.test_execution_cancelled":
+            test_execution_cancelled = True
+        elif kind == "task.cancelled":
+            cancellation_recorded = True
+        elif kind == "task.model_process_cancelled":
+            confirmed = payload.get("confirmed")
+            if isinstance(confirmed, bool):
+                model_cleanup = (confirmed, None)
+            stopped = payload.get("mcp_processes_stopped")
+            if isinstance(stopped, int) and not isinstance(stopped, bool) and stopped >= 0:
+                mcp_processes_stopped = stopped
+        elif kind in {"task.model_process_cleanup_confirmed", "task.model_process_cleanup_pending"}:
+            model_cleanup = (
+                kind.endswith("_confirmed"),
+                _safe_error_label(payload.get("error_type")),
+            )
+        elif kind in {"workspace.guest_cleanup_completed", "workspace.guest_cleanup_pending"}:
+            guest_cleanup = (
+                kind.endswith("_completed"),
+                _safe_error_label(payload.get("error_type")),
+            )
+        elif kind == "development.capabilities_revoked":
+            count = payload.get("count")
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                revoked_capabilities = count
+        elif kind == "development.file_written":
+            paths = _safe_workspace_event_paths([payload.get("path")])
+            vm_writes.update(paths)
+        elif kind in {"workspace.patch_exported", "development.patch_approval_requested"}:
+            paths = _safe_workspace_event_paths(payload.get("files"))
+            digest = payload.get("patch_sha256")
+            if paths and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                exported.append({"files": paths, "sha256": digest})
+        elif kind == "workspace.patch_applied":
+            paths = _safe_workspace_event_paths(payload.get("files"))
+            digest = payload.get("patch_sha256")
+            if paths and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                imported.append({"files": paths, "sha256": digest})
+        elif kind == "development.artifact_export_completed":
+            artifact_id = payload.get("artifact_id")
+            digest = payload.get("archive_sha256")
+            size = payload.get("size_bytes")
+            if (
+                isinstance(artifact_id, str) and re.fullmatch(r"[0-9a-f]{32}", artifact_id)
+                and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+                and isinstance(size, int) and not isinstance(size, bool) and size >= 0
+            ):
+                artifacts.append({"id": artifact_id, "sha256": digest, "size_bytes": size})
+
+    lines = [f"Execution status: {state}."]
+    if state == "CANCELLED":
+        lines.append(
+            "Cancellation: recorded by the supervisor."
+            if cancellation_recorded else "Cancellation: terminal cancelled state recorded."
+        )
+    elif state == "FAILED" and isinstance(last_error, str) and last_error:
+        # Only symbolic supervisor codes/type names are safe for display.
+        safe_error = _safe_error_label(last_error)
+        if safe_error:
+            lines.append(f"Failure code: {safe_error}.")
+        else:
+            lines.append("Failure: recorded by the supervisor.")
+    if test_runs:
+        for index, result in enumerate(test_runs, 1):
+            status = "passed" if result["passed"] and not result["timed_out"] else "failed"
+            timeout = "; timed out" if result["timed_out"] else ""
+            lines.append(
+                f"Test run {index}: {status}; {result['tests_ran']} run, "
+                f"{result['failures']} failures, {result['errors']} errors{timeout}."
+            )
+    elif test_execution_started:
+        lines.append("Test execution started; no completed test result was recorded.")
+    else:
+        lines.append("Tests: no completed test run was recorded.")
+    if test_execution_cancelled:
+        lines.append("Test executor returned after cancellation; its late result was discarded.")
+    if model_cleanup is not None:
+        cleanup_label = "confirmed" if model_cleanup[0] else "pending; termination could not be confirmed"
+        lines.append(f"Codex/MCP process cleanup: {cleanup_label}.")
+        if model_cleanup[1]:
+            lines.append(f"Process cleanup error type: {model_cleanup[1][:80]}.")
+    if mcp_processes_stopped is not None:
+        lines.append(f"MCP child processes stopped: {mcp_processes_stopped}.")
+    if guest_cleanup is not None:
+        cleanup_label = "completed" if guest_cleanup[0] else "pending; guest cleanup could not be confirmed"
+        lines.append(f"VM workspace cleanup: {cleanup_label}.")
+        if guest_cleanup[1]:
+            lines.append(f"VM cleanup error type: {guest_cleanup[1][:80]}.")
+    if revoked_capabilities is not None:
+        lines.append(f"Development capabilities revoked: {revoked_capabilities}.")
+    if vm_writes:
+        lines.append("Files written in VM: " + ", ".join(sorted(vm_writes)[:20]) + ".")
+    else:
+        lines.append("Files written in VM: none recorded.")
+    if exported:
+        latest = exported[-1]
+        lines.append(
+            "Patch exported: " + ", ".join(latest["files"][:20])
+            + f" (SHA-256 {latest['sha256']})."
+        )
+    else:
+        lines.append("Patch exported: none recorded.")
+    if imported:
+        latest = imported[-1]
+        lines.append(
+            "Patch imported into owner workspace: " + ", ".join(latest["files"][:20])
+            + f" (SHA-256 {latest['sha256']})."
+        )
+    else:
+        lines.append("Patch imported into owner workspace: none recorded.")
+    if artifacts:
+        latest_artifact = artifacts[-1]
+        lines.append(
+            f"Artifact: {latest_artifact['id']} (SHA-256 {latest_artifact['sha256']}, "
+            f"{latest_artifact['size_bytes']} bytes)."
+        )
+    else:
+        lines.append("Artifacts: none recorded.")
+    return "Task evidence from supervisor records:\n" + "\n".join(lines)
+
+
+_RESULT_DENIES_TEST_EXECUTION = re.compile(
+    r"\b(?:i\s+)?(?:did\s+not|didn't|have\s+not|haven't|never)\s+"
+    r"(?:actually\s+)?(?:run|execute|perform)\b.{0,80}\btests?\b"
+    r"|\b(?:tests?|test\s+suite)\s+(?:has|have|was|were)\s+not\s+"
+    r"(?:been\s+)?(?:run|executed|performed)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _development_result_conflicts_with_evidence(
+    store: Any, task_id: str, result: str
+) -> bool:
+    """Detect model prose explicitly denying a test run recorded by the supervisor."""
+    if not isinstance(result, str) or not _RESULT_DENIES_TEST_EXECUTION.search(result):
+        return False
+    try:
+        events = store.events_after(task_id, 0, 200)
+    except Exception:
+        return False
+    for event in events:
+        if not isinstance(event, dict) or event.get("event_type") != "development.tests_completed":
+            continue
+        payload = event.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        tests_ran = payload.get("tests_ran")
+        passed = payload.get("passed")
+        if isinstance(tests_ran, int) and not isinstance(tests_ran, bool) and tests_ran >= 0 and isinstance(passed, bool):
+            return True
+    return False
+
+
+def _link_result_for_client(
+    store: Any,
+    task_id: str,
+    scope: str,
+    state: str,
+    result: str,
+    *,
+    last_error: str | None = None,
+) -> str:
+    if scope != '["development"]' or state not in {"COMPLETED", "FAILED", "CANCELLED"}:
+        return result
+    evidence = _development_result_evidence(store, task_id, state, last_error=last_error)
+    # For failed/cancelled tasks the durable lifecycle and event records are
+    # authoritative. Suppress model prose that may claim success or uncertain
+    # cleanup after the supervisor has already made a terminal decision.
+    if state != "COMPLETED" or not result.strip():
+        return evidence
+    if _development_result_conflicts_with_evidence(store, task_id, result):
+        return evidence + "\n\nAssistant narrative omitted because it conflicts with recorded test results."
+    return f"{evidence}\n\nTask result:\n{result.rstrip()}".strip()
+
+
+async def _execute_plan_approved_tests(
+    store: Any, *, task_id: str, capability_id: str
+) -> None:
+    """Execute the fixed test operation for a user-approved test-only plan.
+
+    A development plan whose exact allowlist is only ``run_tests`` needs no
+    further model judgment after the owner approves it. Dispatching that one
+    fixed command here makes the approved workflow deterministic and exposes
+    real test-start/progress/result events to the Android task timeline.
+    """
+    try:
+        from openjarvis.engine.codex_sdk import _call_local_dev_mcp
+
+        result = await asyncio.to_thread(
+            _call_local_dev_mcp,
+            "run_project_tests",
+            {"capability_id": capability_id},
+            supervisor_task_id=task_id,
+            supervisor_task_source="jarvis_link",
+            supervisor_task_scope="development",
+        )
+        result_text = "\n".join(
+            item.get("text", "")
+            for item in result.get("content", [])
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ).strip()
+        current = store.get_task(task_id) or {}
+        run = store.link_task_run(task_id) or {}
+        # Cancellation is terminal even if a killed MCP child returns after
+        # its parent task was cancelled. Never turn that result into success.
+        if current.get("state") == "CANCELLED" or run.get("status") == "CANCELLED":
+            store.record_event(task_id, "development.test_execution_cancelled", {
+                "result_returned_after_cancel": True,
+            })
+            return
+        if bool(result.get("isError")):
+            store.finish_link_task(task_id, error="approved_tests_failed")
+            current = store.get_task(task_id) or {}
+            if current.get("state") in {"RUNNING", "VERIFYING", "PLANNING"}:
+                store.transition(
+                    task_id, "FAILED", expected=current["state"],
+                    error="approved_tests_failed",
+                )
+            return
+        store.finish_link_task(
+            task_id,
+            result_text=result_text or "The approved test command completed.",
+        )
+        current = store.get_task(task_id) or {}
+        if current.get("state") == "RUNNING":
+            store.transition(task_id, "VERIFYING", expected="RUNNING", step="test_verification")
+            current = store.get_task(task_id) or {}
+        if current.get("state") == "VERIFYING":
+            store.transition(
+                task_id, "COMPLETED", expected="VERIFYING",
+                evidence={"approved_test_operation_completed": True},
+            )
+    except Exception as exc:
+        current = store.get_task(task_id) or {}
+        run = store.link_task_run(task_id) or {}
+        if current.get("state") == "CANCELLED" or run.get("status") == "CANCELLED":
+            return
+        logger.warning(
+            "Approved test-only Link task failed task=%s error=%s",
+            task_id[:8], type(exc).__name__,
+        )
+        if run.get("status") == "RUNNING":
+            try:
+                store.finish_link_task(task_id, error=type(exc).__name__)
+            except (KeyError, RuntimeError):
+                pass
+        current = store.get_task(task_id) or {}
+        if current.get("state") in {"RUNNING", "VERIFYING", "PLANNING"}:
+            try:
+                store.transition(
+                    task_id, "FAILED", expected=current["state"],
+                    error=type(exc).__name__,
+                )
+            except (KeyError, RuntimeError, ValueError):
+                pass
 
 
 def _require_owned_completed_development_task(task_id: str, device_id: str) -> None:
@@ -946,10 +1287,18 @@ async def run_link_task(request: Request) -> JSONResponse:
     if not run.get("created"):
         status = run.get("status")
         if status == "COMPLETED":
+            result_text = _link_result_for_client(
+                store,
+                task_id,
+                str(run.get("scope") or ""),
+                "COMPLETED",
+                str(run.get("result_text") or run.get("result_summary") or ""),
+            )
             response = JSONResponse({
                 "task_id": task_id,
                 "state": "COMPLETED",
-                "summary": run.get("result_summary") or "",
+                "summary": result_text[:1000],
+                "result_text": bounded_result_text(result_text),
                 "result_digest": run.get("result_digest"),
                 "idempotent_replay": True,
             })
@@ -1068,7 +1417,10 @@ async def run_link_task(request: Request) -> JSONResponse:
     if task.get("state") != "COMPLETED":
         raise HTTPException(status_code=502, detail="Link task did not reach a terminal state")
     link_run = store.link_task_run(task_id) or {}
-    summary = _response_content(result)
+    summary = str(link_run.get("result_text") or _response_content(result))
+    summary = _link_result_for_client(
+        store, task_id, str(link_run.get("scope") or ""), "COMPLETED", summary
+    )
     _perf_log(trace, "task_response_ready", route_started_ns, task_id=str(task_id or "")[:8], state="COMPLETED")
     return JSONResponse({
         "task_id": task_id,
@@ -1101,14 +1453,33 @@ async def get_link_task_status(idempotency_key: str, request: Request) -> dict[s
     if owner and actor != owner and not actor.startswith("api:"):
         raise HTTPException(status_code=403, detail="This task belongs to another paired device")
     state = record.get("task_state") or record.get("status") or "UNKNOWN"
-    summary = record.get("result_summary") if state == "COMPLETED" else _link_task_progress_summary(store, record["task_id"], str(state), task)
-    if state == "FAILED" and record.get("last_error") == "approval_expired":
+    result_text = str(record.get("result_text") or record.get("result_summary") or "")
+    scope = str(record.get("scope") or "")
+    development_task = scope == '["development"]'
+    if state in {"COMPLETED", "FAILED", "CANCELLED"} and development_task:
+        summary = _link_result_for_client(
+            store,
+            record["task_id"],
+            scope,
+            str(state),
+            result_text,
+            last_error=record.get("last_error"),
+        )
+    elif state == "COMPLETED":
+        summary = result_text
+    else:
+        summary = _link_task_progress_summary(store, record["task_id"], str(state), task)
+    if state == "FAILED" and record.get("last_error") == "approval_expired" and not development_task:
         summary = "Approval expired before a decision. No operation ran; submit a new request if you still want it."
+    if development_task and state in {"FAILED", "CANCELLED"}:
+        client_result_text = bounded_result_text(summary)
+    else:
+        client_result_text = (record.get("result_text") or record.get("result_summary") or "") if state == "COMPLETED" else None
     return {
         "task_id": record["task_id"],
         "state": state,
         "summary": summary,
-        "result_text": (record.get("result_text") or record.get("result_summary") or "") if state == "COMPLETED" else None,
+        "result_text": bounded_result_text(summary) if state == "COMPLETED" else client_result_text,
         "result_digest": record.get("result_digest") if state == "COMPLETED" else None,
     }
 
@@ -1724,6 +2095,39 @@ async def cancel_link_task(idempotency_key: str, request: Request) -> dict[str, 
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail="This task can no longer be cancelled") from exc
     if result["state"] == "CANCELLED":
+        model_cancel_pending = False
+        model_cancel_active = False
+        try:
+            from openjarvis.engine.codex_sdk import cancel_active_codex_task
+
+            model_result = cancel_active_codex_task(record["task_id"])
+            model_cancel_active = bool(model_result.get("active"))
+            model_cancel_pending = not bool(model_result.get("confirmed"))
+            store.record_model_process_cleanup(
+                record["task_id"],
+                confirmed=not model_cancel_pending,
+                error_type="termination_unconfirmed" if model_cancel_pending else None,
+            )
+            store.record_event(record["task_id"], "task.model_process_cancelled", {
+                "active": model_cancel_active,
+                "confirmed": not model_cancel_pending,
+                "mcp_processes_stopped": int(model_result.get("mcp_processes_stopped", 0)),
+            })
+        except Exception as exc:
+            model_cancel_active = True
+            model_cancel_pending = True
+            try:
+                store.record_model_process_cleanup(
+                    record["task_id"],
+                    confirmed=False,
+                    error_type=type(exc).__name__,
+                )
+            except Exception:
+                logger.warning(
+                    "Codex cleanup retry state could not be persisted (%s)",
+                    type(exc).__name__,
+                )
+            logger.warning("Codex process cleanup after cancellation failed (%s)", type(exc).__name__)
         capability_revoked = 0
         try:
             from openjarvis.tasks.dev_capability import CapabilityStore, capability_db_path
@@ -1748,33 +2152,46 @@ async def cancel_link_task(idempotency_key: str, request: Request) -> dict[str, 
             # Task cancellation remains durable; every capability operation also checks task state.
             logger.warning("Development capability revocation after cancellation failed (%s)", type(exc).__name__)
         result["development_capabilities_revoked"] = capability_revoked
-        # Stop any active isolated worker and remove only the task-ID-derived guest
-        # directory. Cancellation is already durable even if SSH cleanup is unavailable.
+        # A registered snapshot may still be SNAPSHOTTED while staging is in
+        # progress. Always stop/clean a task-bound guest workspace, regardless
+        # of whether the final STAGED marker was committed yet.
+        cleanup_confirmed = True
+        guest_workspace_present = False
+        registry = None
         try:
             task_id = record["task_id"]
             task = store.get_task(task_id) or {}
             metadata = json.loads(task.get("recovery_json") or "{}")
             from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
             registry = WorkspaceRegistry(store)
-            if registry.is_staged(task_id, metadata.get("owner_actor", "")):
+            owner_actor = metadata.get("owner_actor", "")
+            guest_workspace_present = registry.has_task_workspace(task_id, owner_actor)
+            if guest_workspace_present:
                 from openjarvis.tasks.remote_dev_worker import RemoteMcpWorkerClient, RemoteWorkerConfig
                 config_path = os.environ.get("JARVIS_DEV_WORKER_CONFIG", "")
                 config = RemoteWorkerConfig.load(config_path)
                 RemoteMcpWorkerClient(config, task_id=task_id).cancel_task()
                 registry.mark_cancelled(task_id, cleanup_succeeded=True)
-            else:
-                registry.mark_cancelled(task_id, cleanup_succeeded=True)
         except Exception as exc:
+            cleanup_confirmed = False
             try:
-                registry.mark_cancelled(record["task_id"], cleanup_succeeded=False, error_type=type(exc).__name__)
+                if registry is not None:
+                    registry.mark_cancelled(record["task_id"], cleanup_succeeded=False, error_type=type(exc).__name__)
             except Exception:
                 pass
             logger.warning("Guest workspace cleanup after cancellation failed (%s)", type(exc).__name__)
-        result["summary"] = (
-            "Task cancelled. A Mac action had already started; check its result before retrying."
-            if result["action_may_have_started"]
-            else "Task cancelled. The Mac will not continue this request."
-        )
+        result["cleanup_pending"] = not cleanup_confirmed
+        result["model_process_cancel_pending"] = model_cancel_pending
+        if model_cancel_pending:
+            result["summary"] = "Cancellation was recorded, but Codex process termination could not be confirmed. VM cleanup will retry if needed; check task history before resubmitting."
+        elif not cleanup_confirmed:
+            result["summary"] = "Cancellation was recorded, but VM cleanup could not be confirmed. Cleanup will be retried; do not resubmit this task yet."
+        elif result["action_may_have_started"]:
+            result["summary"] = "Task cancelled. A Mac action had already started; check its result before retrying."
+        elif guest_workspace_present:
+            result["summary"] = "Task cancelled. The VM worker stopped and its task workspace was cleaned up."
+        else:
+            result["summary"] = "Task cancelled. No VM workspace had been staged."
     return {"task_id": record["task_id"], **result}
 
 
@@ -2003,6 +2420,26 @@ async def _decide_approval_for_actor(
             objective_digest = hashlib.sha256(continuation_objective.strip().encode("utf-8")).hexdigest()
             if objective_digest != task["request_digest"]:
                 raise HTTPException(status_code=409, detail="Continuation objective does not match the stored task")
+    # The Codex turn can emit approval.created and put the task row into
+    # WAITING_APPROVAL before LinkTaskExecutionRunner has returned from the
+    # model call and updated link_task_runs. A fast phone tap must serialize
+    # that durable approval wait before consuming it, otherwise the exact
+    # approval is consumed while resume_link_task_after_approval still sees a
+    # RUNNING Link row and returns 409 without dispatching the approved tool.
+    if (
+        is_link_task
+        and decision in {"approve", "reject"}
+        and not repeated
+        and task is not None
+        and task.get("state") == "WAITING_APPROVAL"
+        and existing.get("status") == "PENDING"
+    ):
+        link_run = store.link_task_run(task_id) or {}
+        if link_run.get("status") == "RUNNING":
+            try:
+                store.mark_link_task_waiting_approval(task_id, approval_id)
+            except (KeyError, PermissionError, RuntimeError) as exc:
+                raise HTTPException(status_code=409, detail="Link task approval wait could not be recorded safely") from exc
     if not repeated:
         ok = store.decide_approval(
             approval_id,
@@ -2178,6 +2615,50 @@ async def _decide_approval_for_actor(
                 "result_summary": "The approved Mac action failed. Check the Mac before retrying.",
                 "approval_id": approval_id, "task_id": task_id,
             }
+
+        # A plan that authorizes only the fixed test operation is itself an
+        # exact instruction to run that suite. Execute it through the same
+        # task-bound MCP/capability adapter after the real Android approval,
+        # then let the activity screen cancel the live VM worker if needed.
+        # This avoids depending on a second model turn to rediscover and invoke
+        # the already-approved fixed test command.
+        approved_plan = args.get("plan") if isinstance(args, dict) else None
+        if (
+            server == "jarvis_dev"
+            and mcp_tool == "approve_plan"
+            and isinstance(approved_plan, dict)
+            and approved_plan.get("allowed_ops") == ["run_tests"]
+            and approved_plan.get("max_writes") == 0
+            and isinstance(approved_plan.get("max_test_runs"), int)
+            and not isinstance(approved_plan.get("max_test_runs"), bool)
+            and approved_plan.get("max_test_runs", 0) >= 1
+        ):
+            capability_match = re.search(r"\bcapability_id=([0-9a-f]{32})\b", result_text)
+            if capability_match:
+                store.record_event(task_id, "development.test_execution_scheduled", {
+                    "approval_id": approval_id,
+                    "planned_test_runs": 1,
+                })
+                execution = asyncio.create_task(
+                    _execute_plan_approved_tests(
+                        store, task_id=task_id, capability_id=capability_match.group(1)
+                    ),
+                    name=f"jarvis-approved-tests-{task_id[:8]}",
+                )
+                _APPROVED_TEST_RUNS.add(execution)
+                execution.add_done_callback(_APPROVED_TEST_RUNS.discard)
+                return {
+                    "status": "CONSUMED",
+                    "decision": "approve",
+                    "executed": True,
+                    "success": True,
+                    "execution_state": "RUNNING",
+                    "continued": True,
+                    "task_state": "RUNNING",
+                    "approval_id": approval_id,
+                    "task_id": task_id,
+                    "result_summary": "The approved fixed test suite is running in the isolated workspace. You can cancel it from Tasks.",
+                }
 
         if is_link_task:
             if continuation_objective:

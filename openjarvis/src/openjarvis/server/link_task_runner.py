@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 import traceback
 from typing import Any
@@ -48,6 +49,7 @@ class LinkTaskExecutionRunner:
         self._wake = asyncio.Event()
         self._stopping = False
         self._loop_task: asyncio.Task | None = None
+        self._cleanup_retry_task: asyncio.Task | None = None
 
     @property
     def is_running(self) -> bool:
@@ -62,7 +64,142 @@ class LinkTaskExecutionRunner:
         if self._loop_task is None:
             self._stopping = False
             self._loop_task = asyncio.create_task(self._run(), name="jarvis-link-task-runner")
+            self._cleanup_retry_task = asyncio.create_task(
+                self._retry_pending_cleanups(),
+                name="jarvis-link-process-cleanup-recovery",
+            )
             self._wake.set()
+
+    async def _retry_pending_cleanups(self) -> None:
+        """Keep retrying durable host/guest cleanup records until shutdown."""
+        while not self._stopping:
+            try:
+                await self._recover_pending_guest_cleanup()
+            except Exception:
+                logger.exception("Cleanup recovery sweep failed")
+            if self._stopping:
+                return
+            try:
+                await asyncio.wait_for(asyncio.sleep(30), timeout=31)
+            except asyncio.CancelledError:
+                return
+
+    async def _recover_pending_guest_cleanup(self) -> None:
+        """Retry durable host process and isolated guest cleanup failures."""
+        from openjarvis.engine.codex_sdk import cancel_active_codex_task
+        from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
+
+        registry = WorkspaceRegistry(self.store)
+        try:
+            import_recovery = await asyncio.to_thread(
+                registry.recover_incomplete_imports, limit=4
+            )
+            if import_recovery["pending"] or import_recovery["conflicts"]:
+                logger.warning(
+                    "Patch import recovery results recovered=%d pending=%d conflicts=%d",
+                    len(import_recovery["recovered"]),
+                    len(import_recovery["pending"]),
+                    len(import_recovery["conflicts"]),
+                )
+        except Exception as exc:
+            logger.warning("Patch import recovery failed (%s)", type(exc).__name__)
+
+        config_path = os.environ.get("JARVIS_DEV_WORKER_CONFIG", "").strip()
+        config = None
+        if config_path:
+            try:
+                from openjarvis.tasks.remote_dev_worker import RemoteWorkerConfig
+
+                config = RemoteWorkerConfig.load(config_path)
+            except Exception as exc:
+                logger.warning(
+                    "Guest cleanup recovery is unavailable (%s)", type(exc).__name__
+                )
+        try:
+            pending_model = await asyncio.to_thread(
+                self.store.pending_model_process_cleanup_tasks, 4
+            )
+        except Exception as exc:
+            logger.warning(
+                "Pending model process cleanup records could not be read (%s)",
+                type(exc).__name__,
+            )
+            pending_model = []
+        try:
+            pending_guest = (
+                await asyncio.to_thread(
+                    registry.pending_cleanup_workspaces, limit=4
+                )
+                if config is not None
+                else []
+            )
+        except Exception as exc:
+            logger.warning(
+                "Pending guest cleanup records could not be read (%s)",
+                type(exc).__name__,
+            )
+            pending_guest = []
+
+        for task_id in pending_model:
+            if self._stopping:
+                return
+            try:
+                result = await asyncio.to_thread(cancel_active_codex_task, task_id)
+                confirmed = bool(result.get("confirmed"))
+                await asyncio.to_thread(
+                    self.store.record_model_process_cleanup,
+                    task_id,
+                    confirmed=confirmed,
+                    error_type=None if confirmed else "termination_unconfirmed",
+                )
+                if not confirmed:
+                    logger.warning("Model process cleanup retry remains pending task=%s", task_id[:8])
+            except Exception as exc:
+                logger.warning(
+                    "Model process cleanup retry failed task=%s error=%s",
+                    task_id[:8], type(exc).__name__,
+                )
+                try:
+                    await asyncio.to_thread(
+                        self.store.record_model_process_cleanup,
+                        task_id,
+                        confirmed=False,
+                        error_type=type(exc).__name__,
+                    )
+                except Exception:
+                    pass
+
+        if config is None or not pending_guest:
+            return
+        from openjarvis.tasks.remote_dev_worker import RemoteMcpWorkerClient
+
+        for binding in pending_guest:
+            if self._stopping:
+                return
+            task_id = binding["task_id"]
+            try:
+                client = RemoteMcpWorkerClient(config, task_id=task_id)
+                await asyncio.to_thread(client.cancel_task)
+                await asyncio.to_thread(
+                    registry.mark_cancelled, task_id, cleanup_succeeded=True
+                )
+            except Exception as exc:
+                try:
+                    await asyncio.to_thread(
+                        registry.mark_cancelled,
+                        task_id,
+                        cleanup_succeeded=False,
+                        error_type=type(exc).__name__,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Guest cleanup retry could not be recorded task=%s",
+                        task_id[:8],
+                    )
+                logger.warning(
+                    "Guest cleanup retry failed task=%s error=%s",
+                    task_id[:8], type(exc).__name__,
+                )
 
     def wake(self) -> None:
         self._wake.set()
@@ -155,6 +292,12 @@ class LinkTaskExecutionRunner:
                 ],
                 stream=False,
             )
+            current = await asyncio.to_thread(self.store.get_task, task_id)
+            if not current or current.get("state") != "RUNNING":
+                # Cancellation can win immediately after the durable queue
+                # claim. Avoid starting any model work in that case; the
+                # Codex startup transaction provides the second race fence.
+                return
             model_started_ns = time.perf_counter_ns()
             _perf(trace, "agent_execution_started", model_started_ns, task_id=task_id[:8])
             await asyncio.to_thread(
@@ -217,6 +360,15 @@ class LinkTaskExecutionRunner:
     async def stop(self, *, drain_timeout: float = 2.0) -> None:
         self._stopping = True
         self.wake()
+        if self._cleanup_retry_task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._cleanup_retry_task), timeout=drain_timeout
+                )
+            except asyncio.TimeoutError:
+                self._cleanup_retry_task.cancel()
+                await asyncio.gather(self._cleanup_retry_task, return_exceptions=True)
+            self._cleanup_retry_task = None
         if self._loop_task is not None:
             try:
                 await asyncio.wait_for(self._loop_task, timeout=drain_timeout)

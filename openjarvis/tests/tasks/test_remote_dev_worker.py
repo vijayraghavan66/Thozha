@@ -261,6 +261,86 @@ def test_task_cancellation_stops_and_cleans_only_its_workspace(tmp_path):
     ]
 
 
+def test_guest_unit_stop_failure_is_not_reported_as_success(tmp_path, monkeypatch):
+    identity = tmp_path / "id"
+    identity.write_text("test-only")
+    identity.chmod(0o600)
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("pin\n")
+    client = RemoteMcpWorkerClient(
+        RemoteWorkerConfig(identity, known_hosts, Path(DEFAULT_WORKSPACE)),
+        task_id="f" * 32,
+    )
+    results = iter([0, 5])  # active before stop; systemctl stop failed
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv[-1])
+        return subprocess.CompletedProcess(argv, next(results), b"", b"failed")
+
+    monkeypatch.setattr("openjarvis.tasks.remote_dev_worker.subprocess.run", fake_run)
+    with pytest.raises(RemoteWorkerError, match="did not stop successfully"):
+        client._stop_guest_unit("jarvis-dev-" + client.task_id)
+    assert calls == [
+        f"sudo -n systemctl is-active --quiet jarvis-dev-{client.task_id}",
+        f"sudo -n systemctl stop jarvis-dev-{client.task_id}",
+    ]
+
+
+def test_inactive_guest_unit_is_safe_but_active_unit_must_be_confirmed_stopped(
+    tmp_path, monkeypatch
+):
+    identity = tmp_path / "id"
+    identity.write_text("test-only")
+    identity.chmod(0o600)
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("pin\n")
+    client = RemoteMcpWorkerClient(
+        RemoteWorkerConfig(identity, known_hosts, Path(DEFAULT_WORKSPACE)),
+        task_id="8" * 32,
+    )
+    results = iter([3, 0, 0, 3])
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv[-1])
+        return subprocess.CompletedProcess(argv, next(results), b"", b"")
+
+    monkeypatch.setattr("openjarvis.tasks.remote_dev_worker.subprocess.run", fake_run)
+    client._stop_guest_unit("jarvis-dev-" + client.task_id)
+    assert len(calls) == 1  # inactive units need no stop operation
+
+    client._stop_guest_unit("jarvis-dev-" + client.task_id)
+    assert calls[1:] == [
+        f"sudo -n systemctl is-active --quiet jarvis-dev-{client.task_id}",
+        f"sudo -n systemctl stop jarvis-dev-{client.task_id}",
+        f"sudo -n systemctl is-active --quiet jarvis-dev-{client.task_id}",
+    ]
+
+
+def test_cancel_does_not_remove_workspace_when_unit_stop_is_unconfirmed(tmp_path):
+    identity = tmp_path / "id"
+    identity.write_text("test-only")
+    identity.chmod(0o600)
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("pin\n")
+    client = RemoteMcpWorkerClient(
+        RemoteWorkerConfig(identity, known_hosts, Path(DEFAULT_WORKSPACE)),
+        task_id="7" * 32,
+    )
+    operations = []
+
+    def fail_stop(_unit):
+        operations.append("stop")
+        raise RemoteWorkerError("unit stop unconfirmed")
+
+    client._stop_guest_unit = fail_stop
+    client.cleanup_task_workspace = lambda: operations.append("cleanup")
+    with pytest.raises(RemoteWorkerError, match="unconfirmed"):
+        client.cancel_task()
+    assert operations == ["stop"]
+
+
 def test_worker_config_requires_fixed_root_and_private_identity(tmp_path):
     identity = tmp_path / "id"
     identity.write_text("test-only")

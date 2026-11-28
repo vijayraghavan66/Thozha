@@ -14,7 +14,7 @@ object TaskStates {
     private val running = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "QUEUED", "SENT")
     private val waiting = setOf("WAITING_APPROVAL", "WAITING_CONNECTION", "PAUSED")
     private val completed = setOf("COMPLETED")
-    private val failed = setOf("FAILED", "REFUSED", "EXPIRED")
+    private val failed = setOf("FAILED", "REFUSED", "EXPIRED", "REJECTED")
     private val cancelled = setOf("CANCELLED")
 
     fun toneFor(state: String?): TaskTone {
@@ -36,7 +36,8 @@ object TaskStates {
         "WAITING_APPROVAL" -> "Waiting for approval"
         "WAITING_CONNECTION", "PAUSED" -> "Waiting for connection"
         "COMPLETED" -> "Completed"
-        "FAILED", "REJECTED", "EXPIRED" -> "Failed"
+        "FAILED", "EXPIRED" -> "Failed"
+        "REJECTED" -> "Rejected"
         "CANCELLED" -> "Cancelled"
         else -> "Status unknown"
     }

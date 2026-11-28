@@ -73,6 +73,24 @@ internal object LinkSyncPolicy {
         }
     }
 
+    /** Main-thread polling decision from cached runtime metadata; never opens or parses the durable store. */
+    fun hasActiveWorkFromSnapshot(
+        visibleEntries: List<Map<String, Any>>,
+        durableHasActiveWork: Boolean?,
+    ): Boolean {
+        // Before the first background hydration, prefer the safe active cadence. A false negative here
+        // would leave a persisted request waiting at the idle polling interval after process restore.
+        if (durableHasActiveWork == null) return true
+        if (durableHasActiveWork) return true
+        return visibleEntries.any { row ->
+            row["transport"] != "local" && (row["state"] as? String)?.uppercase() in activeStates
+        }
+    }
+
+    /** Fails open until one background runtime snapshot has supplied the Telegram fallback demand. */
+    fun shouldRunLinkSyncFromSnapshot(lanHealthy: Boolean, fallbackDemand: Pair<Boolean, Int>?): Boolean =
+        fallbackDemand?.let { shouldRunLinkSync(lanHealthy, it.first, it.second) } ?: true
+
     fun shouldRunLinkSync(
         lanHealthy: Boolean,
         pendingTelegramWork: Boolean,
@@ -93,6 +111,13 @@ internal object LinkSyncPolicy {
         else normalDelay
     }
 }
+
+/** Compact state hydrated by LinkRuntime on its worker lane, then read lock-free by Compose. */
+internal data class RuntimeActivitySnapshot(
+    val hasActiveWork: Boolean,
+    val hasPendingTelegramWork: Boolean,
+    val queuedOutboxMessages: Int,
+)
 
 /**
  * Single-flight gate with a one-bit catch-up. Repeated foreground/resume/timer requests cannot start

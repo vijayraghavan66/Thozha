@@ -96,6 +96,8 @@ class JarvisStore(private val app: Context) {
     @Volatile private var localMacDiscoverySession: LocalMacDiscoverySession? = null
     @Volatile private var discoveredPinnedMac: DiscoveredMacGateway? = null
     private val approvalDecisionPrefs = app.getSharedPreferences("jarvis_approval_decisions", Context.MODE_PRIVATE)
+    /** Written only after LinkRuntime has been read on a worker; Compose polling never parses the store. */
+    @Volatile private var runtimeActivitySnapshot: RuntimeActivitySnapshot? = null
     private var destroyed = false
 
     var tab by mutableStateOf(Tab.HOME)
@@ -289,32 +291,28 @@ class JarvisStore(private val app: Context) {
         entries.lastOrNull { sessions.sessionOf(it["message_id"] as? String ?: "") == sessionId }
             ?.get("text") as? String ?: ""
 
-    /** Whether any request is still open on the Mac or waiting to be delivered. */
-    fun hasActiveWork(): Boolean {
-        // Compose state is hydrated asynchronously on launch/resume. Read the durable Link snapshot too,
-        // so a SENT task restored from disk uses the existing active cadence immediately.
-        val durableConversation = runCatching { LinkService.runtime(app).conversation() }.getOrNull()
-        return LinkSyncPolicy.hasActiveWork(entries, durableConversation)
-    }
+    /** Whether any request is still open. This is a lock-free read; disk hydration happens in refreshLocal. */
+    fun hasActiveWork(): Boolean = LinkSyncPolicy.hasActiveWorkFromSnapshot(
+        visibleEntries = entries,
+        durableHasActiveWork = runtimeActivitySnapshot?.hasActiveWork,
+    )
 
     fun hasRunningWork(): Boolean = entries.any {
         it["transport"] != "local" && (it["state"] as? String) in setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING")
     }
 
-    fun hasPendingTelegramWork(): Boolean = runCatching {
-        val runtime = LinkService.runtime(app)
-        LinkSyncPolicy.hasPendingTelegramWork(runtime.conversation(), System.currentTimeMillis()) || runtime.status().outboxSize > 0
-    }.getOrDefault(false)
+    fun hasPendingTelegramWork(): Boolean = runtimeActivitySnapshot?.let {
+        it.hasPendingTelegramWork || it.queuedOutboxMessages > 0
+    } ?: true
 
     fun shouldRunLinkSync(): Boolean {
         val settings = LinkSettings(app)
         if (settings.mode != com.jarvis.companion.link.LinkMode.TEST_RELAY) return true
         val lanHealthy = macApiPaired && lastMacApiTransport == "wifi" && macApiSyncError.isBlank()
-        val pendingAndOutbox = runCatching {
-            val runtime = LinkService.runtime(app)
-            LinkSyncPolicy.hasPendingTelegramWork(runtime.conversation(), System.currentTimeMillis()) to runtime.status().outboxSize
-        }.getOrElse { true to 1 }
-        return LinkSyncPolicy.shouldRunLinkSync(lanHealthy, pendingAndOutbox.first, pendingAndOutbox.second)
+        val snapshot = runtimeActivitySnapshot?.let {
+            it.hasPendingTelegramWork to it.queuedOutboxMessages
+        }
+        return LinkSyncPolicy.shouldRunLinkSyncFromSnapshot(lanHealthy, snapshot)
     }
 
     fun refreshLocal() = background {
@@ -407,16 +405,20 @@ class JarvisStore(private val app: Context) {
         apiApprovalPairs.forEach { (_, review) -> combinedApprovals[review.approvalId] = review }
         val directApprovalMap = apiApprovalPairs.associate { (approval, _) -> approval.id to approval }
         val updatesSnapshot = runtime.recentUpdates()
-        LinkAlerts.notifyTaskUpdates(app, updatesSnapshot)
         val taskRegistrySnapshot = runtime.taskRegistry()
         val taskEventSnapshot = runtime.taskEventHistory()
-        LinkAlerts.notifyTaskUpdates(app, taskEventSnapshot)
+        LinkAlerts.notifyTaskUpdates(app, updatesSnapshot + taskEventSnapshot)
         val decisionIds = (approvalDecisions.keys + combinedApprovals.keys).distinct()
         val runtimeDecisionStates = decisionIds.mapNotNull { id ->
             runtime.approvalDecisionState(id)?.let { id to it }
         }.toMap()
         val supervisorDecisionStates = reconcileSupervisorDecisionStates(conversation)
         val status = runtime.status()
+        runtimeActivitySnapshot = RuntimeActivitySnapshot(
+            hasActiveWork = LinkSyncPolicy.hasActiveWork(emptyList(), conversation),
+            hasPendingTelegramWork = LinkSyncPolicy.hasPendingTelegramWork(conversation, System.currentTimeMillis()),
+            queuedOutboxMessages = status.outboxSize,
+        )
         val (syncAt, syncError) = runtime.lastSync()
         val snapshot = TelegramSession.controller?.snapshot()
         val currentApiTransport = secureStore.lastMacConnection().second
@@ -465,6 +467,11 @@ class JarvisStore(private val app: Context) {
         val registry = runtime.taskRegistry()
         val eventHistory = runtime.taskEventHistory()
         val status = runtime.status()
+        runtimeActivitySnapshot = RuntimeActivitySnapshot(
+            hasActiveWork = LinkSyncPolicy.hasActiveWork(emptyList(), conversation),
+            hasPendingTelegramWork = LinkSyncPolicy.hasPendingTelegramWork(conversation, System.currentTimeMillis()),
+            queuedOutboxMessages = status.outboxSize,
+        )
         ui {
             val nextEntries = mergeEntries(conversation, localHistory.all())
             val newlyVisibleTerminal = nextEntries.filter { row ->
@@ -1342,9 +1349,10 @@ class JarvisStore(private val app: Context) {
                     decisionNote = ApprovalDecisionPresentation.label(updated)
                     outcome.onSuccess { response ->
                         val taskId = response.optString("task_id", supervisorApproval.taskId)
-                        val taskState = response.optString("task_state").ifBlank {
-                            if (decision == "reject") "FAILED" else "RUNNING"
-                        }
+                        val taskState = ApprovalDecisionPresentation.resultingTaskState(
+                            decision,
+                            response.optString("task_state"),
+                        )
                         val resultText = response.optString("result_text")
                             .ifBlank { response.optString("result_summary") }
                         val row = runtime.conversation().firstOrNull { it["task_id"] == taskId }

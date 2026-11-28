@@ -96,37 +96,38 @@ object LinkAlerts {
 
     /** Posts only new, persisted Mac lifecycle events. Stable notification IDs update a task card in place. */
     @SuppressLint("MissingPermission") // canPost checks POST_NOTIFICATIONS and app-level notification state.
+    @Synchronized
     fun notifyTaskUpdates(context: Context, updates: List<Map<String, Any>>) {
         if (!LinkSettings(context).taskNotificationsEnabled || !canPost(context)) return
         ensureChannels(context)
         val prefs = context.getSharedPreferences("jarvis_task_notification_events", Context.MODE_PRIVATE)
-        val seen = prefs.getStringSet("seen", emptySet())?.toMutableSet() ?: mutableSetOf()
-        if (!prefs.getBoolean("baseline_initialized", false)) {
-            updates.mapNotNullTo(seen) { TaskNotificationPolicy.eventKey(it) }
-            prefs.edit().putStringSet("seen", seen).putBoolean("baseline_initialized", true).apply()
+        val previousSeen = prefs.getStringSet("seen", emptySet())?.toSet().orEmpty()
+        val initialized = prefs.getInt("schema_version", 0) >= 2
+        val batch = TaskNotificationPolicy.notificationBatch(updates, previousSeen, initialized)
+        if (!initialized) {
+            // Rebaseline on the bounded per-task format. Existing versions could leave an incomplete
+            // dedupe set and cause old task history to be replayed as a notification burst.
+            prefs.edit()
+                .putStringSet("seen", batch.seenKeys)
+                .putInt("schema_version", 2)
+                .apply()
             return
         }
-        var changed = false
-        updates.forEach { event ->
-            val taskId = event["task_id"] as? String ?: return@forEach
-            val state = ((event["state"] ?: event["status"]) as? String)?.uppercase() ?: return@forEach
-            val fingerprint = TaskNotificationPolicy.eventKey(event) ?: return@forEach
-            if (!seen.add(fingerprint)) return@forEach
-            changed = true
-            if (state == "RUNNING") {
+
+        batch.eventsToNotify.forEach { event ->
+            if (event.state == "RUNNING") {
                 val now = System.currentTimeMillis()
-                val last = prefs.getLong("progress:$taskId", 0L)
+                val last = prefs.getLong("progress:${event.taskId}", 0L)
                 if (last > 0L && now - last < 120_000L) return@forEach
-                prefs.edit().putLong("progress:$taskId", now).apply()
+                prefs.edit().putLong("progress:${event.taskId}", now).apply()
             }
-            if (seen.size > 500) { seen.clear(); seen.add(fingerprint) }
-            val title = when (state) {
+            val title = when (event.state) {
                 "RUNNING" -> "Task in progress"
                 "COMPLETED" -> "Task completed"
                 "FAILED" -> "Task failed"
                 else -> "Task cancelled"
             }
-            val text = when (state) {
+            val text = when (event.state) {
                 "RUNNING" -> "Jarvis received a new task update. Open Tasks for details."
                 "COMPLETED" -> "A task finished. Open Tasks to review the verified result."
                 "FAILED" -> "A task failed. Open Tasks to review the recorded error."
@@ -138,9 +139,9 @@ object LinkAlerts {
                 .setContentText(text)
                 .setAutoCancel(true)
                 .setCategory(Notification.CATEGORY_STATUS)
-            NotificationManagerCompat.from(context).notify(stableId("task:$taskId"), builder.build())
+            NotificationManagerCompat.from(context).notify(stableId("task:${event.taskId}"), builder.build())
         }
-        if (changed) prefs.edit().putStringSet("seen", seen).apply()
+        prefs.edit().putStringSet("seen", batch.seenKeys).apply()
     }
 
     private fun stableId(approvalId: String): Int = approvalId.hashCode() and 0x7fffffff

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+import asyncio
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -15,8 +16,13 @@ from openjarvis.agents._stubs import AgentResult
 from openjarvis.core.paths import get_config_dir
 from openjarvis.core.types import ToolCall, ToolResult
 from openjarvis.server.routes import _begin_supervised_request
-from openjarvis.server.supervisor_routes import router
+from openjarvis.server.supervisor_routes import (
+    _development_result_evidence,
+    _link_result_for_client,
+    router,
+)
 from openjarvis.tasks.supervisor import SupervisorStore, bind_task, current_task_context
+from openjarvis.server.link_task_runner import LinkTaskExecutionRunner
 from openjarvis.tools._stubs import BaseTool, ToolExecutor, ToolSpec
 
 
@@ -144,6 +150,237 @@ def test_link_runner_executes_codex_agent_once_and_returns_persisted_digest(link
     }
 
 
+def test_development_result_summary_uses_supervisor_evidence_and_omits_host_paths():
+    task_id = "a" * 32
+    patch_hash = "b" * 64
+
+    class EvidenceStore:
+        def events_after(self, actual_task_id, after_seq, limit):
+            assert actual_task_id == task_id
+            assert after_seq == 0 and limit == 200
+            return [
+                {"event_type": "development.tests_completed", "payload": {
+                    "passed": False, "tests_ran": 1, "failures": 1, "errors": 0,
+                    "timed_out": False,
+                }},
+                {"event_type": "development.tests_completed", "payload": {
+                    "passed": True, "tests_ran": 1, "failures": 0, "errors": 0,
+                    "timed_out": False,
+                }},
+                {"event_type": "development.file_written", "payload": {
+                    "path": "src/calculator.py", "plan_target": "/Users/private/project/src/calculator.py",
+                }},
+                {"event_type": "workspace.patch_exported", "payload": {
+                    "files": ["src/calculator.py"], "patch_sha256": patch_hash,
+                }},
+                {"event_type": "workspace.patch_applied", "payload": {
+                    "files": ["src/calculator.py"], "patch_sha256": patch_hash,
+                }},
+                {"event_type": "development.artifact_export_completed", "payload": {
+                    "artifact_id": "c" * 32, "archive_sha256": "d" * 64, "size_bytes": 512,
+                }},
+            ]
+
+    summary = _link_result_for_client(
+        EvidenceStore(), task_id, '["development"]', "COMPLETED", "Repair complete."
+    )
+    assert "Repair complete." in summary
+    assert "Execution status: COMPLETED." in summary
+    assert "Test run 1: failed; 1 run, 1 failures, 0 errors." in summary
+    assert "Test run 2: passed; 1 run, 0 failures, 0 errors." in summary
+    assert "Files written in VM: src/calculator.py." in summary
+    assert f"Patch exported: src/calculator.py (SHA-256 {patch_hash})." in summary
+    assert f"Patch imported into owner workspace: src/calculator.py (SHA-256 {patch_hash})." in summary
+    assert "Artifact: " + "c" * 32 in summary
+    assert "/Users/private" not in summary
+
+
+def test_development_result_summary_is_conservative_without_recorded_evidence():
+    class EmptyStore:
+        def events_after(self, *_args):
+            return []
+
+    evidence = _development_result_evidence(EmptyStore(), "a" * 32, "COMPLETED")
+    assert "Execution status: COMPLETED." in evidence
+    assert "Tests: no completed test run was recorded." in evidence
+    assert "Files written in VM: none recorded." in evidence
+    assert "Patch imported into owner workspace: none recorded." in evidence
+
+
+def test_non_development_results_do_not_get_development_evidence():
+    result = _link_result_for_client(object(), "a" * 32, '["read_only"]', "COMPLETED", "Safe answer")
+    assert result == "Safe answer"
+
+
+def test_development_status_endpoint_returns_evidence_summary(link_client):
+    client, store, _agent = link_client
+    created = store.create_link_task(
+        "Repair the calculator", capability_scope=["development"],
+        idempotency_key="development-evidence-status-0001", owner_actor="device:" + "a" * 32,
+    )
+    task_id = created["task_id"]
+    digest = created["objective_digest"]
+    store.start_link_task(
+        task_id, objective_digest=digest, objective_text_digest=digest,
+        capability_scope=["development"], idempotency_key="development-evidence-status-0001",
+    )
+    store.record_event(task_id, "development.tests_completed", {
+        "passed": True, "tests_ran": 2, "failures": 0, "errors": 0, "timed_out": False,
+    })
+    store.record_event(task_id, "workspace.patch_applied", {
+        "files": ["src/calculator.py"], "patch_sha256": "e" * 64,
+    })
+    store.finish_link_task(task_id, result_text="Calculation repaired.")
+    store.transition(task_id, "VERIFYING", step="response_verification")
+    store.transition(task_id, "COMPLETED", evidence={"response_returned": True})
+
+    response = client.get(
+        "/v1/jarvis/link/tasks/development-evidence-status-0001",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "COMPLETED"
+    assert "Test run 1: passed; 2 run, 0 failures, 0 errors." in response.json()["summary"]
+    assert "Patch imported into owner workspace: src/calculator.py" in response.json()["summary"]
+    assert response.json()["summary"] == response.json()["result_text"]
+
+
+def test_development_cancelled_status_includes_process_and_guest_cleanup_evidence(link_client):
+    client, store, _agent = link_client
+    owner_actor = "device:" + "a" * 32
+    idempotency_key = "development-cancel-evidence-0001"
+    run = _make_running_development_task(store, owner_actor, idempotency_key)
+    task_id = run["task_id"]
+    store.record_event(task_id, "development.test_execution_scheduled", {"approval_id": "b" * 32})
+    store.record_event(task_id, "development.operation_started", {"operation": "run_tests"})
+    store.record_event(task_id, "development.file_written", {
+        "path": "src/calculator.py", "plan_target": "/private/owner/project/src/calculator.py",
+    })
+    store.cancel_link_task(task_id, actor=owner_actor)
+    store.record_event(task_id, "task.model_process_cancelled", {
+        "active": True, "confirmed": True, "mcp_processes_stopped": 1,
+    })
+    store.record_event(task_id, "development.capabilities_revoked", {"count": 1})
+    store.record_event(task_id, "workspace.guest_cleanup_completed", {
+        "workspace_id": "c" * 32, "error_type": None,
+    })
+
+    response = client.get(
+        "/v1/jarvis/link/tasks/" + idempotency_key,
+        headers={"Authorization": "Bearer link-test-admin-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "CANCELLED"
+    summary = response.json()["summary"]
+    assert "Execution status: CANCELLED." in summary
+    assert "Cancellation: recorded by the supervisor." in summary
+    assert "Test execution started; no completed test result was recorded." in summary
+    assert "Codex/MCP process cleanup: confirmed." in summary
+    assert "MCP child processes stopped: 1." in summary
+    assert "Development capabilities revoked: 1." in summary
+    assert "VM workspace cleanup: completed." in summary
+    assert "Files written in VM: src/calculator.py." in summary
+    assert "Patch imported into owner workspace: none recorded." in summary
+    assert "/private/owner" not in summary
+    assert response.json()["result_text"] == summary
+
+
+def test_development_failed_status_includes_timeout_and_suppresses_model_claim(link_client):
+    client, store, _agent = link_client
+    idempotency_key = "development-failed-evidence-0001"
+    run = _make_running_development_task(
+        store, "device:" + "a" * 32, idempotency_key
+    )
+    task_id = run["task_id"]
+    store.record_event(task_id, "development.tests_completed", {
+        "passed": False, "tests_ran": 0, "failures": 0, "errors": 0,
+        "timed_out": True, "duration_s": 120.015,
+    })
+    store.finish_link_task(task_id, error="approved_tests_failed")
+    store.transition(task_id, "FAILED", expected="RUNNING", error="approved_tests_failed")
+    # Simulate stale narrative storage to verify a terminal supervisor failure wins.
+    store._db.execute(
+        "UPDATE link_task_runs SET result_summary=? WHERE task_id=?",
+        ("All tests passed and the patch was imported.", task_id),
+    )
+    store._db.commit()
+
+    response = client.get(
+        "/v1/jarvis/link/tasks/" + idempotency_key,
+        headers={"Authorization": "Bearer link-test-admin-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "FAILED"
+    summary = response.json()["summary"]
+    assert "Execution status: FAILED." in summary
+    assert "Failure code: approved_tests_failed." in summary
+    assert "Test run 1: failed; 0 run, 0 failures, 0 errors; timed out." in summary
+    assert "All tests passed" not in summary
+    assert "patch was imported" not in summary
+    assert response.json()["result_text"] == summary
+
+
+def test_development_cancelled_summary_reports_pending_process_and_guest_cleanup():
+    class PendingCleanupStore:
+        def events_after(self, *_args):
+            return [
+                {"event_type": "task.cancelled", "payload": {}},
+                {"event_type": "task.model_process_cleanup_pending", "payload": {
+                    "error_type": "/private/host/error.log",
+                }},
+                {"event_type": "workspace.guest_cleanup_pending", "payload": {
+                    "error_type": "RemoteWorkerTimeout",
+                }},
+            ]
+
+    summary = _development_result_evidence(
+        PendingCleanupStore(), "a" * 32, "CANCELLED"
+    )
+    assert "Codex/MCP process cleanup: pending; termination could not be confirmed." in summary
+    assert "VM workspace cleanup: pending; guest cleanup could not be confirmed." in summary
+    assert "VM cleanup error type: RemoteWorkerTimeout." in summary
+    assert "/private/host" not in summary
+
+
+def test_completed_development_summary_omits_model_denial_of_recorded_tests():
+    class CompletedTestEvidence:
+        def events_after(self, *_args):
+            return [{
+                "event_type": "development.tests_completed",
+                "payload": {
+                    "passed": True, "tests_ran": 4, "failures": 0,
+                    "errors": 0, "timed_out": False,
+                },
+            }]
+
+    summary = _link_result_for_client(
+        CompletedTestEvidence(),
+        "a" * 32,
+        '["development"]',
+        "COMPLETED",
+        "The patch was imported. I did not run the test suite.",
+    )
+    assert "Test run 1: passed; 4 run, 0 failures, 0 errors." in summary
+    assert "Assistant narrative omitted because it conflicts with recorded test results." in summary
+    assert "I did not run the test suite" not in summary
+    assert "The patch was imported." not in summary
+
+
+def test_completed_development_summary_keeps_uncontradicted_narrative():
+    class EmptyEvidence:
+        def events_after(self, *_args):
+            return []
+
+    summary = _link_result_for_client(
+        EmptyEvidence(), "a" * 32, '["development"]', "COMPLETED",
+        "The requested files were inspected.",
+    )
+    assert "Task result:\nThe requested files were inspected." in summary
+
+
 def test_link_runner_requires_loopback_auth_and_supported_scope(link_client):
     client, _, _ = link_client
     body = {"objective": "read safely", "capability_scope": ["read_only"], "idempotency_key": "link-run-unique-0001", "requester_device_id": "a" * 32}
@@ -153,6 +390,255 @@ def test_link_runner_requires_loopback_auth_and_supported_scope(link_client):
         headers={"Authorization": "Bearer link-test-admin-key"},
         json={**body, "capability_scope": ["desktop_observation"]},
     ).status_code == 403
+
+
+def _make_running_development_task(store, owner_actor, idempotency_key, objective="Build a sample project"):
+    run = store.create_link_task(
+        objective,
+        capability_scope=["development"],
+        idempotency_key=idempotency_key,
+        owner_actor=owner_actor,
+    )
+    objective_digest = hashlib.sha256(objective.encode()).hexdigest()
+    store.start_link_task(
+        run["task_id"],
+        objective_digest=objective_digest,
+        objective_text_digest=objective_digest,
+        capability_scope=["development"],
+        idempotency_key=idempotency_key,
+    )
+    return run
+
+
+def test_android_cancel_stops_snapshotted_workspace_even_before_stage_marker(
+    link_client, tmp_path, monkeypatch
+):
+    import openjarvis.tasks.remote_dev_worker as remote_worker
+    from openjarvis.tasks.remote_dev_worker import RemoteWorkerConfig
+    from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
+
+    client, store, _agent = link_client
+    owner_actor = "device:" + "7" * 32
+    idempotency_key = "cancel-staging-workspace-0001"
+    run = _make_running_development_task(store, owner_actor, idempotency_key)
+    project = tmp_path / "owner-project"
+    project.mkdir()
+    (project / "README.md").write_text("safe project input\n")
+    registry = WorkspaceRegistry(store)
+    registry.register_for_task(run["task_id"], owner_actor, str(project), ["README.md"])
+    assert registry.has_task_workspace(run["task_id"], owner_actor)
+    assert not registry.is_staged(run["task_id"], owner_actor)
+
+    calls = []
+
+    class FakeConfig:
+        pass
+
+    class FakeWorker:
+        def __init__(self, _config, *, task_id):
+            calls.append(("constructed", task_id))
+
+        def cancel_task(self):
+            calls.append(("cancelled", run["task_id"]))
+
+    monkeypatch.setenv("JARVIS_DEV_WORKER_CONFIG", "/private/test-worker.json")
+    monkeypatch.setattr(RemoteWorkerConfig, "load", lambda _path: FakeConfig())
+    monkeypatch.setattr(remote_worker, "RemoteMcpWorkerClient", FakeWorker)
+
+    response = client.post(
+        f"/v1/jarvis/link/tasks/{idempotency_key}/cancel",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json={},
+    )
+
+    assert response.status_code == 200, response.json()
+    assert response.json()["state"] == "CANCELLED"
+    assert response.json()["cleanup_pending"] is False
+    assert "VM worker stopped" in response.json()["summary"]
+    assert calls == [("constructed", run["task_id"]), ("cancelled", run["task_id"])]
+    state = store._db.execute(
+        "SELECT state FROM workspace_task_snapshots WHERE task_id=?", (run["task_id"],)
+    ).fetchone()[0]
+    assert state == "CANCELLED"
+
+
+def test_failed_guest_cleanup_is_reported_and_retried_after_runner_start(
+    link_client, tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import openjarvis.tasks.remote_dev_worker as remote_worker
+    from openjarvis.tasks.remote_dev_worker import RemoteWorkerConfig, RemoteWorkerError
+    from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
+
+    client, store, _agent = link_client
+    owner_actor = "device:" + "6" * 32
+    idempotency_key = "cancel-cleanup-retry-00001"
+    run = _make_running_development_task(store, owner_actor, idempotency_key)
+    project = tmp_path / "owner-project"
+    project.mkdir()
+    (project / "README.md").write_text("safe project input\n")
+    registry = WorkspaceRegistry(store)
+    registry.register_for_task(run["task_id"], owner_actor, str(project), ["README.md"])
+
+    class FakeConfig:
+        pass
+
+    class FailingWorker:
+        def __init__(self, _config, *, task_id):
+            self.task_id = task_id
+
+        def cancel_task(self):
+            raise RemoteWorkerError("test transport unavailable")
+
+    monkeypatch.setenv("JARVIS_DEV_WORKER_CONFIG", "/private/test-worker.json")
+    monkeypatch.setattr(RemoteWorkerConfig, "load", lambda _path: FakeConfig())
+    monkeypatch.setattr(remote_worker, "RemoteMcpWorkerClient", FailingWorker)
+    response = client.post(
+        f"/v1/jarvis/link/tasks/{idempotency_key}/cancel",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json={},
+    )
+    assert response.status_code == 200, response.json()
+    assert response.json()["cleanup_pending"] is True
+    assert "could not be confirmed" in response.json()["summary"]
+    assert registry.pending_cleanup_workspaces()[0]["task_id"] == run["task_id"]
+
+    recovered = []
+
+    class RecoveringWorker:
+        def __init__(self, _config, *, task_id):
+            self.task_id = task_id
+
+        def cancel_task(self):
+            recovered.append(self.task_id)
+
+    monkeypatch.setattr(remote_worker, "RemoteMcpWorkerClient", RecoveringWorker)
+    runner = LinkTaskExecutionRunner(app=SimpleNamespace(), store=store)
+    asyncio.run(runner._recover_pending_guest_cleanup())
+    assert recovered == [run["task_id"]]
+    assert registry.pending_cleanup_workspaces() == []
+
+
+def test_cancelled_codex_process_cleanup_persists_and_retries_after_restart(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import openjarvis.engine.codex_sdk as codex_sdk
+
+    owner_actor = "device:" + "c" * 32
+    store = SupervisorStore(str(tmp_path / "supervisor.db"), run_recovery=False)
+    run = _make_running_development_task(
+        store, owner_actor, "model-process-cleanup-retry-0001"
+    )
+    assert store.cancel_link_task(run["task_id"], actor=owner_actor)["cancelled"]
+    store.record_model_process_cleanup(
+        run["task_id"], confirmed=False, error_type="termination_unconfirmed"
+    )
+    assert store.pending_model_process_cleanup_tasks() == [run["task_id"]]
+
+    recovered = []
+
+    def confirm_process_cleanup(task_id):
+        recovered.append(task_id)
+        return {"active": True, "confirmed": True, "mcp_processes_stopped": 2}
+
+    monkeypatch.setattr(codex_sdk, "cancel_active_codex_task", confirm_process_cleanup)
+    runner = LinkTaskExecutionRunner(app=SimpleNamespace(), store=store)
+    asyncio.run(runner._recover_pending_guest_cleanup())
+
+    assert recovered == [run["task_id"]]
+    assert store.pending_model_process_cleanup_tasks() == []
+    events = [event["event_type"] for event in store.events(run["task_id"])]
+    assert "task.model_process_cleanup_pending" in events
+    assert "task.model_process_cleanup_confirmed" in events
+    store.close()
+
+
+def test_android_cancel_persists_unconfirmed_codex_cleanup_for_retry(
+    link_client, tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import openjarvis.engine.codex_sdk as codex_sdk
+    import openjarvis.tasks.dev_capability as dev_capability
+
+    client, store, _agent = link_client
+    owner_actor = "device:" + "e" * 32
+    idempotency_key = "cancel-codex-cleanup-pending-0001"
+    run = _make_running_development_task(store, owner_actor, idempotency_key)
+    monkeypatch.setattr(
+        dev_capability,
+        "capability_db_path",
+        lambda: str(tmp_path / "capabilities.sqlite3"),
+    )
+    monkeypatch.setattr(
+        codex_sdk,
+        "cancel_active_codex_task",
+        lambda _task_id: {"active": True, "confirmed": False, "mcp_processes_stopped": 0},
+    )
+
+    response = client.post(
+        f"/v1/jarvis/link/tasks/{idempotency_key}/cancel",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json={},
+    )
+
+    assert response.status_code == 200, response.json()
+    assert response.json()["model_process_cancel_pending"] is True
+    assert store.pending_model_process_cleanup_tasks() == [run["task_id"]]
+
+    recovered = []
+    monkeypatch.setattr(
+        codex_sdk,
+        "cancel_active_codex_task",
+        lambda task_id: recovered.append(task_id)
+        or {"active": True, "confirmed": True, "mcp_processes_stopped": 1},
+    )
+    runner = LinkTaskExecutionRunner(app=SimpleNamespace(), store=store)
+    asyncio.run(runner._recover_pending_guest_cleanup())
+    assert recovered == [run["task_id"]]
+    assert store.pending_model_process_cleanup_tasks() == []
+
+
+def test_runner_skips_agent_dispatch_if_cancel_wins_after_task_claim(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    import openjarvis.server.routes as server_routes
+
+    owner_actor = "device:" + "d" * 32
+    objective = "Inspect the selected calculator source and its tests"
+    idempotency_key = "runner-cancel-before-codex-0001"
+    store = SupervisorStore(str(tmp_path / "supervisor.db"), run_recovery=False)
+    created = store.create_link_task(
+        objective,
+        capability_scope=["development"],
+        idempotency_key=idempotency_key,
+        owner_actor=owner_actor,
+    )
+    row = store.queued_link_tasks(1)[0]
+    start = store.start_link_task
+
+    def claim_then_cancel(*args, **kwargs):
+        result = start(*args, **kwargs)
+        store.cancel_link_task(created["task_id"], actor=owner_actor)
+        return result
+
+    monkeypatch.setattr(store, "start_link_task", claim_then_cancel)
+    monkeypatch.setattr(
+        server_routes,
+        "_run_supervised_agent",
+        lambda *_args, **_kwargs: pytest.fail("cancelled task must not enter agent dispatch"),
+    )
+    runner = LinkTaskExecutionRunner(
+        app=SimpleNamespace(state=SimpleNamespace(agent=object(), model="gpt-6-luna")),
+        store=store,
+    )
+
+    asyncio.run(runner._execute(row))
+
+    assert store.get_task(created["task_id"])["state"] == "CANCELLED"
+    assert store.link_task_run(created["task_id"])["status"] == "CANCELLED"
+    store.close()
 
 
 def test_development_submission_uses_owner_selected_server_workspace(link_client, tmp_path, monkeypatch):
@@ -209,6 +695,112 @@ def test_development_submission_fails_closed_without_selected_workspace(link_cli
     assert response.status_code == 503
     assert store._db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
     assert agent.calls == []
+
+
+def test_plan_decision_closes_runner_wait_race_before_consuming_approval(
+    link_client, tmp_path, monkeypatch
+):
+    import threading
+    import openjarvis.engine.codex_sdk as codex_sdk
+    import openjarvis.server.routes as server_routes
+    import openjarvis.server.supervisor_routes as supervisor_routes
+    import openjarvis.tasks.dev_capability as dev_capability
+    from openjarvis.tasks.dev_capability_adapter import DevelopmentCapabilityMCPAdapter
+
+    client, store, _agent = link_client
+    device_id = "5" * 32
+    owner_actor = "device:" + device_id
+    objective = "Build a calculator project and run its tests"
+    idempotency_key = "approve-plan-runner-race-0001"
+    run = _make_running_development_task(store, owner_actor, idempotency_key, objective)
+    task_id = run["task_id"]
+
+    # create_approval moves the task row to WAITING_APPROVAL, but the model
+    # call is still running and LinkTaskExecutionRunner has not yet reconciled
+    # the Link run row from RUNNING to WAITING_APPROVAL.
+    plan = {
+        "plan_id": "race-proof-plan",
+        "device_id": device_id,
+        "user_id": owner_actor,
+        "workspace_root": str(tmp_path / "owner-workspace"),
+        "allowed_ops": ["run_tests"],
+        "allowed_paths": ["tests"],
+        "max_file_bytes": 1,
+        "max_total_bytes": 1,
+        "max_writes": 0,
+        "max_test_runs": 1,
+        "max_repairs": 0,
+        "max_duration_s": 900,
+        "ttl_s": 600,
+    }
+    operation = "mcp:jarvis_dev:approve_plan"
+    target = "taskflow:plan:" + plan["plan_id"]
+    arguments = {"plan": plan, "plan_digest": "d" * 64}
+    approval_id, digest = store.create_approval(
+        task_id,
+        operation,
+        target,
+        arguments,
+        "Run the existing tests once and wait for review.",
+    )
+    monkeypatch.setattr(
+        dev_capability,
+        "capability_db_path",
+        lambda: str(tmp_path / "capabilities.sqlite3"),
+    )
+    monkeypatch.setattr(
+        DevelopmentCapabilityMCPAdapter,
+        "prepare_approved_plan_issuance",
+        lambda self, _approval_id: None,
+    )
+    scheduled = threading.Event()
+    capability_ids = []
+
+    async def fake_execute_test_plan(_store, *, task_id, capability_id):
+        capability_ids.append((task_id, capability_id))
+        scheduled.set()
+
+    monkeypatch.setattr(
+        codex_sdk,
+        "_call_local_dev_mcp",
+        lambda *_args, **_kwargs: {
+            "content": [{"type": "text", "text": "The exact approved plan is active. Use capability_id=" + "a" * 32}],
+            "isError": False,
+        },
+    )
+    monkeypatch.setattr(supervisor_routes, "_execute_plan_approved_tests", fake_execute_test_plan)
+    monkeypatch.setattr(
+        server_routes,
+        "_run_supervised_agent",
+        lambda *_args, **_kwargs: pytest.fail("test-only plan should dispatch the fixed test operation directly"),
+    )
+
+    response = client.post(
+        f"/v1/jarvis/approvals/{approval_id}/decision",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+        json={
+            "decision": "approve",
+            "task_id": task_id,
+            "expected_operation_digest": digest,
+            "idempotency_key": "approve-plan-race-nonce-0001",
+            "requester_device_id": device_id,
+            "continuation_objective": objective,
+        },
+    )
+
+    assert response.status_code == 200, response.json()
+    assert response.json()["status"] == "CONSUMED"
+    assert response.json()["execution_state"] == "RUNNING"
+    assert "fixed test suite is running" in response.json()["result_summary"]
+    assert scheduled.wait(2)
+    assert capability_ids == [(task_id, "a" * 32)]
+    assert store.approval(approval_id)["status"] == "CONSUMED"
+    assert store.link_task_run(task_id)["status"] == "RUNNING"
+    events = [event["event_type"] for event in store.events(task_id)]
+    assert "link_task.waiting_approval" in events
+    assert "link_task.approval_consumed" in events
+    assert "approval.mac_mcp_dispatched" in events
+    assert "development.test_execution_scheduled" in events
 
 
 def test_link_task_submit_requires_and_binds_verified_requester_device(link_client):

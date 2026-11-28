@@ -38,8 +38,8 @@ android {
         applicationId = "com.jarvis.companion"
         minSdk = 26
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.1.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("boolean", "FCM_CONFIGURED", hasFirebaseConfig.toString())
         manifestPlaceholders["fcmMessagingServiceEnabled"] = hasFirebaseConfig.toString()
@@ -68,6 +68,7 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:core:1.6.1")

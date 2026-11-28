@@ -7,5 +7,28 @@ fun main() {
     check(TaskNotificationPolicy.eventKey(progress + ("event_seq" to 5L)) != TaskNotificationPolicy.eventKey(progress))
     check(TaskNotificationPolicy.eventKey(mapOf("task_id" to "t1", "state" to "WAITING_APPROVAL", "event_seq" to 5L)) == null)
     check(TaskNotificationPolicy.eventKey(mapOf("state" to "COMPLETED")) == null)
-    println("Task notification policy checks passed: 6 assertions")
+    val largeHistory = (0 until 700).map { index ->
+        mapOf<String, Any>("task_id" to "task-$index", "state" to "COMPLETED", "event_seq" to 1L)
+    }
+    val baseline = TaskNotificationPolicy.notificationBatch(largeHistory, emptySet(), baselineInitialized = false)
+    check(baseline.eventsToNotify.isEmpty())
+    check(baseline.seenKeys.size == TaskNotificationPolicy.MAX_TRACKED_EVENTS)
+    val newEvents = (700 until 720).map { index ->
+        mapOf<String, Any>("task_id" to "task-$index", "state" to "FAILED", "event_seq" to 2L)
+    }
+    val expanded = largeHistory + newEvents
+    val firstRefresh = TaskNotificationPolicy.notificationBatch(expanded, baseline.seenKeys, baselineInitialized = true)
+    check(firstRefresh.eventsToNotify.size == TaskNotificationPolicy.MAX_NOTIFICATIONS_PER_REFRESH)
+    check(firstRefresh.seenKeys.size == TaskNotificationPolicy.MAX_TRACKED_EVENTS)
+    check(TaskNotificationPolicy.notificationBatch(expanded, firstRefresh.seenKeys, baselineInitialized = true).eventsToNotify.isEmpty())
+    val collapsed = TaskNotificationPolicy.notificationBatch(
+        listOf(
+            mapOf("task_id" to "one-task", "state" to "RUNNING", "event_seq" to 1L),
+            mapOf("task_id" to "one-task", "state" to "COMPLETED", "event_seq" to 2L),
+        ),
+        emptySet(),
+        baselineInitialized = true,
+    )
+    check(collapsed.eventsToNotify.single().state == "COMPLETED")
+    println("Task notification policy checks passed: 11 assertions")
 }
