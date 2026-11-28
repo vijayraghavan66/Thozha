@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.gms.google-services") apply false
 }
@@ -59,8 +58,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
-
     buildFeatures {
         buildConfig = true
         compose = true
@@ -299,8 +296,8 @@ tasks.register<JavaExec>("verifyTelegramTunnel") {
 // ---- Jarvis Link transport (shared source with jarvis-link/companion; the Android app compiles it too) ----
 // Protocol, HTTP relay client, durable stores and the CLI live in the Jarvis Link workspace so the relay,
 // host and companion are tested from one copy of the code. This module builds them with its working toolchain.
-android.sourceSets.getByName("main").java.srcDir(jarvisLinkRoot.resolve("companion/src/main/kotlin"))
-android.sourceSets.getByName("test").java.srcDir(jarvisLinkRoot.resolve("companion/src/test/kotlin"))
+android.sourceSets.getByName("main").kotlin.srcDir(jarvisLinkRoot.resolve("companion/src/main/kotlin"))
+android.sourceSets.getByName("test").kotlin.srcDir(jarvisLinkRoot.resolve("companion/src/test/kotlin"))
 
 val linkCompanionCliJar by tasks.registering(Jar::class) {
     group = "verification"

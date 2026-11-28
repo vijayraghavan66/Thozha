@@ -16,6 +16,7 @@ data class ConversationItem(
 object ConversationPresentation {
     private const val COMPLETED_NO_TEXT = "Completed. The assistant returned no text for this request."
     private const val FAILED_NO_TEXT = "This request failed. No answer was returned."
+    private const val REJECTED_TEXT = "Approval rejected. The operation was not run."
     private const val CANCELLED_TEXT = "Cancelled. Jarvis will not continue this request."
     private const val WAITING_TEXT = "Waiting for your approval before Jarvis continues."
     private const val RUNNING_NO_TEXT = "Working on it."
@@ -82,6 +83,7 @@ object ConversationPresentation {
             else -> (summary.ifBlank { COMPLETED_NO_TEXT }) to false
         }
         TaskTone.FAILED -> (summary.ifBlank { FAILED_NO_TEXT }) to false
+        TaskTone.REJECTED -> (summary.ifBlank { REJECTED_TEXT }) to false
         TaskTone.CANCELLED -> CANCELLED_TEXT to false
         TaskTone.WAITING -> WAITING_TEXT to true
         TaskTone.RUNNING -> when {

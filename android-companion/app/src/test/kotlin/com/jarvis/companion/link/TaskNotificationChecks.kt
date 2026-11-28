@@ -5,6 +5,8 @@ fun main() {
     check(TaskNotificationPolicy.eventKey(progress) == "t1:RUNNING:4")
     check(TaskNotificationPolicy.eventKey(progress) == TaskNotificationPolicy.eventKey(progress))
     check(TaskNotificationPolicy.eventKey(progress + ("event_seq" to 5L)) != TaskNotificationPolicy.eventKey(progress))
+    val rejected = mapOf<String, Any>("task_id" to "t2", "state" to "REJECTED", "event_seq" to 8L)
+    check(TaskNotificationPolicy.eventKey(rejected) == "t2:REJECTED:8")
     check(TaskNotificationPolicy.eventKey(mapOf("task_id" to "t1", "state" to "WAITING_APPROVAL", "event_seq" to 5L)) == null)
     check(TaskNotificationPolicy.eventKey(mapOf("state" to "COMPLETED")) == null)
     val largeHistory = (0 until 700).map { index ->
@@ -30,5 +32,7 @@ fun main() {
         baselineInitialized = true,
     )
     check(collapsed.eventsToNotify.single().state == "COMPLETED")
-    println("Task notification policy checks passed: 11 assertions")
+    val rejection = TaskNotificationPolicy.notificationBatch(listOf(rejected), emptySet(), baselineInitialized = true)
+    check(rejection.eventsToNotify.single().state == "REJECTED")
+    println("Task notification policy checks passed: 13 assertions")
 }

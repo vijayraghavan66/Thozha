@@ -590,16 +590,41 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         val token = secureStore.token()?.takeIf { it.isNotBlank() }
             ?: throw ApiException("This phone is not paired with the Mac.", 401)
         val base = requireBaseUrl()
-        val wifiPin = runCatching { secureStore.localGatewayPin() }.getOrNull()
         // The explicit test-relay preference is now a fallback, not a reason to bypass an
         // available pinned LAN gateway. Local USB remains the only mode that prefers ADB reverse.
-        val preferPinnedLan = wifiPin != null && LinkSettings(context).mode == LinkMode.TEST_RELAY
-        val loopbackReady = wifiPin != null && !preferPinnedLan && loopbackEndpointReachable(base)
-        val wifiCandidate = wifiPin?.let { pin ->
-            if (loopbackReady) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
-            else LocalGatewayDiscovery.discoverOrWait(context, pin)
+        val baseIsLoopback = isLoopbackHost(runCatching { URI(base).host.orEmpty() }.getOrDefault(""))
+        val explicitDebugUsb = BuildConfig.DEBUG && baseIsLoopback &&
+            LinkSettings(context).mode == LinkMode.LOCAL_USB && loopbackEndpointReachable(base)
+        val wifiPin = if (explicitDebugUsb) null else runCatching { secureStore.localGatewayPin() }.getOrNull()
+        if (shouldFailClosedLoopbackBearer(
+                baseIsLoopback = baseIsLoopback,
+                bearerPresent = true,
+                explicitDebugUsb = explicitDebugUsb,
+                pinnedHttpsEndpointAvailable = false,
+            ) && wifiPin == null
+        ) {
+            throw ApiException("No pinned HTTPS gateway is available. Refusing an unpinned localhost artifact request.")
         }
-        val wifiEndpoint = selectLocalGatewayEndpoint(loopbackReady, wifiCandidate)
+        if (wifiPin != null && !LocalGatewayDiscovery.localNetworkPermissionGranted(context)) {
+            throw ApiException("Allow local network access for Thozha, then scan the Mac QR again.")
+        }
+        val wifiCandidate = if (explicitDebugUsb) null else wifiPin?.let { pin ->
+            endpointFromSignedAddress(pin) ?: LocalGatewayDiscovery.discoverOrWait(context, pin)
+        }
+        val wifiEndpoint = selectLocalGatewayEndpoint(
+            loopbackReachable = explicitDebugUsb,
+            cachedOrDiscovered = wifiCandidate,
+            allowCleartextLoopback = explicitDebugUsb,
+        )
+        if (shouldFailClosedLoopbackBearer(
+                baseIsLoopback = baseIsLoopback,
+                bearerPresent = true,
+                explicitDebugUsb = explicitDebugUsb,
+                pinnedHttpsEndpointAvailable = wifiEndpoint != null,
+            )
+        ) {
+            throw ApiException("The pinned Mac HTTPS gateway is unavailable. Refusing an unpinned localhost artifact request.")
+        }
         val effectiveBase = wifiEndpoint?.httpsBaseUrl() ?: base
         val connection = (URL(effectiveBase + artifact.downloadPath).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -787,9 +812,11 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
         traceId: String? = null,
     ): JSONObject {
         val requestStartedNs = System.nanoTime()
+        val baseHost = runCatching { URI(base).host.orEmpty() }.getOrDefault("")
+        val baseIsLoopback = isLoopbackHost(baseHost)
         val usbLoopbackSelected = BuildConfig.DEBUG && localGatewayPin == null &&
             LinkSettings(context).mode == LinkMode.LOCAL_USB &&
-            isLoopbackHost(runCatching { URI(base).host.orEmpty() }.getOrDefault("")) &&
+            baseIsLoopback &&
             loopbackEndpointReachable(base)
         val wifiPin = localGatewayPin ?: if (allowLocalWifi && !token.isNullOrBlank() && !usbLoopbackSelected) {
             runCatching { secureStore.localGatewayPin() }.getOrNull()
@@ -798,13 +825,27 @@ class JarvisApi(private val context: Context, private val secureStore: SecureSto
             throw ApiException("Allow local network access for Thozha, then scan the Mac QR again.")
         }
         val discoveryStartedNs = System.nanoTime()
-        val loopbackReady = wifiPin != null && loopbackEndpointReachable(base)
+        // A reachable localhost port may belong to another app. It is allowed to
+        // win routing only for the explicit debug-only Local USB/ADB-reverse mode.
+        val loopbackReady = usbLoopbackSelected
         val wifiCandidate = if (usbLoopbackSelected) null else wifiPin?.let { pin ->
             if (localGatewayPin != null) endpointFromSignedAddress(pin)
-            else if (loopbackReady) LocalGatewayDiscovery.cachedOrSchedule(context, pin)
             else LocalGatewayDiscovery.discoverOrWait(context, pin)
         }
-        val wifiEndpoint = selectLocalGatewayEndpoint(loopbackReady, wifiCandidate)
+        val wifiEndpoint = selectLocalGatewayEndpoint(
+            loopbackReachable = loopbackReady,
+            cachedOrDiscovered = wifiCandidate,
+            allowCleartextLoopback = usbLoopbackSelected,
+        )
+        if (shouldFailClosedLoopbackBearer(
+                baseIsLoopback = baseIsLoopback,
+                bearerPresent = !token.isNullOrBlank(),
+                explicitDebugUsb = usbLoopbackSelected,
+                pinnedHttpsEndpointAvailable = wifiEndpoint != null,
+            )
+        ) {
+            throw ApiException("The pinned Mac HTTPS gateway is unavailable. Refusing an unpinned localhost request.")
+        }
         val parsedBase = runCatching { URI(base) }.getOrNull()
         if (parsedBase != null && wifiPin != null && parsedBase.host.equals(wifiPin.hostname, ignoreCase = true) &&
             wifiEndpoint == null

@@ -61,6 +61,16 @@ class LinkSettings(context: Context) {
             prefs.edit().putString("assistant_name", normalized).apply()
         }
 
+    /** Optional name used only for the Home greeting; product and assistant names remain separate. */
+    var ownerName: String
+        get() = prefs.getString("owner_name", OwnerNamePolicy.DEFAULT_NAME)
+            ?.let(OwnerNamePolicy::normalize)
+            ?: OwnerNamePolicy.DEFAULT_NAME
+        set(value) {
+            val normalized = OwnerNamePolicy.normalize(value) ?: return
+            prefs.edit().putString("owner_name", normalized).apply()
+        }
+
     /** The FCM token last accepted by the relay. Only a hash is needed to avoid re-registering the same value. */
     var lastRegisteredPushToken: String
         get() = prefs.getString("last_push_token_sha256", "") ?: ""

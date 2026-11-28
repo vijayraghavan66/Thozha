@@ -1,24 +1,19 @@
 package com.jarvis.companion.fastpath
 
-/**
- * Selects the supervisor task scope for an explicitly software-building request.
- * This only opens the development planning route; it never grants a write capability.
- */
+/** Client command parser for intentionally creating a supervisor task. It never grants a write capability. */
 object DevelopmentIntentClassifier {
-    private val buildAction = Regex("\\b(create|build|implement|develop|write|generate)\\b", RegexOption.IGNORE_CASE)
-    private val softwareArtifact = Regex(
-        "\\b(project|application|app|software|program|script|cli|command[- ]line|website|web app|tracker|library|package)\\b",
-        RegexOption.IGNORE_CASE,
-    )
-    private val explicitNegation = Regex("^\\s*(don't|do not|never|avoid)\\b", RegexOption.IGNORE_CASE)
+    private val command = Regex("^/task(?:\\s+|$)", RegexOption.IGNORE_CASE)
 
-    fun capabilityScope(objective: String): String {
-        val cleaned = objective.trim()
-        if (cleaned.isEmpty() || explicitNegation.containsMatchIn(cleaned)) return "assistant"
-        return if (buildAction.containsMatchIn(cleaned) && softwareArtifact.containsMatchIn(cleaned)) {
-            "development"
-        } else {
-            "assistant"
-        }
+    data class TaskCommand(val isCommand: Boolean, val objective: String?)
+
+    fun parseTaskCommand(prompt: String): TaskCommand {
+        val trimmed = prompt.trimStart()
+        val match = command.find(trimmed) ?: return TaskCommand(false, null)
+        val objective = trimmed.substring(match.range.last + 1).trim()
+        return TaskCommand(true, objective.takeIf { it.isNotBlank() })
     }
+
+    /** Ordinary prose is always assistant scope; only an explicit non-empty /task opts into development. */
+    fun capabilityScope(prompt: String): String =
+        if (parseTaskCommand(prompt).let { it.isCommand && !it.objective.isNullOrBlank() }) "development" else "assistant"
 }

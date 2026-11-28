@@ -73,6 +73,76 @@ def utc_now() -> str:
 MAX_RESULT_TEXT_BYTES = 256 * 1024
 RESULT_TEXT_CUT_NOTICE = "\n\n[Jarvis stopped this answer at 256 KiB on the Mac. The rest was not stored.]"
 MAX_LINK_CONVERSATION_MESSAGE_CHARS = 12_000
+MAX_LINK_TITLE_CHARS = 72
+_LINK_TITLE_STOP_WORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "before", "by", "can", "could",
+    "do", "does", "for", "from", "help", "how", "i", "if", "in", "into",
+    "is", "it", "me", "my", "of", "on", "or", "our", "please", "should",
+    "missing", "task", "that", "the", "their", "this", "to", "us", "we", "what", "when",
+    "where", "which", "who", "why", "with", "would", "you", "your",
+})
+_LINK_TITLE_GENERIC_WORDS = frozenset({"project", "request", "task", "feature", "thing"})
+_LINK_TITLE_ACTIONS = frozenset({
+    "add", "build", "check", "create", "explain", "fix", "implement", "list",
+    "make", "open", "repair", "review", "run", "show", "summarize", "update",
+    "verify", "write",
+})
+_LINK_TITLE_PRIMARY_ACTIONS = frozenset({"add", "build", "create", "fix", "implement", "make", "repair", "write"})
+
+
+def link_task_title(objective: str) -> str:
+    """Create a short deterministic title without retaining a raw prompt or path.
+
+    Titles are a UI label, not an execution instruction. The complete objective is
+    separately protected in the existing owner-bound task store.
+    """
+    if not isinstance(objective, str):
+        return "New request"
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", objective).strip()
+    text = re.sub(r"(?i)^\s*/task\b\s*", "", text)
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
+    # File paths and code identifiers are not useful conversation titles and may
+    # contain host-specific directory names.
+    text = re.sub(r"(?<![A-Za-z0-9])(?:/[A-Za-z0-9_.-]+)+/?", " ", text)
+    text = re.sub(r"\b[A-Za-z0-9_.-]+\.(?:py|kt|java|json|md|txt|yaml|yml|toml|sh)\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*\S+", " ", text, flags=re.IGNORECASE)
+
+    clauses = [part.strip(" \t-—") for part in re.split(r"[.!?;,\n]+", text) if part.strip()]
+    best_tokens: list[str] = []
+    best_score = -1.0
+    for clause in clauses[:12]:
+        raw_tokens = re.findall(r"[\w][\w'’+#-]*", clause, flags=re.UNICODE)
+        tokens = [token for token in raw_tokens if token.casefold() not in _LINK_TITLE_STOP_WORDS]
+        if not tokens:
+            continue
+        meaningful = [token for token in tokens if token.casefold() not in _LINK_TITLE_GENERIC_WORDS]
+        if not meaningful:
+            meaningful = tokens
+        first_word = meaningful[0].casefold()
+        if first_word in _LINK_TITLE_PRIMARY_ACTIONS:
+            action_score = 2.25
+        elif first_word in _LINK_TITLE_ACTIONS:
+            action_score = 0.75
+        else:
+            action_score = 0
+        score = min(len(meaningful), 7) + action_score
+        # Prefer a specific short follow-up clause over a generic "build a project" lead-in.
+        score += 0.25 * min(sum(token.casefold() not in _LINK_TITLE_ACTIONS for token in meaningful), 4)
+        if score > best_score:
+            best_score = score
+            best_tokens = meaningful[:7]
+
+    if not best_tokens:
+        return "New request"
+    title = " ".join(best_tokens).strip(" -—'’")
+    if not title:
+        return "New request"
+    title = title[0].upper() + title[1:]
+    if len(title) > MAX_LINK_TITLE_CHARS:
+        title = title[: MAX_LINK_TITLE_CHARS - 1].rsplit(" ", 1)[0].rstrip(" -—") or title[: MAX_LINK_TITLE_CHARS - 1]
+        title += "…"
+    return title
 MAX_LINK_CONVERSATION_MESSAGES = 100
 
 
@@ -300,9 +370,14 @@ class SupervisorStore:
             CREATE TABLE IF NOT EXISTS link_task_runs(
               task_id TEXT PRIMARY KEY REFERENCES tasks(id), idempotency_key TEXT NOT NULL UNIQUE,
               objective_digest TEXT NOT NULL, scope TEXT NOT NULL, scope_digest TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
-              objective_text TEXT, result_digest TEXT, result_summary TEXT, created_at TEXT NOT NULL,
+              title TEXT NOT NULL DEFAULT '', objective_text TEXT, result_digest TEXT, result_summary TEXT, created_at TEXT NOT NULL,
               conversation_id TEXT NOT NULL DEFAULT '', owner_actor TEXT NOT NULL DEFAULT '',
               started_at TEXT, completed_at TEXT, last_error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS link_conversations(
+              owner_actor TEXT NOT NULL, conversation_id TEXT NOT NULL,
+              title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+              PRIMARY KEY(owner_actor,conversation_id)
             );
             CREATE TABLE IF NOT EXISTS link_conversation_messages(
               seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -360,6 +435,50 @@ class SupervisorStore:
                 self._db.execute("ALTER TABLE link_task_runs ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''")
             if link_columns and "owner_actor" not in link_columns:
                 self._db.execute("ALTER TABLE link_task_runs ADD COLUMN owner_actor TEXT NOT NULL DEFAULT ''")
+            if link_columns and "title" not in link_columns:
+                self._db.execute("ALTER TABLE link_task_runs ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+            legacy_link_rows = self._db.execute(
+                "SELECT task_id,title,objective_text,created_at,conversation_id,owner_actor "
+                "FROM link_task_runs WHERE title='' ORDER BY created_at ASC"
+            ).fetchall()
+            for link_row in legacy_link_rows:
+                task_id = str(link_row["task_id"])
+                task_title = link_task_title(str(link_row["objective_text"] or ""))
+                conversation_title = task_title
+                owner = str(link_row["owner_actor"] or "")
+                conversation_id = str(link_row["conversation_id"] or "")
+                if owner and conversation_id:
+                    conversation = self._db.execute(
+                        "SELECT title FROM link_conversations WHERE owner_actor=? AND conversation_id=?",
+                        (owner, conversation_id),
+                    ).fetchone()
+                    if conversation is not None:
+                        conversation_title = str(conversation["title"] or task_title)
+                    else:
+                        first_turn = self._db.execute(
+                            "SELECT content FROM link_conversation_messages WHERE owner_actor=? AND conversation_id=? AND role='user' ORDER BY seq LIMIT 1",
+                            (owner, conversation_id),
+                        ).fetchone()
+                        if first_turn:
+                            conversation_title = link_task_title(str(first_turn["content"]))
+                        self._db.execute(
+                            "INSERT OR IGNORE INTO link_conversations(owner_actor,conversation_id,title,created_at,updated_at) VALUES(?,?,?,?,?)",
+                            (owner, conversation_id, conversation_title, link_row["created_at"], link_row["created_at"]),
+                        )
+                self._db.execute("UPDATE link_task_runs SET title=? WHERE task_id=?", (task_title, task_id))
+                task_row = self._db.execute("SELECT recovery_json FROM tasks WHERE id=?", (task_id,)).fetchone()
+                if task_row:
+                    try:
+                        metadata = json.loads(task_row["recovery_json"] or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        metadata = {}
+                    metadata.setdefault("title", task_title)
+                    if conversation_id:
+                        metadata.setdefault("conversation_title", conversation_title)
+                    self._db.execute(
+                        "UPDATE tasks SET recovery_json=? WHERE id=?",
+                        (canonical_json(metadata), task_id),
+                    )
             pairing_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(device_pairings)")}
             pairing_migrations = {
                 "status": "TEXT NOT NULL DEFAULT 'INVITED'",
@@ -452,6 +571,7 @@ class SupervisorStore:
         scope_json = canonical_json(capability_scope)
         scope_digest = hashlib.sha256(scope_json.encode("utf-8")).hexdigest()
         objective_digest = hashlib.sha256(objective.encode("utf-8")).hexdigest()
+        title = link_task_title(objective)
         now = utc_now()
         with self._tx() as db:
             existing = db.execute(
@@ -468,7 +588,49 @@ class SupervisorStore:
                 prior_owner = prior_metadata.get("owner_actor")
                 if prior_owner and owner_actor and prior_owner != owner_actor:
                     raise PermissionError("idempotency key belongs to another paired device")
-                return {**dict(existing), "created": False}
+                existing_title = str(existing["title"] or "") if "title" in existing.keys() else ""
+                if not existing_title:
+                    existing_title = title
+                    db.execute("UPDATE link_task_runs SET title=? WHERE task_id=?", (existing_title, existing["task_id"]))
+                conversation_title = existing_title
+                if owner_actor and conversation_id:
+                    conversation = db.execute(
+                        "SELECT title FROM link_conversations WHERE owner_actor=? AND conversation_id=?",
+                        (owner_actor, conversation_id),
+                    ).fetchone()
+                    if conversation is not None:
+                        conversation_title = str(conversation["title"] or existing_title)
+                    else:
+                        first_turn = db.execute(
+                            "SELECT content FROM link_conversation_messages WHERE owner_actor=? AND conversation_id=? AND role='user' ORDER BY seq LIMIT 1",
+                            (owner_actor, conversation_id),
+                        ).fetchone()
+                        conversation_title = link_task_title(str(first_turn["content"])) if first_turn else existing_title
+                        db.execute(
+                            "INSERT OR IGNORE INTO link_conversations(owner_actor,conversation_id,title,created_at,updated_at) VALUES(?,?,?,?,?)",
+                            (owner_actor, conversation_id, conversation_title, now, now),
+                        )
+                return {**dict(existing), "title": existing_title, "conversation_title": conversation_title, "created": False}
+
+            conversation_title = title
+            if owner_actor and conversation_id:
+                conversation = db.execute(
+                    "SELECT title FROM link_conversations WHERE owner_actor=? AND conversation_id=?",
+                    (owner_actor, conversation_id),
+                ).fetchone()
+                if conversation is not None:
+                    conversation_title = str(conversation["title"] or title)
+                else:
+                    first_turn = db.execute(
+                        "SELECT content FROM link_conversation_messages WHERE owner_actor=? AND conversation_id=? AND role='user' ORDER BY seq LIMIT 1",
+                        (owner_actor, conversation_id),
+                    ).fetchone()
+                    if first_turn:
+                        conversation_title = link_task_title(str(first_turn["content"]))
+                    db.execute(
+                        "INSERT OR IGNORE INTO link_conversations(owner_actor,conversation_id,title,created_at,updated_at) VALUES(?,?,?,?,?)",
+                        (owner_actor, conversation_id, conversation_title, now, now),
+                    )
 
             task_id = uuid.uuid4().hex
             metadata = {
@@ -478,6 +640,8 @@ class SupervisorStore:
                 "scope_digest": scope_digest,
                 "idempotency_key": idempotency_key,
                 "conversation_id": conversation_id,
+                "title": title,
+                "conversation_title": conversation_title,
             }
             if owner_actor:
                 metadata["owner_actor"] = owner_actor
@@ -486,13 +650,18 @@ class SupervisorStore:
                 (task_id, objective_digest, "CREATED", canonical_json(sorted(LINK_SCOPE_CAPABILITIES[scope])), canonical_json(metadata), now, now),
             )
             db.execute(
-                "INSERT INTO link_task_runs(task_id,idempotency_key,objective_digest,scope,scope_digest,status,objective_text,created_at,conversation_id,owner_actor) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (task_id, idempotency_key, objective_digest, scope_json, scope_digest, "CREATED", objective, now, conversation_id, owner_actor or ""),
+                "INSERT INTO link_task_runs(task_id,idempotency_key,objective_digest,scope,scope_digest,status,title,objective_text,created_at,conversation_id,owner_actor) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (task_id, idempotency_key, objective_digest, scope_json, scope_digest, "CREATED", title, objective, now, conversation_id, owner_actor or ""),
             )
             self._event(db, task_id, "task.created", {"request_digest": objective_digest, "source": "jarvis_link", "scope": scope})
             self._event(db, task_id, "link_task.created", {"idempotency_key": idempotency_key, "scope": scope})
             self._event(db, task_id, "link_task.queued", {"state": "CREATED", "scope": scope})
-        return {"task_id": task_id, "idempotency_key": idempotency_key, "objective_digest": objective_digest, "scope": scope, "status": "CREATED", "created": True}
+        return {
+            "task_id": task_id, "idempotency_key": idempotency_key,
+            "objective_digest": objective_digest, "scope": scope,
+            "status": "CREATED", "title": title,
+            "conversation_title": conversation_title, "created": True,
+        }
 
     def start_link_task(self, task_id: str, *, objective_digest: str, objective_text_digest: str, capability_scope: list[str], idempotency_key: str) -> dict[str, Any]:
         """Atomically claim one existing CREATED jarvis_link task for execution."""
@@ -637,6 +806,10 @@ class SupervisorStore:
                              ORDER BY seq DESC LIMIT -1 OFFSET ?
                            )""",
                         (owner, conversation_id, MAX_LINK_CONVERSATION_MESSAGES),
+                    )
+                    db.execute(
+                        "UPDATE link_conversations SET updated_at=? WHERE owner_actor=? AND conversation_id=?",
+                        (now, owner, conversation_id),
                     )
             self._event(db, task_id, "link_task.completed" if success else "link_task.failed", {"result_digest": digest, "error": (error or "")[:200] or None})
 
@@ -1253,9 +1426,17 @@ class SupervisorStore:
             result.append(item)
         return result
 
-    def recent_tasks(self, limit: int = 100) -> list[dict[str, Any]]:
+    def recent_tasks(self, limit: int = 100, *, owner_actor: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
-            rows = self._db.execute("SELECT * FROM tasks ORDER BY updated_at DESC LIMIT ?", (max(1, min(limit, 500)),)).fetchall()
+            bounded_limit = max(1, min(limit, 500))
+            if owner_actor:
+                rows = self._db.execute(
+                    "SELECT t.* FROM tasks t JOIN link_task_runs r ON r.task_id=t.id "
+                    "WHERE r.owner_actor=? ORDER BY t.updated_at DESC LIMIT ?",
+                    (owner_actor, bounded_limit),
+                ).fetchall()
+            else:
+                rows = self._db.execute("SELECT * FROM tasks ORDER BY updated_at DESC LIMIT ?", (bounded_limit,)).fetchall()
         return [dict(row) for row in rows]
 
     def begin_device_pairing(self, ttl_seconds: int = 300) -> tuple[str, str, str]:

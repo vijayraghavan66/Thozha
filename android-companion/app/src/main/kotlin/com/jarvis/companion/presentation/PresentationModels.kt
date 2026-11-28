@@ -8,13 +8,13 @@ package com.jarvis.companion.presentation
  */
 
 /** Visual tone for a task state. Mapped only from the state names the runtime reports. */
-enum class TaskTone { RUNNING, WAITING, COMPLETED, FAILED, CANCELLED, UNKNOWN }
+enum class TaskTone { RUNNING, WAITING, COMPLETED, FAILED, CANCELLED, REJECTED, UNKNOWN }
 
 object TaskStates {
     private val running = setOf("CREATED", "PLANNING", "RUNNING", "VERIFYING", "QUEUED", "SENT")
     private val waiting = setOf("WAITING_APPROVAL", "WAITING_CONNECTION", "PAUSED")
     private val completed = setOf("COMPLETED")
-    private val failed = setOf("FAILED", "REFUSED", "EXPIRED", "REJECTED")
+    private val failed = setOf("FAILED", "REFUSED", "EXPIRED")
     private val cancelled = setOf("CANCELLED")
 
     fun toneFor(state: String?): TaskTone {
@@ -25,6 +25,7 @@ object TaskStates {
             in completed -> TaskTone.COMPLETED
             in failed -> TaskTone.FAILED
             in cancelled -> TaskTone.CANCELLED
+            "REJECTED" -> TaskTone.REJECTED
             else -> TaskTone.UNKNOWN
         }
     }
@@ -49,6 +50,7 @@ object TaskStates {
         TaskTone.COMPLETED -> "Completed"
         TaskTone.FAILED -> "Failed"
         TaskTone.CANCELLED -> "Cancelled"
+        TaskTone.REJECTED -> "Rejected"
         TaskTone.UNKNOWN -> "Status unknown"
     }
 }

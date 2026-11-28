@@ -61,10 +61,10 @@ class WorkflowGuardrailTest {
             now + 3,
         )!!
         assertEquals(ApprovalDecisionPhase.REJECTED, rejected.phase)
+        assertEquals(TaskTone.REJECTED, TaskStates.toneFor("REJECTED"))
+        assertEquals("Rejected", TaskStates.statusLabel("REJECTED"))
         assertEquals("REJECTED", ApprovalDecisionPresentation.resultingTaskState("reject", null))
         assertEquals("PAUSED", ApprovalDecisionPresentation.resultingTaskState("reject", " paused "))
-        assertEquals("Rejected", TaskStates.statusLabel("REJECTED"))
-        assertEquals(TaskTone.FAILED, TaskStates.toneFor("REJECTED"))
         assertNull("a rejected task cannot later be promoted to running", ApprovalDecisionPresentation.taskState(rejected, "RUNNING", now + 4))
         assertTrue(ApprovalDecisionPresentation.blocksAnotherTap(rejected))
     }

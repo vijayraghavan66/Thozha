@@ -16,6 +16,7 @@ import com.jarvis.companion.link.LinkAlerts
 import com.jarvis.companion.link.LinkService
 import com.jarvis.companion.link.LinkSettings
 import com.jarvis.companion.link.AssistantNamePolicy
+import com.jarvis.companion.link.OwnerNamePolicy
 import com.jarvis.companion.fastpath.FastCommand
 import com.jarvis.companion.fastpath.FastCommandClassifier
 import com.jarvis.companion.fastpath.DevelopmentIntentClassifier
@@ -133,6 +134,7 @@ class JarvisStore(private val app: Context) {
     var localWifiSetupRunning by mutableStateOf(false)
     var localWifiSetupMessage by mutableStateOf("")
     var assistantName by mutableStateOf(LinkSettings(app).assistantName)
+    var ownerName by mutableStateOf(LinkSettings(app).ownerName)
     var telegram by mutableStateOf<TelegramSnapshot?>(null)
     var telegramRemoteEnabled by mutableStateOf(TelegramBootstrap.isRemoteEnabled(app))
     var session by mutableStateOf(sessions.active())
@@ -181,6 +183,14 @@ class JarvisStore(private val app: Context) {
         return runCatching {
             LinkSettings(app).assistantName = normalized
             ui { assistantName = normalized }
+        }.isSuccess
+    }
+
+    fun updateOwnerName(value: String): Boolean {
+        val normalized = OwnerNamePolicy.normalize(value) ?: return false
+        return runCatching {
+            LinkSettings(app).ownerName = normalized
+            ui { ownerName = normalized }
         }.isSuccess
     }
 
@@ -912,32 +922,43 @@ class JarvisStore(private val app: Context) {
 
     /** Sends the composer text through the same signed Link path that Telegram carries when connected. */
     fun submit(requestIdOverride: String? = null) = ui {
-        val text = draft.trim()
-        if (submitting || text.isEmpty()) return@ui
-        if (text.toByteArray(Charsets.UTF_8).size > 4096) {
+        val enteredText = draft.trim()
+        if (submitting || enteredText.isEmpty()) return@ui
+        if (enteredText.toByteArray(Charsets.UTF_8).size > 4096) {
             notice = "Requests can be up to 4,096 bytes."
             return@ui
         }
+        val taskCommand = DevelopmentIntentClassifier.parseTaskCommand(enteredText)
+        if (taskCommand.isCommand && taskCommand.objective.isNullOrBlank()) {
+            notice = "Add a task objective after /task."
+            return@ui
+        }
+        // /task is a local routing marker; only the clean objective travels to the Mac.
+        val text = taskCommand.objective ?: enteredText
         val requestId = requestIdOverride ?: UUID.randomUUID().toString().replace("-", "")
         if (!requestId.matches(Regex("[A-Za-z0-9._~-]{16,128}"))) {
             notice = "This voice request could not be assigned a safe task identity."
             return@ui
         }
-        val localIntent = LocalTaskExecutor.classify(text)
+        val localIntent = if (taskCommand.isCommand) null else LocalTaskExecutor.classify(text)
         if (localIntent != null) {
             submitPhoneTask(requestId, text, localIntent)
             return@ui
         }
-        val fastCommand = FastCommandClassifier.classify(text)
+        val fastCommand = if (taskCommand.isCommand) null else FastCommandClassifier.classify(text)
         val selectedAiMode = aiRequestMode
-        val route = RequestRoutingPolicy.route(
-            requestId = requestId,
-            prompt = text,
-            mode = selectedAiMode,
-            // A model must be loaded and verified before AUTO may use the local backend.
-            localModelReady = localAi.status().phase == LocalAiPhase.READY,
-            isExactFastCommand = fastCommand != null,
-        )
+        val route = if (taskCommand.isCommand) {
+            RequestRoute.Mac(requestId, "Explicit /task command.")
+        } else {
+            RequestRoutingPolicy.route(
+                requestId = requestId,
+                prompt = text,
+                mode = selectedAiMode,
+                // A model must be loaded and verified before AUTO may use the local backend.
+                localModelReady = localAi.status().phase == LocalAiPhase.READY,
+                isExactFastCommand = fastCommand != null,
+            )
+        }
         if (route is RequestRoute.Rejected) {
             notice = route.message
             return@ui
@@ -1089,7 +1110,7 @@ class JarvisStore(private val app: Context) {
                 return@background
             }
             val runtime = LinkService.runtime(app)
-            val capabilityScope = DevelopmentIntentClassifier.capabilityScope(text)
+            val capabilityScope = if (taskCommand.isCommand) "development" else "assistant"
             val outboxStartedNs = System.nanoTime()
             PerformanceTrace.mark(requestTrace, "outbox_insert_start")
             if (runCatching {

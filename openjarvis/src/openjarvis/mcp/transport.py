@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 from openjarvis.mcp.protocol import MCPRequest, MCPResponse
 
@@ -17,6 +17,14 @@ if TYPE_CHECKING:
     from openjarvis.mcp.server import MCPServer
 
 logger = logging.getLogger(__name__)
+
+
+class MCPRateLimitError(RuntimeError):
+    """HTTP 429 response with a bounded wake time; callers must not busy-retry."""
+
+    def __init__(self, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = max(1, min(int(retry_after_seconds), 86_400))
+        super().__init__("MCP provider rate limited this request")
 
 
 class MCPTransport(ABC):
@@ -269,13 +277,19 @@ class StreamableHTTPTransport(MCPTransport):
         url: str,
         *,
         token: Optional[str] = None,
+        token_provider: Callable[[], Optional[str]] | None = None,
         connect_timeout: float = 10.0,
         request_timeout: float = 60.0,
+        max_response_bytes: int = 1_000_000,
     ) -> None:
         import httpx
 
+        if not 1 <= max_response_bytes <= 10_000_000:
+            raise ValueError("max_response_bytes is out of bounds")
         self._url = url
         self._token = token
+        self._token_provider = token_provider
+        self._max_response_bytes = max_response_bytes
         self._session_id: Optional[str] = None
         self._client = httpx.Client(
             timeout=httpx.Timeout(
@@ -284,6 +298,7 @@ class StreamableHTTPTransport(MCPTransport):
                 write=request_timeout,
                 pool=connect_timeout,
             ),
+            follow_redirects=False,
         )
 
     def _safe_url(self) -> str:
@@ -307,10 +322,14 @@ class StreamableHTTPTransport(MCPTransport):
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
+        token = self._token_provider() if self._token_provider is not None else self._token
+        if token:
+            if not isinstance(token, str) or "\r" in token or "\n" in token:
+                raise ValueError("MCP bearer provider returned an invalid token")
+            headers["Authorization"] = f"Bearer {token}"
         if self._session_id is not None:
             headers["Mcp-Session-Id"] = self._session_id
+        headers["MCP-Protocol-Version"] = "2025-03-26"
         return headers
 
     def _post(self, request: MCPRequest) -> Any:
@@ -324,7 +343,6 @@ class StreamableHTTPTransport(MCPTransport):
                 json=request.to_dict(),
                 headers=headers,
             )
-            response.raise_for_status()
         except httpx.ConnectError as exc:
             raise RuntimeError(
                 f"Failed to connect to MCP server at {self._safe_url()}: {exc}"
@@ -333,17 +351,45 @@ class StreamableHTTPTransport(MCPTransport):
             raise RuntimeError(
                 f"Timeout communicating with MCP server at {self._safe_url()}: {exc}"
             ) from exc
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"MCP server at {self._safe_url()} returned HTTP "
-                f"{exc.response.status_code}"
-            ) from exc
+        status = response.status_code
+        if status == 429:
+            raise MCPRateLimitError(self._retry_after_seconds(response.headers.get("Retry-After")))
+        if 300 <= status < 400:
+            raise RuntimeError("MCP server redirect was refused")
+        if status in {401, 403}:
+            raise RuntimeError(f"MCP server authorization failed (HTTP {status})")
+        if not 200 <= status < 300:
+            raise RuntimeError(f"MCP server at {self._safe_url()} returned HTTP {status}")
+        if len(response.content) > self._max_response_bytes:
+            raise RuntimeError("MCP server response exceeded the configured size limit")
 
         # Track session id from the first response
         new_session_id = response.headers.get("mcp-session-id")
-        if new_session_id is not None:
+        if new_session_id is not None and len(new_session_id) <= 256 and all(
+            char.isalnum() or char in "._-" for char in new_session_id
+        ):
             self._session_id = new_session_id
         return response
+
+    @staticmethod
+    def _retry_after_seconds(value: str | None) -> int:
+        """Bound Retry-After and never sleep in the transport."""
+        from datetime import datetime, timezone
+        from email.utils import parsedate_to_datetime
+
+        if not value:
+            return 60
+        try:
+            seconds = float(value)
+        except ValueError:
+            try:
+                when = parsedate_to_datetime(value)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                seconds = (when - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                return 60
+        return max(1, min(int(seconds), 86_400))
 
     @staticmethod
     def _extract_json_from_sse(text: str) -> str:

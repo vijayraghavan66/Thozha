@@ -61,6 +61,7 @@ internal fun toneColor(tone: TaskTone?): Int = when (tone) {
     TaskTone.COMPLETED -> R.color.ok
     TaskTone.WAITING -> R.color.warn
     TaskTone.FAILED -> R.color.alert
+    TaskTone.REJECTED -> R.color.warn
     TaskTone.RUNNING -> R.color.accent
     TaskTone.CANCELLED, TaskTone.UNKNOWN, null -> R.color.label_secondary
 }

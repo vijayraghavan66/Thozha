@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 _ARTIFACT_STORE = None
 _DEVICE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _APPROVED_TEST_RUNS: set[asyncio.Task] = set()
+_TASK_CLIENT_EVENT_TYPES = frozenset({
+    "task.state", "task.recovered_paused", "task.cancelled", "task.explicit_resume",
+    "link_task.queued", "link_task.started", "link_task.waiting_approval",
+    "link_task.approval_consumed", "link_task.approval_rejected", "link_task.completed",
+    "link_task.failed", "approval.consumed", "tool.mcp_approval_dispatch_claimed",
+    "approval.created", "approval.decision", "approval.expired",
+    "approval.execution_completed", "approval.execution_failed", "approval.mac_mcp_dispatched",
+    "development.tool_performance", "development.operation_started", "development.tests_completed",
+    "development.test_execution_scheduled", "development.test_execution_cancelled",
+    "development.file_written", "development.artifacts_collected", "development.patch_approval_requested",
+    "development.authorization_refused", "development.tool_failed", "development.artifact_export_started",
+    "development.artifact_export_completed", "workspace.patch_exported", "workspace.patch_import_started",
+    "workspace.patch_applied", "workspace.guest_cleanup_completed", "workspace.guest_cleanup_pending",
+})
 
 
 def _artifact_store():
@@ -98,6 +112,10 @@ def _link_task_progress_summary(store: Any, task_id: str, state: str, task: dict
             return "Waiting for your approval."
         if state == "CANCELLED":
             return "Task cancelled. The Mac will not continue this request."
+        if state == "REJECTED":
+            return "Approval rejected. The operation was not run."
+        if state == "EXPIRED":
+            return "Approval expired before a decision. The operation was not run."
         if state == "FAILED":
             return "The task failed before completion."
         return {
@@ -140,6 +158,121 @@ def _link_task_progress_summary(store: Any, task_id: str, state: str, task: dict
         if kind == "link_task.started":
             return "The assistant is working on the task."
     return "Working on the task."
+
+
+def _link_task_title(store: Any, task: dict[str, Any]) -> tuple[str, str]:
+    """Return the persisted task/conversation labels without exposing the raw objective."""
+    from openjarvis.tasks.supervisor import link_task_title
+
+    task_id = str(task.get("id") or task.get("task_id") or "")
+    run = store.link_task_run(task_id) if task_id else None
+    title = str((run or {}).get("title") or "").strip()
+    conversation_title = ""
+    if run and run.get("conversation_id") and run.get("owner_actor"):
+        with store._lock:
+            row = store._db.execute(
+                "SELECT title FROM link_conversations WHERE owner_actor=? AND conversation_id=?",
+                (run["owner_actor"], run["conversation_id"]),
+            ).fetchone()
+        if row:
+            conversation_title = str(row["title"] or "").strip()
+    try:
+        metadata = json.loads(task.get("recovery_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    title = title or str(metadata.get("title") or "").strip()
+    conversation_title = conversation_title or str(metadata.get("conversation_title") or "").strip()
+    if not title:
+        title = "Mac task " + (task_id[:8] if task_id else "")
+    return title[:72], conversation_title[:72]
+
+
+def _safe_supervisor_task_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Project an event to the small, human-readable data contract used by task screens."""
+    kind = event.get("event_type")
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    safe: dict[str, Any] = {}
+    string_fields = (
+        "from", "to", "step", "state", "decision", "approval_id", "operation", "error_code",
+        "tool", "status", "result_digest",
+    )
+    for key in string_fields:
+        value = payload.get(key)
+        if isinstance(value, str) and len(value) <= 80 and re.fullmatch(r"[A-Za-z0-9_.:-]+", value):
+            safe[key] = value
+    for key in ("success", "passed", "timed_out", "executed"):
+        value = payload.get(key)
+        if isinstance(value, bool):
+            safe[key] = value
+    for key in ("tests_ran", "failures", "errors", "files", "bytes", "duration_ms", "attempt"):
+        value = payload.get(key)
+        if isinstance(value, int) and 0 <= value <= 1_000_000:
+            safe[key] = value
+    path = _safe_workspace_event_paths([payload.get("path")])
+    if path:
+        safe["path"] = path[0]
+    paths = _safe_workspace_event_paths(payload.get("files"))
+    if paths:
+        safe["files"] = paths[:40]
+    for key in ("patch_sha256", "manifest_sha256"):
+        value = payload.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
+            safe[key] = value
+    return {
+        "seq": int(event.get("seq") or 0),
+        "event_type": kind if isinstance(kind, str) and len(kind) <= 80 else "task.event",
+        "created_at": str(event.get("created_at") or "")[:40],
+        "payload": safe,
+    }
+
+
+def _supervisor_task_summary(store: Any, task: dict[str, Any]) -> str:
+    """Build task cards from durable execution evidence, never serialized supervisor internals."""
+    task_id = str(task.get("id") or "")
+    run = store.link_task_run(task_id) if task_id else None
+    if run is not None:
+        scope = str(run.get("scope") or "")
+        state = str(run.get("status") or task.get("state") or "UNKNOWN")
+        if state in {"COMPLETED", "FAILED", "CANCELLED"}:
+            raw = str(run.get("result_text") or run.get("result_summary") or "")
+            if scope == '["development"]':
+                return _link_result_for_client(store, task_id, scope, state, raw, last_error=run.get("last_error"))[:1000]
+            if state == "COMPLETED":
+                return bounded_result_text(raw)[:1000] if raw else "Task completed."
+        if state == "REJECTED":
+            return "Approval rejected. The operation was not run."
+        if state == "FAILED" and run.get("last_error") == "approval_expired":
+            return "Approval expired before a decision. The operation was not run."
+        return _link_task_progress_summary(store, task_id, state, task)
+
+    state = str(task.get("state") or "UNKNOWN").upper()
+    if state == "WAITING_APPROVAL":
+        return "Waiting for your approval."
+    if state == "CANCELLED":
+        return "Task cancelled."
+    if state == "FAILED":
+        return "Task failed before completion."
+    if state == "COMPLETED":
+        return "Task completed."
+    try:
+        events = store.events_after(task_id, 0, 100)
+    except Exception:
+        events = []
+    for event in reversed(events):
+        kind = event.get("event_type")
+        if kind == "approval.created":
+            return "Waiting for your approval."
+        if kind == "approval.execution_completed":
+            return "The approved action completed."
+        if kind == "approval.execution_failed":
+            return "The approved action failed. Check the Mac before retrying."
+    return {
+        "CREATED": "Queued for execution.",
+        "PLANNING": "Preparing the task.",
+        "RUNNING": "Working on the task.",
+        "VERIFYING": "Checking the result.",
+        "PAUSED": "Task paused.",
+    }.get(state, "Task status is not available.")
 
 
 def _safe_workspace_event_paths(value: Any) -> list[str]:
@@ -1269,6 +1402,7 @@ async def run_link_task(request: Request) -> JSONResponse:
         task_id=str(task_id or "")[:8],
         state=str(run.get("status") or "CREATED"),
     )
+    task_title, conversation_title = _link_task_title(store, store.get_task(str(task_id or "")) or {})
     if run.get("created") and workspace_request is not None:
         try:
             from openjarvis.tasks.workspace_bridge import WorkspaceRegistry
@@ -1296,6 +1430,8 @@ async def run_link_task(request: Request) -> JSONResponse:
             )
             response = JSONResponse({
                 "task_id": task_id,
+                "title": task_title,
+                "conversation_title": conversation_title,
                 "state": "COMPLETED",
                 "summary": result_text[:1000],
                 "result_text": bounded_result_text(result_text),
@@ -1307,6 +1443,8 @@ async def run_link_task(request: Request) -> JSONResponse:
             task = store.get_task(task_id) or {}
             response = JSONResponse(status_code=202, content={
                 "task_id": task_id,
+                "title": task_title,
+                "conversation_title": conversation_title,
                 "state": task.get("state", status),
                 "summary": "Waiting for your approval to continue." if status == "WAITING_APPROVAL" else "",
                 "idempotent_replay": True,
@@ -1323,6 +1461,8 @@ async def run_link_task(request: Request) -> JSONResponse:
                 task_runner.wake()
                 response = JSONResponse(status_code=202, content={
                     "task_id": task_id,
+                    "title": task_title,
+                    "conversation_title": conversation_title,
                     "state": "CREATED",
                     "summary": "Queued for execution.",
                     "idempotent_replay": True,
@@ -1343,6 +1483,8 @@ async def run_link_task(request: Request) -> JSONResponse:
         _perf_log(trace, "task_accepted", route_started_ns, task_id=str(task_id or "")[:8], state="CREATED", mode="async")
         response = JSONResponse(status_code=202, content={
             "task_id": task_id,
+            "title": task_title,
+            "conversation_title": conversation_title,
             "state": "CREATED",
             "summary": "Queued for execution.",
             "idempotent_replay": False,
@@ -1402,6 +1544,8 @@ async def run_link_task(request: Request) -> JSONResponse:
         _perf_log(trace, "task_waiting_approval", route_started_ns, task_id=str(task_id or "")[:8], state="WAITING_APPROVAL")
         return JSONResponse(status_code=202, content={
             "task_id": task_id,
+            "title": task_title,
+            "conversation_title": conversation_title,
             "state": "WAITING_APPROVAL",
             "summary": "Waiting for your approval to continue.",
             "idempotent_replay": False,
@@ -1410,6 +1554,8 @@ async def run_link_task(request: Request) -> JSONResponse:
         _perf_log(trace, "task_cancelled", route_started_ns, task_id=str(task_id or "")[:8], state="CANCELLED")
         return JSONResponse({
             "task_id": task_id,
+            "title": task_title,
+            "conversation_title": conversation_title,
             "state": "CANCELLED",
             "summary": "Task cancelled. The Mac will not continue this request.",
             "idempotent_replay": False,
@@ -1424,6 +1570,8 @@ async def run_link_task(request: Request) -> JSONResponse:
     _perf_log(trace, "task_response_ready", route_started_ns, task_id=str(task_id or "")[:8], state="COMPLETED")
     return JSONResponse({
         "task_id": task_id,
+        "title": task_title,
+        "conversation_title": conversation_title,
         "state": "COMPLETED",
         "summary": summary[:1000],
         "result_text": bounded_result_text(summary),
@@ -1452,7 +1600,9 @@ async def get_link_task_status(idempotency_key: str, request: Request) -> dict[s
     owner = metadata.get("owner_actor")
     if owner and actor != owner and not actor.startswith("api:"):
         raise HTTPException(status_code=403, detail="This task belongs to another paired device")
-    state = record.get("task_state") or record.get("status") or "UNKNOWN"
+    state = record.get("status") or record.get("task_state") or "UNKNOWN"
+    if state == "FAILED" and record.get("last_error") == "approval_expired":
+        state = "EXPIRED"
     result_text = str(record.get("result_text") or record.get("result_summary") or "")
     scope = str(record.get("scope") or "")
     development_task = scope == '["development"]'
@@ -1469,14 +1619,19 @@ async def get_link_task_status(idempotency_key: str, request: Request) -> dict[s
         summary = result_text
     else:
         summary = _link_task_progress_summary(store, record["task_id"], str(state), task)
-    if state == "FAILED" and record.get("last_error") == "approval_expired" and not development_task:
+    if state == "EXPIRED":
         summary = "Approval expired before a decision. No operation ran; submit a new request if you still want it."
-    if development_task and state in {"FAILED", "CANCELLED"}:
+    if state == "REJECTED":
+        summary = "Approval rejected. The operation was not run."
+    if state in {"FAILED", "CANCELLED", "REJECTED", "EXPIRED"}:
         client_result_text = bounded_result_text(summary)
     else:
         client_result_text = (record.get("result_text") or record.get("result_summary") or "") if state == "COMPLETED" else None
+    title, conversation_title = _link_task_title(store, task)
     return {
         "task_id": record["task_id"],
+        "title": title,
+        "conversation_title": conversation_title,
         "state": state,
         "summary": summary,
         "result_text": bounded_result_text(summary) if state == "COMPLETED" else client_result_text,
@@ -1514,41 +1669,14 @@ async def get_link_task_events(
         rows = store.events_after(record["task_id"], after_seq, limit)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Invalid task event cursor") from exc
-    allowed_types = {
-        "task.state", "task.recovered_paused", "task.cancelled", "task.explicit_resume",
-        "link_task.queued", "link_task.started", "link_task.waiting_approval",
-        "link_task.approval_consumed", "link_task.approval_rejected",
-        "link_task.completed", "link_task.failed", "approval.consumed",
-        "tool.mcp_approval_dispatch_claimed", "approval.created", "approval.decision",
-        "approval.expired", "approval.execution_completed", "approval.execution_failed",
-        "approval.mac_mcp_dispatched",
-        "development.tool_performance",
-    }
     safe_events = []
     for event in rows:
-        if event["event_type"] not in allowed_types:
+        if event["event_type"] not in _TASK_CLIENT_EVENT_TYPES:
             continue
-        payload = event.get("payload") or {}
-        safe_payload = {}
-        for key in (
-            "from", "to", "step", "previous_state", "state", "approval_id",
-            "operation", "decision", "error_code", "success", "executed",
-            "result_digest", "tool", "duration_ms", "remote_worker",
-        ):
-            value = payload.get(key)
-            if isinstance(value, str) and len(value) <= 80:
-                safe_payload[key] = value
-            elif key in {"success", "executed", "remote_worker"} and isinstance(value, bool):
-                safe_payload[key] = value
-            elif key == "duration_ms" and isinstance(value, (int, float)) and 0 <= value <= 600_000:
-                safe_payload[key] = value
-        safe_events.append({
-            "seq": event["seq"],
-            "event_type": event["event_type"],
-            "created_at": event["created_at"],
-            "payload": safe_payload,
-        })
+        safe_events.append(_safe_supervisor_task_event(event))
+    title, conversation_title = _link_task_title(store, task)
     return {"task_id": record["task_id"], "events": safe_events,
+            "title": title, "conversation_title": conversation_title,
             "next_seq": rows[-1]["seq"] if rows else after_seq}
 
 
@@ -2197,27 +2325,73 @@ async def cancel_link_task(idempotency_key: str, request: Request) -> dict[str, 
 
 @router.get("/tasks")
 async def list_tasks(request: Request, state: str = "active", limit: int = 100) -> dict[str, Any]:
-    authorize_supervisor_request(request)
-    rows = get_supervisor_store().recent_tasks(limit)
+    actor = authorize_supervisor_request(request)
+    store = get_supervisor_store()
+    rows = store.recent_tasks(limit, owner_actor=actor if actor.startswith("device:") else None)
     active = {"CREATED", "PLANNING", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED"}
-    if state == "active":
-        rows = [row for row in rows if row["state"] in active]
-    elif state == "completed":
-        rows = [row for row in rows if row["state"] in {"COMPLETED", "FAILED", "CANCELLED"}]
-    elif state != "all":
+    if state not in {"active", "completed", "all"}:
         raise HTTPException(status_code=422, detail="state must be active, completed, or all")
-    return {"tasks": rows}
+    safe_rows = []
+    for row in rows:
+        run = store.link_task_run(str(row.get("id") or ""))
+        run_state = str((run or {}).get("status") or row.get("state") or "UNKNOWN").upper()
+        if run_state == "FAILED" and (run or {}).get("last_error") == "approval_expired":
+            run_state = "EXPIRED"
+        if state == "active" and run_state not in active:
+            continue
+        if state == "completed" and run_state not in {"COMPLETED", "FAILED", "CANCELLED", "REJECTED", "EXPIRED"}:
+            continue
+        title, conversation_title = _link_task_title(store, row)
+        events = store.events_after(str(row["id"]), 0, 200)
+        last_event = next((item["event_type"] for item in reversed(events) if item["event_type"] in _TASK_CLIENT_EVENT_TYPES), "")
+        safe_rows.append({
+            "id": row["id"],
+            "title": title,
+            "conversation_title": conversation_title,
+            "state": run_state,
+            "current_step": row.get("current_step", ""),
+            "created_at": row.get("created_at", ""),
+            "updated_at": row.get("updated_at", ""),
+            "summary": _supervisor_task_summary(store, row)[:1000],
+            "last_event": last_event,
+        })
+    return {"tasks": safe_rows}
 
 
 @router.get("/tasks/{task_id}")
 async def get_task(task_id: str, request: Request) -> dict[str, Any]:
-    authorize_supervisor_request(request)
+    actor = authorize_supervisor_request(request)
     store = get_supervisor_store()
     task = store.get_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    task["events"] = store.events(task_id)
-    return task
+    run = store.link_task_run(task_id)
+    if actor.startswith("device:") and (run is None or run.get("owner_actor") != actor):
+        # Do not disclose that another paired device's task ID exists.
+        raise HTTPException(status_code=404, detail="Task not found")
+    title, conversation_title = _link_task_title(store, task)
+    events = [
+        _safe_supervisor_task_event(item)
+        for item in store.events_after(task_id, 0, 200)
+        if item.get("event_type") in _TASK_CLIENT_EVENT_TYPES
+    ]
+    run_state = str((run or {}).get("status") or task.get("state") or "UNKNOWN").upper()
+    if run_state == "FAILED" and (run or {}).get("last_error") == "approval_expired":
+        run_state = "EXPIRED"
+    summary = _supervisor_task_summary(store, task)
+    return {
+        "task": {
+            "id": task["id"],
+            "title": title,
+            "conversation_title": conversation_title,
+            "state": run_state,
+            "current_step": task.get("current_step", ""),
+            "created_at": task.get("created_at", ""),
+            "updated_at": task.get("updated_at", ""),
+            "summary": summary[:1000],
+        },
+        "events": events,
+    }
 
 
 @router.get("/tasks/{task_id}/artifacts")

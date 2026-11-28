@@ -77,7 +77,10 @@ class TaskLifecycleInstrumentedTest {
         preferences.edit().clear().commit()
         val store = SecureStore(context)
         val deviceId = "12345678".repeat(4)
-        LinkSettings(context).mode = LinkMode.TEST_RELAY // Avoid the debug-only USB reachability probe.
+        // This mock server is bound to the device's own loopback socket. Use the explicit
+        // debug-only Local USB mode so the authenticated cleartext request is allowed only
+        // for the reachable test socket; TEST_RELAY must remain fail-closed for loopback.
+        LinkSettings(context).mode = LinkMode.LOCAL_USB
         val requestId = "cancel-request-123456"
         val server = OneRequestAtATimeServer(
             actions = listOf(
@@ -159,10 +162,17 @@ class TaskLifecycleInstrumentedTest {
         private val stopped = CountDownLatch(1)
         private val worker = thread(name = "thozha-instrumented-http", isDaemon = true) {
             try {
-                actions.forEach { action ->
+                var actionIndex = 0
+                while (actionIndex < actions.size) {
+                    val action = actions[actionIndex]
                     socket.accept().use { client ->
                         client.soTimeout = 4_000
                         val request = readRequest(client.getInputStream())
+                        // LOCAL_USB performs an explicit loopback reachability probe before
+                        // sending its authenticated request. That probe closes without HTTP
+                        // headers; ignore it and keep the same scripted response.
+                        if (request == null) return@use
+                        actionIndex++
                         capturedRequests += request
                         when (action) {
                             ServerAction.CloseWithoutResponse -> Unit
@@ -198,12 +208,15 @@ class TaskLifecycleInstrumentedTest {
             assertTrue("test HTTP server should stop", stopped.await(5, TimeUnit.SECONDS))
         }
 
-        private fun readRequest(input: java.io.InputStream): CapturedRequest {
+        private fun readRequest(input: java.io.InputStream): CapturedRequest? {
             val bytes = ByteArrayOutputStream()
             val ending = byteArrayOf(13, 10, 13, 10)
             while (bytes.size() < 32_768) {
                 val next = input.read()
-                if (next < 0) throw AssertionError("HTTP request ended before headers")
+                if (next < 0) {
+                    if (bytes.size() == 0) return null
+                    throw AssertionError("HTTP request ended before headers")
+                }
                 bytes.write(next)
                 val header = bytes.toByteArray()
                 if (header.size >= ending.size && ending.indices.all { header[header.size - ending.size + it] == ending[it] }) break

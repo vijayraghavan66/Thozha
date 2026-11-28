@@ -11,8 +11,12 @@ object LocalGatewayRoutingChecks {
 
         val endpoint = LocalGatewayEndpoint("thozha-mac.local", 8443, InetAddress.getByName("192.168.1.8"))
         check(endpoint.httpsBaseUrl() == "https://192.168.1.8:8443", "Wi-Fi must connect to the DNS-SD resolved private IP")
-        check(selectLocalGatewayEndpoint(loopbackReachable = true, cachedOrDiscovered = endpoint) == null, "Reachable USB loopback must keep priority over cached Wi-Fi")
+        check(selectLocalGatewayEndpoint(loopbackReachable = true, cachedOrDiscovered = endpoint, allowCleartextLoopback = true) == null, "Explicit debug USB loopback must keep priority over cached Wi-Fi")
+        check(selectLocalGatewayEndpoint(loopbackReachable = true, cachedOrDiscovered = endpoint) == endpoint, "An untrusted listener on localhost must not override pinned HTTPS")
         check(selectLocalGatewayEndpoint(loopbackReachable = false, cachedOrDiscovered = endpoint) == endpoint, "Pinned Wi-Fi endpoint should be used when USB is unavailable")
+        check(shouldFailClosedLoopbackBearer(true, true, false, false), "A reachable but unpinned localhost listener must not receive a bearer token")
+        check(!shouldFailClosedLoopbackBearer(true, true, false, true), "A pinned HTTPS endpoint can carry the paired bearer")
+        check(!shouldFailClosedLoopbackBearer(true, true, true, false), "Explicit debug Local USB may use its ADB-reversed loopback endpoint")
         val savedWifiBase = "https://thozha-mac.local:8443"
         check(
             selectCompanionApiBaseUrl(savedWifiBase, true, true, true, true) == USB_REVERSE_API_BASE_URL,

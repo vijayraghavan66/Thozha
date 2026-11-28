@@ -6,6 +6,7 @@ from openjarvis.mcp.server import MCPServer
 from openjarvis.mcp.transport import (
     InProcessTransport,
     MCPTransport,
+    MCPRateLimitError,
     SSETransport,
     StdioTransport,
     StreamableHTTPTransport,
@@ -19,6 +20,7 @@ __all__ = [
     "MCPResponse",
     "MCPServer",
     "MCPTransport",
+    "MCPRateLimitError",
     "InProcessTransport",
     "SSETransport",
     "StdioTransport",

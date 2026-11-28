@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import com.jarvis.companion.presentation.MacLinkPresentation
 import com.jarvis.companion.presentation.TimelinePresentation
 import com.jarvis.companion.presentation.TaskTone
+import com.jarvis.companion.link.OwnerNamePolicy
 
 @Composable
 fun HomeOverviewScreen(
@@ -73,13 +74,15 @@ fun HomeOverviewScreen(
             Column(Modifier.weight(1f)) {
                 BasicText("THOZHA  ·  தோழா", style = JarvisType.Label.copy(color = JarvisColor.Sage, letterSpacing = 1.sp))
                 Spacer(Modifier.height(5.dp))
-                BasicText("Hello, ${store.assistantName}", style = JarvisType.Title.copy(color = JarvisColor.Text))
+                BasicText(OwnerNamePolicy.greeting(store.ownerName), style = JarvisType.Title.copy(color = JarvisColor.Text))
             }
             IconAction(JarvisIcons.Settings, "Settings", onClick = onOpenSettings)
         }
 
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            // Leave space for the fixed header above. fillMaxSize() measured at the parent's
+            // maximum height and could place the connectivity card under the header.
+            modifier = Modifier.weight(1f).fillMaxWidth(),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = JarvisSpace.Page, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {

@@ -125,12 +125,14 @@ object LinkAlerts {
                 "RUNNING" -> "Task in progress"
                 "COMPLETED" -> "Task completed"
                 "FAILED" -> "Task failed"
+                "REJECTED" -> "Task rejected"
                 else -> "Task cancelled"
             }
             val text = when (event.state) {
                 "RUNNING" -> "Jarvis received a new task update. Open Tasks for details."
                 "COMPLETED" -> "A task finished. Open Tasks to review the verified result."
                 "FAILED" -> "A task failed. Open Tasks to review the recorded error."
+                "REJECTED" -> "A requested operation was rejected. Open Tasks to review its status."
                 else -> "A task was cancelled. Open Tasks to review its status."
             }
             val builder = Notification.Builder(context, CHANNEL_UPDATES)

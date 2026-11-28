@@ -155,6 +155,7 @@ fun toneColor(tone: TaskTone): Color = when (tone) {
     TaskTone.WAITING -> JarvisColor.Waiting
     TaskTone.FAILED -> JarvisColor.Failed
     TaskTone.CANCELLED -> JarvisColor.TextMuted
+    TaskTone.REJECTED -> JarvisColor.Waiting
     TaskTone.RUNNING -> JarvisColor.Running
     TaskTone.UNKNOWN -> JarvisColor.TextMuted
 }

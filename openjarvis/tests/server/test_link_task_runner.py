@@ -5,6 +5,7 @@ import hashlib
 import json
 import uuid
 import asyncio
+import sqlite3
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -21,7 +22,7 @@ from openjarvis.server.supervisor_routes import (
     _link_result_for_client,
     router,
 )
-from openjarvis.tasks.supervisor import SupervisorStore, bind_task, current_task_context
+from openjarvis.tasks.supervisor import SupervisorStore, bind_task, current_task_context, link_task_title
 from openjarvis.server.link_task_runner import LinkTaskExecutionRunner
 from openjarvis.tools._stubs import BaseTool, ToolExecutor, ToolSpec
 
@@ -120,6 +121,8 @@ def test_link_runner_executes_codex_agent_once_and_returns_persisted_digest(link
     assert response.status_code == 200, response.json()
     result = response.json()
     assert result["state"] == "COMPLETED"
+    assert result["title"] == "Summarize read-only"
+    assert result["conversation_title"] == "Summarize read-only"
     assert result["summary"] == "Safe summary: Summarize this read-only task"
     assert len(result["result_digest"]) == 64
     assert result["idempotent_replay"] is False
@@ -143,11 +146,166 @@ def test_link_runner_executes_codex_agent_once_and_returns_persisted_digest(link
     assert status.status_code == 200
     assert status.json() == {
         "task_id": result["task_id"],
+        "title": "Summarize read-only",
+        "conversation_title": "Summarize read-only",
         "state": "COMPLETED",
         "summary": result["summary"],
         "result_text": "Safe summary: Summarize this read-only task",
         "result_digest": result["result_digest"],
     }
+
+
+def test_link_task_title_is_specific_bounded_and_does_not_retain_paths_or_secrets():
+    title = link_task_title(
+        "/task Build a calculator project. Implement integer multiplication if missing, "
+        "update /Users/private/project/README.md and tests, password=very-secret-value."
+    )
+    assert title == "Implement integer multiplication"
+    assert "/Users" not in title
+    assert "very-secret-value" not in title
+    assert len(link_task_title("x" * 400)) <= 72
+
+
+def test_link_task_title_migration_backfills_existing_tasks_and_conversations(tmp_path):
+    db_path = tmp_path / "link-title-migration.db"
+    store = SupervisorStore(str(db_path))
+    run = store.create_link_task(
+        "Implement integer multiplication and add focused calculator tests",
+        capability_scope=["assistant"],
+        idempotency_key="link-title-migration-0001",
+        owner_actor="device:" + "a" * 32,
+        conversation_id="b" * 32,
+    )
+    expected_title = run["title"]
+    store.close()
+    legacy = sqlite3.connect(db_path)
+    legacy.execute("ALTER TABLE link_task_runs DROP COLUMN title")
+    legacy.execute("DROP TABLE link_conversations")
+    legacy.commit()
+    legacy.close()
+
+    migrated = SupervisorStore(str(db_path))
+    try:
+        assert migrated.link_task_run(run["task_id"])["title"] == expected_title
+        row = migrated._db.execute(
+            "SELECT title FROM link_conversations WHERE owner_actor=? AND conversation_id=?",
+            ("device:" + "a" * 32, "b" * 32),
+        ).fetchone()
+        assert row["title"] == expected_title
+    finally:
+        migrated.close()
+
+
+def test_assistant_scope_chat_needs_no_vm_workspace_and_keeps_conversation_title(link_client, monkeypatch):
+    client, store, agent = link_client
+    monkeypatch.delenv("JARVIS_DEV_WORKSPACE", raising=False)
+    monkeypatch.delenv("JARVIS_DEV_WORKSPACE_PATHS", raising=False)
+    headers = {"Authorization": "Bearer link-test-admin-key"}
+    conversation_id = "c" * 32
+    first = client.post("/v1/jarvis/link/tasks", headers=headers, json={
+        "objective": "Check the Mac system version",
+        "capability_scope": ["assistant"],
+        "idempotency_key": "assistant-chat-version-001",
+        "requester_device_id": "a" * 32,
+        "conversation_id": conversation_id,
+    })
+    assert first.status_code == 200, first.json()
+    assert first.json()["title"] == "Check Mac system version"
+    assert first.json()["conversation_title"] == "Check Mac system version"
+    assert "workspace_id" not in first.json()
+    first_run = store.link_task_run(first.json()["task_id"])
+    assert first_run["scope"] == '["assistant"]'
+    assert store.events(first.json()["task_id"])
+    assert not any(event["event_type"].startswith("workspace.") for event in store.events(first.json()["task_id"]))
+
+    second = client.post("/v1/jarvis/link/tasks", headers=headers, json={
+        "objective": "Explain that Mac version",
+        "capability_scope": ["assistant"],
+        "idempotency_key": "assistant-chat-followup-01",
+        "requester_device_id": "a" * 32,
+        "conversation_id": conversation_id,
+    })
+    assert second.status_code == 200, second.json()
+    assert second.json()["title"] == "Explain Mac version"
+    assert second.json()["conversation_title"] == first.json()["conversation_title"]
+    history = store.link_conversation_context(second.json()["task_id"], "And can you explain it simply?")
+    assert [message["role"] for message in history] == ["user", "assistant", "user"]
+    assert history[0]["content"] == "Check the Mac system version"
+    assert len(agent.calls) == 2
+
+
+def test_task_list_returns_owner_scoped_human_projection_not_supervisor_metadata(link_client):
+    client, store, _ = link_client
+    token_a, token_b = "ojd_task_list_owner_a", "ojd_task_list_owner_b"
+    device_a, device_b = "d" * 32, "e" * 32
+    now = "2099-01-01T00:00:00+00:00"
+    for device_id, token in ((device_a, token_a), (device_b, token_b)):
+        store._db.execute(
+            "INSERT INTO paired_devices(id,public_key_b64,token_hash,created_at,expires_at,device_name) VALUES(?,?,?,?,?,?)",
+            (device_id, "test-public-key", hashlib.sha256(token.encode()).hexdigest(), now, "2099-02-01T00:00:00+00:00", "test device"),
+        )
+    store._db.commit()
+    created = client.post("/v1/jarvis/link/tasks", headers={"Authorization": "Bearer " + token_a}, json={
+        "objective": "Explain Mac uptime",
+        "capability_scope": ["assistant"],
+        "idempotency_key": "owner-task-list-entry-01",
+        "requester_device_id": device_a,
+    })
+    assert created.status_code == 200, created.json()
+    listed = client.get("/v1/jarvis/tasks?state=completed", headers={"Authorization": "Bearer " + token_a})
+    assert listed.status_code == 200
+    row = next(item for item in listed.json()["tasks"] if item["id"] == created.json()["task_id"])
+    assert row["title"] == "Explain Mac uptime"
+    assert row["summary"] == "Safe summary: Explain Mac uptime"
+    assert "recovery_json" not in row and "capabilities_json" not in row and "request_digest" not in row
+    assert client.get("/v1/jarvis/tasks?state=all", headers={"Authorization": "Bearer " + token_b}).json()["tasks"] == []
+    detail = client.get(f"/v1/jarvis/tasks/{created.json()['task_id']}", headers={"Authorization": "Bearer " + token_b})
+    assert detail.status_code == 404
+    own_detail = client.get(f"/v1/jarvis/tasks/{created.json()['task_id']}", headers={"Authorization": "Bearer " + token_a})
+    assert own_detail.status_code == 200
+    assert own_detail.json()["task"]["summary"] == "Safe summary: Explain Mac uptime"
+    assert "recovery_json" not in own_detail.json()["task"]
+
+
+def test_link_event_feed_streams_bounded_execution_evidence_without_host_paths(link_client):
+    client, store, _ = link_client
+    owner = "device:" + "f" * 32
+    body = {
+        "objective": "Build a calculator project",
+        "capability_scope": ["development"],
+        "idempotency_key": "progress-evidence-feed-01",
+        "requester_device_id": "f" * 32,
+    }
+    run = store.create_link_task(
+        body["objective"], capability_scope=body["capability_scope"],
+        idempotency_key=body["idempotency_key"], owner_actor=owner,
+    )
+    assert run["title"] == "Build calculator"
+    store.transition(run["task_id"], "RUNNING", expected="CREATED", step="codex_link")
+    store.record_event(run["task_id"], "development.operation_started", {"operation": "run_tests"})
+    store.record_event(run["task_id"], "development.tests_completed", {
+        "tests_ran": 4, "failures": 0, "errors": 0, "passed": True, "timed_out": False,
+    })
+    store.record_event(run["task_id"], "development.file_written", {
+        "path": "src/calculator.py",
+        "plan_target": "/Users/private/project/src/calculator.py",
+        "sha256": "a" * 64,
+    })
+    response = client.get(
+        f"/v1/jarvis/link/tasks/{body['idempotency_key']}/events?after_seq=0",
+        headers={"Authorization": "Bearer link-test-admin-key"},
+    )
+    assert response.status_code == 200
+    events = response.json()["events"]
+    assert {event["event_type"] for event in events} >= {
+        "development.operation_started", "development.tests_completed", "development.file_written",
+    }
+    tests = next(event for event in events if event["event_type"] == "development.tests_completed")["payload"]
+    assert tests == {"tests_ran": 4, "failures": 0, "errors": 0, "passed": True, "timed_out": False}
+    file_event = next(event for event in events if event["event_type"] == "development.file_written")["payload"]
+    assert file_event["path"] == "src/calculator.py"
+    assert "plan_target" not in file_event
+    assert "/Users/private" not in json.dumps(response.json())
 
 
 def test_development_result_summary_uses_supervisor_evidence_and_omits_host_paths():
@@ -1826,7 +1984,7 @@ def test_old_expired_link_approval_is_reconciled_to_terminal_on_status_read(link
 
     status = client.get(f"/v1/jarvis/link/tasks/{idempotency_key}", headers=headers)
     assert status.status_code == 200
-    assert status.json()["state"] == "FAILED"
+    assert status.json()["state"] == "EXPIRED"
     assert "Approval expired" in status.json()["summary"]
     assert store.get_task(task_id)["current_step"] == "approval_expired"
     assert store.link_task_run(task_id)["status"] == "FAILED"

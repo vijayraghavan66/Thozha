@@ -64,7 +64,16 @@ internal fun endpointFromSignedAddress(pin: LocalGatewayPin): LocalGatewayEndpoi
 internal fun selectLocalGatewayEndpoint(
     loopbackReachable: Boolean,
     cachedOrDiscovered: LocalGatewayEndpoint?,
-): LocalGatewayEndpoint? = if (loopbackReachable) null else cachedOrDiscovered
+    allowCleartextLoopback: Boolean = false,
+): LocalGatewayEndpoint? = if (loopbackReachable && allowCleartextLoopback) null else cachedOrDiscovered
+
+/** A listening loopback port is not proof that it belongs to this Mac. */
+internal fun shouldFailClosedLoopbackBearer(
+    baseIsLoopback: Boolean,
+    bearerPresent: Boolean,
+    explicitDebugUsb: Boolean,
+    pinnedHttpsEndpointAvailable: Boolean,
+): Boolean = baseIsLoopback && bearerPresent && !explicitDebugUsb && !pinnedHttpsEndpointAvailable
 
 /** Discovers only the previously paired Mac's pinned DNS-SD identity. */
 object LocalGatewayDiscovery {

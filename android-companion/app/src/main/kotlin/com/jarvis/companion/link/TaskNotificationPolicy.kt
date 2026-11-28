@@ -2,7 +2,7 @@ package com.jarvis.companion.link
 
 /** Pure notification gate: only real persisted lifecycle events qualify, keyed for deduplication. */
 object TaskNotificationPolicy {
-    private val notifyStates = setOf("RUNNING", "FAILED", "COMPLETED", "CANCELLED")
+    private val notifyStates = setOf("RUNNING", "FAILED", "COMPLETED", "CANCELLED", "REJECTED")
     const val MAX_TRACKED_EVENTS = 500
     const val MAX_NOTIFICATIONS_PER_REFRESH = 8
 

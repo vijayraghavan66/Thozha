@@ -77,6 +77,7 @@ object TimelinePresentation {
             TimelineSection("In progress", byTone[TaskTone.RUNNING].orEmpty()),
             TimelineSection("Completed", byTone[TaskTone.COMPLETED].orEmpty()),
             TimelineSection("Failed", byTone[TaskTone.FAILED].orEmpty()),
+            TimelineSection("Rejected", byTone[TaskTone.REJECTED].orEmpty()),
             TimelineSection("Cancelled", byTone[TaskTone.CANCELLED].orEmpty()),
             TimelineSection("Status unknown", byTone[TaskTone.UNKNOWN].orEmpty()),
         ).filter { it.rows.isNotEmpty() }
@@ -87,7 +88,7 @@ object TimelinePresentation {
         val taskId = (record["task_id"] as? String).orEmpty()
         val state = (record["state"] as? String)?.trim()?.uppercase()
         val tone = TaskStates.toneFor(state)
-        val request = (record["text"] as? String).orEmpty().trim()
+        val request = ((record["title"] as? String).orEmpty().ifBlank { record["text"] as? String ?: "" }).trim()
         val summary = (record["summary"] as? String).orEmpty().trim()
         val updated = (record["updated_at_unix_ms"] as? Number)?.toLong() ?: (record["created_at_unix_ms"] as? Number)?.toLong()
         val canCancel = state != null && state in cancellableStates
@@ -124,6 +125,7 @@ fun supervisorTaskSnapshotRecords(
             put("message_id", "mac-supervisor:${task.id}")
             put("task_id", task.id)
             put("text", task.title.ifBlank { "Task ${task.id.take(8)}" })
+            put("title", task.title.ifBlank { "Task ${task.id.take(8)}" })
             put("state", task.state)
             put("transport", "mac_snapshot")
             put("created_at_unix_ms", updatedAt)

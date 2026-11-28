@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import threading
 from typing import Any, Dict, List
 
@@ -116,6 +117,31 @@ class MCPClient:
             )
             for t in tools
         ]
+
+    def list_tool_descriptors(self) -> List[Dict[str, Any]]:
+        """Return bounded MCP tool descriptors, including safety annotations.
+
+        This is intended for an adapter to classify tools before exposing them
+        to an agent. It does not execute any tool and returns a JSON copy so a
+        caller cannot mutate cached/transport-owned protocol data.
+        """
+        response = self._send("tools/list")
+        raw_tools = response.result.get("tools", []) if isinstance(response.result, dict) else []
+        if not isinstance(raw_tools, list) or len(raw_tools) > 500:
+            raise ValueError("MCP server returned an invalid tool list")
+        descriptors: List[Dict[str, Any]] = []
+        for tool in raw_tools:
+            if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+                continue
+            try:
+                encoded = json.dumps(tool, allow_nan=False)
+                if len(encoded.encode("utf-8")) > 64_000:
+                    continue
+                descriptor = json.loads(encoded)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            descriptors.append(descriptor)
+        return descriptors
 
     def call_tool(
         self,

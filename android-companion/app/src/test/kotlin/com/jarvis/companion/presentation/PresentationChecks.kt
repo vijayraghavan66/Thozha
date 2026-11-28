@@ -61,12 +61,14 @@ fun main() {
     // --- states -----------------------------------------------------------------------------------------------
     check(TaskStates.toneFor("completed") == TaskTone.COMPLETED, "state names are case-insensitive")
     check(TaskStates.toneFor("WAITING_APPROVAL") == TaskTone.WAITING, "approval wait is WAITING")
+    check(TaskStates.toneFor("REJECTED") == TaskTone.REJECTED, "rejection has a distinct terminal state")
     check(TaskStates.toneFor("REFUSED") == TaskTone.FAILED, "refused counts as failed")
     check(TaskStates.toneFor("SOMETHING_NEW") == TaskTone.UNKNOWN && TaskStates.toneFor(null) == TaskTone.UNKNOWN, "unknown states are never success")
     check(TaskStates.label(TaskTone.UNKNOWN) == "Status unknown", "unknown label is honest")
     check(TaskStates.statusLabel("CREATED") == "Created" && TaskStates.statusLabel("QUEUED") == "Queued", "created and queued remain distinct")
     check(TaskStates.statusLabel("WAITING_CONNECTION") == "Waiting for connection", "connection wait is not mislabeled as approval")
     check(TaskStates.statusLabel("WAITING_APPROVAL") == "Waiting for approval", "approval wait remains distinct")
+    check(TaskStates.statusLabel("REJECTED") == "Rejected", "rejected work is not called failed")
 
     // --- conversation: no fabricated answers ----------------------------------------------------------------------
     val items = ConversationPresentation.items(listOf(
@@ -77,6 +79,7 @@ fun main() {
         record("m5", "FAILED", text = "Broken"),
         record("m6", "CANCELLED", text = "Stopped"),
         record("m7", "WAITING_APPROVAL", text = "Needs approval"),
+        record("m9", "REJECTED", text = "Rejected feature", summary = "Approval rejected; operation was not run."),
         record("m8", "SOMETHING_ODD", text = "Odd, no summary"),
         record("m1", "COMPLETED", text = "Explain Java.", summary = "Duplicate must not appear"),
         record("", "COMPLETED", text = "No id, skipped"),
@@ -90,6 +93,7 @@ fun main() {
     check(byId["m5:jarvis"]?.text == "This request failed. No answer was returned.", "failure is explicit")
     check(byId["m6:jarvis"]?.text == "Cancelled. Jarvis will not continue this request.", "cancellation is explicit")
     check(byId["m7:jarvis"]?.isProgress == true, "approval wait is progress, not success")
+    check(byId["m9:jarvis"]?.tone == TaskTone.REJECTED && byId["m9:jarvis"]?.text == "Approval rejected; operation was not run.", "rejection remains distinct from execution failure")
     check(byId["m8:jarvis"] == null, "unknown state without a summary shows no bubble")
     check(items.count { it.id == "m1:jarvis" } == 1 && items.count { it.id == "m1:user" } == 1, "duplicate message ids are shown once")
     check(items.none { it.text.contains("Duplicate") }, "the duplicate's content is discarded")
@@ -103,16 +107,18 @@ fun main() {
         mapOf("message_id" to "c", "text" to "Approve me", "state" to "WAITING_APPROVAL", "updated_at_unix_ms" to 7L),
         mapOf("message_id" to "d", "text" to "Cancelled", "state" to "CANCELLED", "updated_at_unix_ms" to 8L),
         mapOf("message_id" to "e", "text" to "Failed", "state" to "FAILED", "updated_at_unix_ms" to 9L),
+        mapOf("message_id" to "g", "text" to "Rejected", "state" to "REJECTED", "updated_at_unix_ms" to 10L),
         mapOf("message_id" to "a", "text" to "Duplicate", "state" to "COMPLETED", "updated_at_unix_ms" to 10L),
         mapOf("text" to "No message id"),
         mapOf("message_id" to "f", "text" to "Sent only", "state" to "SENT", "updated_at_unix_ms" to 11L),
     ), fmt)
-    check(sections.map { it.title } == listOf("Needs you", "In progress", "Completed", "Failed", "Cancelled"), "sections appear in a fixed order and empties are omitted")
+    check(sections.map { it.title } == listOf("Needs you", "In progress", "Completed", "Failed", "Rejected", "Cancelled"), "sections separate rejection from failure")
     val rows = sections.flatMap { it.rows }.associateBy { it.requestId }
     check(rows.getValue("b").canCancel && rows.getValue("c").canCancel, "active and waiting tasks offer cancellation")
-    check(!rows.getValue("a").canCancel && !rows.getValue("d").canCancel && !rows.getValue("e").canCancel, "finished tasks do not offer cancellation")
+    check(!rows.getValue("a").canCancel && !rows.getValue("d").canCancel && !rows.getValue("e").canCancel && !rows.getValue("g").canCancel, "finished tasks do not offer cancellation")
+    check(rows.getValue("g").tone == TaskTone.REJECTED && rows.getValue("g").statusLabel == "Rejected", "rejected timeline row stays distinguishable")
     check(rows.getValue("f").tone == TaskTone.RUNNING && !rows.getValue("f").canCancel, "sent-only requests are shown but not cancellable (matches the existing cancel rule)")
-    check(sections.flatMap { it.rows }.size == 6, "duplicate and id-less records are dropped")
+    check(sections.flatMap { it.rows }.size == 7, "duplicate and id-less records are dropped")
     check(rows.getValue("b").requestId == "b", "rows carry the request id the cancel path uses")
     check(rows.getValue("a").capabilityScope == "development" && rows.getValue("b").capabilityScope.isBlank(), "artifact action scope comes only from the locally recorded task scope")
     check(rows.getValue("b").transport == "api" && rows.getValue("c").transport.isBlank(), "Mac cancellation action is limited to API-owned requests")

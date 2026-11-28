@@ -1,6 +1,7 @@
 package com.jarvis.companion.presentation
 
 import com.jarvis.companion.link.AssistantNamePolicy
+import com.jarvis.companion.link.OwnerNamePolicy
 
 /** Run with ./gradlew :app:verifyLocalWifiPresentation. */
 object LocalWifiPresentationChecks {
@@ -37,6 +38,12 @@ object LocalWifiPresentationChecks {
         check(AssistantNamePolicy.normalize("a".repeat(25)) == null)
         check(AssistantNamePolicy.normalize("a\u0000b") == null)
         check(AssistantNamePolicy.normalize("கவி") == "கவி")
+        check(OwnerNamePolicy.normalize("  Vijay  ") == "Vijay")
+        check(OwnerNamePolicy.normalize("") == "")
+        check(OwnerNamePolicy.normalize("n".repeat(33)) == null)
+        check(OwnerNamePolicy.normalize("A\u0000B") == null)
+        check(OwnerNamePolicy.greeting("Maya") == "Hello, Maya")
+        check(OwnerNamePolicy.greeting("") == "Hello there")
         println("Local Wi-Fi and assistant-name presentation checks passed.")
     }
 }

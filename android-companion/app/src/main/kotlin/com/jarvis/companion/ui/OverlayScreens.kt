@@ -59,6 +59,7 @@ import com.jarvis.companion.presentation.ConnectionRoutePresentation
 import com.jarvis.companion.link.LinkAlerts
 import com.jarvis.companion.link.LinkSettings
 import com.jarvis.companion.link.AssistantNamePolicy
+import com.jarvis.companion.link.OwnerNamePolicy
 import com.jarvis.companion.telegram.TelegramActivity
 
 /** Settings: real connection diagnostics, a real sync action, real preferences, and the existing setup screens. */
@@ -114,7 +115,10 @@ fun SettingsScreen(
                 ) { store.syncNow(forcePermanentTelegramRetry = true) }
             }
 
-            item { SectionLabel("Your assistant") }
+            item { SectionLabel("Your name") }
+            item { OwnerNameCard(store) }
+
+            item { SectionLabel("Assistant") }
             item {
                 AssistantNameCard(store)
             }
@@ -330,6 +334,44 @@ private fun AssistantNameCard(store: JarvisStore) {
             modifier = Modifier.fillMaxWidth(),
         ) {
             normalized?.let { if (store.updateAssistantName(it)) store.notice = "Assistant name saved." }
+        }
+    }
+}
+
+@Composable
+private fun OwnerNameCard(store: JarvisStore) {
+    var draft by remember(store.ownerName) { mutableStateOf(store.ownerName) }
+    val normalized = OwnerNamePolicy.normalize(draft)
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SurfaceCard {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                BasicText("What should we call you?", style = JarvisType.Section.copy(color = JarvisColor.Text))
+                BasicText("This name appears in your Home greeting and stays on this phone.", style = JarvisType.Caption.copy(color = JarvisColor.TextMuted))
+                BasicTextField(
+                    value = draft,
+                    onValueChange = { draft = it.take(96) },
+                    singleLine = true,
+                    textStyle = JarvisType.Body.copy(color = JarvisColor.Text),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    decorationBox = { inner ->
+                        Box(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+                            if (draft.isEmpty()) BasicText("Your name (optional)", style = JarvisType.Body.copy(color = JarvisColor.TextMuted))
+                            inner()
+                        }
+                    },
+                )
+                if (normalized == null) {
+                    BasicText("Use up to 32 characters without control characters.", style = JarvisType.Caption.copy(color = JarvisColor.Waiting))
+                }
+            }
+        }
+        TextAction(
+            label = "Save personal name",
+            filled = true,
+            enabled = normalized != null && normalized != store.ownerName,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            normalized?.let { if (store.updateOwnerName(it)) store.notice = "Personal name saved." }
         }
     }
 }
